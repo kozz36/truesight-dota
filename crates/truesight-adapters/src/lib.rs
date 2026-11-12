@@ -1,5 +1,6 @@
 pub mod gsi;
 pub mod meta_repo;
+pub mod snapshot_data;
 
 #[cfg(test)]
 mod tests {
@@ -56,6 +57,14 @@ mod tests {
 
         let recs = recommend_heroes(&draft, &matrix, &ModelWeights::default(), 3);
         assert_eq!(recs[0].hero_id, HeroId(1), "Anti-Mage must rank #1 vs Medusa + Storm");
+        assert_eq!(
+            matrix.heroes().count(),
+            127,
+            "All 127 official OpenDota heroes must be loaded"
+        );
+        // Player 127255741 top hero Tiny (id=19) should carry personal comfort history (69 games)
+        let tiny = matrix.hero(HeroId(19)).expect("Tiny present");
+        assert_eq!(tiny.personal_matches, 69);
     }
 
     #[test]
