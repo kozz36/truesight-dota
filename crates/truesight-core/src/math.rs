@@ -334,21 +334,27 @@ pub fn evaluate_draft_5v5(
     }
 }
 
-/// Evaluates all available heroes for the first empty allied slot (or `draft.target_role`)
-/// and returns them sorted by highest projected match win probability.
+/// Evaluates all available heroes for the target slot (`draft.target_role.index()`)
+/// against the draft *without* that slot's current occupant, so `Draft Gain` always
+/// reflects the true probabilistic contribution of picking that hero in that slot.
 pub fn recommend_heroes(
     draft: &DraftState,
     matrix: &MatchupMatrix,
     weights: &ModelWeights,
     top_k: usize,
 ) -> Vec<HeroRecommendation> {
-    let baseline = evaluate_draft_5v5(draft, matrix, weights);
+    let role = draft.target_role;
     let target_slot = draft
         .allies
         .iter()
         .position(Option::is_none)
-        .unwrap_or(draft.target_role.index());
-    let role = draft.target_role;
+        .unwrap_or_else(|| role.index());
+
+    // Baseline is the draft with `target_slot` vacant so replacing an already-filled
+    // slot still compares against the 4 remaining allies + 5 enemies.
+    let mut base_draft = *draft;
+    base_draft.allies[target_slot] = None;
+    let baseline = evaluate_draft_5v5(&base_draft, matrix, weights);
 
     let mut recommendations = Vec::new();
 

@@ -1,15 +1,15 @@
 use crate::AppSession;
 use eframe::egui::{self, Color32, RichText};
 use truesight_adapters::gsi::BoundedGsiListener;
-use truesight_core::domain::{Bracket, DraftPick, Role, Side, TEAM_SIZE};
+use truesight_core::domain::{Bracket, DraftPick, HeroId, Role, TEAM_SIZE};
 use truesight_core::ports::DraftEventSource;
 
 pub struct TrueSightGuiApp {
     session: AppSession,
     gsi_listener: Option<BoundedGsiListener>,
-    search_query: String,
-    selected_side: Side,
-    selected_slot: usize,
+    ally_search: [String; TEAM_SIZE],
+    enemy_search: [String; TEAM_SIZE],
+    suggest_filter: String,
     status_banner: String,
 }
 
@@ -18,12 +18,35 @@ impl TrueSightGuiApp {
         Self {
             session,
             gsi_listener,
-            search_query: String::new(),
-            selected_side: Side::Allies,
-            selected_slot: 0,
-            status_banner: "Select an Ally/Enemy slot and click a hero or type in Quick Search."
-                .into(),
+            ally_search: Default::default(),
+            enemy_search: Default::default(),
+            suggest_filter: String::new(),
+            status_banner:
+                "Click any Ally (A1..A5) or Enemy (E1..E5) dropdown to pick from all 127 heroes independently."
+                    .into(),
         }
+    }
+
+    fn all_heroes_sorted(&self) -> Vec<(HeroId, String)> {
+        let mut list: Vec<(HeroId, String)> = self
+            .session
+            .matrix
+            .heroes()
+            .map(|h| (h.id, h.display_name.clone()))
+            .collect();
+        list.sort_by(|a, b| a.1.cmp(&b.1));
+        list
+    }
+}
+
+#[inline]
+fn delta_color(pct: f32, green: Color32, red: Color32, neutral: Color32) -> Color32 {
+    if pct > 0.05 {
+        green
+    } else if pct < -0.05 {
+        red
+    } else {
+        neutral
     }
 }
 
@@ -37,12 +60,18 @@ impl eframe::App for TrueSightGuiApp {
             }
         }
 
-        let (analysis, recs) = self.session.evaluate();
+        let (analysis, _top_recs) = self.session.evaluate();
+        let all_heroes = self.all_heroes_sorted();
+
         let green = Color32::from_rgb(46, 204, 113);
         let red = Color32::from_rgb(231, 76, 60);
         let gold = Color32::from_rgb(241, 196, 15);
+        let cyan = Color32::from_rgb(52, 152, 219);
         let dim = Color32::from_rgb(149, 165, 166);
 
+        // =========================================================================
+        // 1. TOP HEADER PANEL: Win Probability Thermometer + Global Controls
+        // =========================================================================
         egui::TopBottomPanel::top("header_panel").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading(RichText::new("TRUESIGHT-DOTA · 5v5 LIVE DRAFT ORACLE").strong());
@@ -55,22 +84,24 @@ impl eframe::App for TrueSightGuiApp {
                     }
                     if ui.button("Load Demo 5v5").clicked() {
                         self.session.draft.clear();
+                        let _ = crate::execute_command(&mut self.session, "ally 1 faceless void");
                         let _ = crate::execute_command(&mut self.session, "ally 3 magnus");
                         let _ = crate::execute_command(&mut self.session, "ally 5 crystal maiden");
                         let _ = crate::execute_command(&mut self.session, "enemy 1 medusa");
                         let _ = crate::execute_command(&mut self.session, "enemy 2 storm spirit");
                         let _ = crate::execute_command(&mut self.session, "enemy 3 axe");
-                        self.status_banner = "Loaded demo 5v5 state.".into();
+                        self.status_banner =
+                            "Loaded Demo 5v5 (Faceless Void + Magnus + CM vs Medusa + Storm + Axe)."
+                                .into();
                     }
                 });
             });
 
             ui.separator();
 
-            // Win Probability Thermometer
             let ally_pct = analysis.ally_win_probability * 100.0;
             let enemy_pct = 100.0 - ally_pct;
-            let win_color = if ally_pct >= 50.0 { green } else { red };
+            let win_color = delta_color(ally_pct - 50.0, green, red, gold);
 
             ui.horizontal(|ui| {
                 ui.label(
@@ -92,28 +123,48 @@ impl eframe::App for TrueSightGuiApp {
                     analysis.total_counter_edge * 100.0,
                     analysis.total_synergy_edge * 100.0
                 ));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    for bracket in Bracket::ALL.into_iter().rev() {
+                        if ui
+                            .selectable_label(
+                                self.session.draft.bracket == bracket,
+                                bracket.label(),
+                            )
+                            .clicked()
+                        {
+                            self.session.set_bracket(bracket);
+                        }
+                    }
+                    ui.label(RichText::new("Bracket:").color(cyan));
+                });
             });
 
             ui.add(
                 egui::ProgressBar::new(analysis.ally_win_probability.clamp(0.0, 1.0))
                     .fill(win_color)
-                    .desired_height(10.0),
+                    .desired_height(9.0),
             );
+            ui.label(RichText::new(&self.status_banner).small().color(dim));
         });
 
-        egui::SidePanel::right("recommendations_panel")
-            .min_width(430.0)
+        // =========================================================================
+        // 2. DEDICATED BOTTOM SECTION: Suggested Picks & Mathematical Breakdown
+        // =========================================================================
+        egui::TopBottomPanel::bottom("suggestions_section")
+            .resizable(true)
+            .default_height(285.0)
+            .min_height(190.0)
             .show(ctx, |ui| {
-                ui.heading(
-                    RichText::new(format!(
-                        "Suggested Picks ({})",
-                        self.session.draft.target_role.label()
-                    ))
-                    .color(gold),
-                );
-
                 ui.horizontal(|ui| {
-                    ui.label("Target Role:");
+                    ui.heading(
+                        RichText::new(format!(
+                            "Suggested Heroes Section — {}",
+                            self.session.draft.target_role.label()
+                        ))
+                        .color(gold),
+                    );
+                    ui.separator();
+                    ui.label("Role Filter:");
                     for role in Role::ALL {
                         if ui
                             .selectable_label(
@@ -125,256 +176,351 @@ impl eframe::App for TrueSightGuiApp {
                             self.session.draft.target_role = role;
                         }
                     }
-                });
-
-                ui.horizontal(|ui| {
-                    ui.label("Bracket:");
-                    for bracket in Bracket::ALL {
-                        if ui
-                            .selectable_label(
-                                self.session.draft.bracket == bracket,
-                                bracket.label(),
-                            )
-                            .clicked()
-                        {
-                            self.session.set_bracket(bracket);
-                        }
+                    ui.separator();
+                    ui.label("Filter Name:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.suggest_filter)
+                            .desired_width(140.0)
+                            .hint_text("e.g. anti, jugg..."),
+                    );
+                    if !self.suggest_filter.is_empty() && ui.small_button("×").clicked() {
+                        self.suggest_filter.clear();
                     }
                 });
 
-                ui.separator();
-
-                // Quick search / assign bar
-                ui.horizontal(|ui| {
-                    ui.label("Quick Pick:");
-                    let resp = ui.text_edit_singleline(&mut self.search_query);
-                    if (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
-                        || ui.button("Assign to Slot").clicked()
-                    {
-                        if let Some(hero_id) = self.session.find_hero(&self.search_query) {
-                            let pick = Some(DraftPick {
-                                hero_id,
-                                role: Role::ALL.get(self.selected_slot).copied(),
-                            });
-                            let res = match self.selected_side {
-                                Side::Allies => self.session.draft.set_ally(self.selected_slot, pick),
-                                Side::Enemies => {
-                                    self.session.draft.set_enemy(self.selected_slot, pick)
-                                }
-                            };
-                            match res {
-                                Ok(()) => {
-                                    self.status_banner = format!(
-                                        "Assigned hero #{} to {:?} slot {}",
-                                        hero_id.0,
-                                        self.selected_side,
-                                        self.selected_slot + 1
-                                    );
-                                    self.search_query.clear();
-                                }
-                                Err(e) => self.status_banner = format!("Rejected: {e}"),
-                            }
-                        } else {
-                            self.status_banner =
-                                format!("No hero matching '{}'", self.search_query);
-                        }
-                    }
-                });
-
-                ui.label(RichText::new(&self.status_banner).color(dim));
                 ui.separator();
 
                 let recs_all = truesight_core::math::recommend_heroes(
                     &self.session.draft,
                     &self.session.matrix,
                     &self.session.weights,
-                    25,
+                    40,
                 );
+                let target_slot_idx = self
+                    .session
+                    .draft
+                    .allies
+                    .iter()
+                    .position(Option::is_none)
+                    .unwrap_or_else(|| self.session.draft.target_role.index());
 
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    egui::Grid::new("recs_grid")
+                egui::ScrollArea::vertical()
+                    .id_salt("bottom_suggestions_scroll")
+                    .show(ui, |ui| {
+                        egui::Grid::new("bottom_recs_grid")
+                            .striped(true)
+                            .min_col_width(95.0)
+                            .spacing([14.0, 6.0])
+                            .show(ui, |ui| {
+                                ui.label(RichText::new("Rank & Hero").strong());
+                                ui.label(RichText::new("Action").strong());
+                                ui.label(RichText::new("Projected Win%").strong());
+                                ui.label(
+                                    RichText::new(format!(
+                                        "Draft Gain (A{})",
+                                        target_slot_idx + 1
+                                    ))
+                                    .strong(),
+                                );
+                                ui.label(RichText::new("Role Meta WR").strong());
+                                ui.label(RichText::new("vs Picked Enemies").strong());
+                                ui.label(RichText::new("w/ Picked Allies").strong());
+                                ui.label(RichText::new("Personal Comfort").strong());
+                                ui.end_row();
+
+                                let filter_lower = self.suggest_filter.to_ascii_lowercase();
+                                for (idx, rec) in recs_all.iter().enumerate() {
+                                    let name = self
+                                        .session
+                                        .matrix
+                                        .hero(rec.hero_id)
+                                        .map(|h| h.display_name.as_str())
+                                        .unwrap_or("Unknown");
+                                    if !filter_lower.is_empty()
+                                        && !name.to_ascii_lowercase().contains(&filter_lower)
+                                    {
+                                        continue;
+                                    }
+
+                                    ui.label(
+                                        RichText::new(format!("#{:>2}  {}", idx + 1, name)).strong(),
+                                    );
+                                    if ui
+                                        .small_button(format!("Pick into A{}", target_slot_idx + 1))
+                                        .clicked()
+                                    {
+                                        let _ = self.session.draft.set_ally(
+                                            target_slot_idx,
+                                            Some(DraftPick {
+                                                hero_id: rec.hero_id,
+                                                role: Some(self.session.draft.target_role),
+                                            }),
+                                        );
+                                        self.status_banner = format!(
+                                            "Picked {} into Ally Slot A{}.",
+                                            name,
+                                            target_slot_idx + 1
+                                        );
+                                    }
+
+                                    let proj = rec.projected_win_probability * 100.0;
+                                    let gain = rec.net_probability_delta * 100.0;
+                                    let cnt = rec.counter_delta_sum * 100.0;
+                                    let syn = rec.synergy_delta_sum * 100.0;
+                                    let com = rec.comfort_delta * 100.0;
+
+                                    ui.label(
+                                        RichText::new(format!("{proj:5.1}%"))
+                                            .strong()
+                                            .color(delta_color(proj - 50.0, green, red, dim)),
+                                    );
+                                    ui.label(
+                                        RichText::new(format!("{gain:+5.2}%"))
+                                            .strong()
+                                            .color(delta_color(gain, green, red, dim)),
+                                    );
+                                    ui.label(format!("{:5.1}%", rec.base_meta_wr * 100.0));
+                                    ui.label(
+                                        RichText::new(format!("{cnt:+5.2}%"))
+                                            .color(delta_color(cnt, green, red, dim)),
+                                    );
+                                    ui.label(
+                                        RichText::new(format!("{syn:+5.2}%"))
+                                            .color(delta_color(syn, green, red, dim)),
+                                    );
+                                    ui.label(
+                                        RichText::new(format!("{com:+5.2}%"))
+                                            .color(delta_color(com, green, red, dim)),
+                                    );
+                                    ui.end_row();
+                                }
+                            });
+                    });
+            });
+
+        // =========================================================================
+        // 3. CENTRAL PANEL: Independent Per-Slot Hero Selectors + 5v5 Live Matrices
+        // =========================================================================
+        egui::CentralPanel::default().show(ctx, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("central_matrices_scroll")
+                .show(ui, |ui| {
+                    // --- 3A. INDEPENDENT 10-SLOT HERO PICKER BAR (ALL 127 HEROES) ---
+                    ui.heading("Independent 5v5 Slot Pickers (All 127 Heroes)");
+                    ui.add_space(4.0);
+
+                    egui::Grid::new("independent_slot_pickers")
                         .striped(true)
                         .spacing([10.0, 6.0])
                         .show(ui, |ui| {
-                            ui.label(RichText::new("Hero").strong());
-                            ui.label(RichText::new("Proj Win%").strong());
-                            ui.label(RichText::new("Draft Gain").strong());
-                            ui.label(RichText::new("Meta WR").strong());
-                            ui.label(RichText::new("vs Enemy").strong());
-                            ui.label(RichText::new("w/ Allies").strong());
-                            ui.label(RichText::new("Comfort").strong());
+                            ui.label(RichText::new("ALLIES").color(green).strong());
+                            for i in 0..TEAM_SIZE {
+                                let current_name = self.session.draft.allies[i]
+                                    .and_then(|p| self.session.matrix.hero(p.hero_id))
+                                    .map(|h| h.display_name.clone())
+                                    .unwrap_or_else(|| format!("A{} [Select Hero]", i + 1));
+
+                                ui.horizontal(|ui| {
+                                    egui::ComboBox::from_id_salt(format!("ally_combo_{i}"))
+                                        .selected_text(format!("A{}: {}", i + 1, current_name))
+                                        .width(155.0)
+                                        .show_ui(ui, |ui| {
+                                            ui.text_edit_singleline(&mut self.ally_search[i]);
+                                            let q = self.ally_search[i].to_ascii_lowercase();
+                                            if ui.selectable_label(false, "— [Clear Slot] —").clicked()
+                                            {
+                                                let _ = self.session.draft.set_ally(i, None);
+                                            }
+                                            for &(hid, ref hname) in &all_heroes {
+                                                if !q.is_empty()
+                                                    && !hname.to_ascii_lowercase().contains(&q)
+                                                {
+                                                    continue;
+                                                }
+                                                let unavailable =
+                                                    self.session.draft.is_unavailable(hid);
+                                                let is_cur = self.session.draft.allies[i]
+                                                    .map(|p| p.hero_id == hid)
+                                                    .unwrap_or(false);
+                                                if (!unavailable || is_cur)
+                                                    && ui.selectable_label(is_cur, hname).clicked()
+                                                {
+                                                    let _ = self.session.draft.set_ally(
+                                                        i,
+                                                        Some(DraftPick {
+                                                            hero_id: hid,
+                                                            role: Role::ALL.get(i).copied(),
+                                                        }),
+                                                    );
+                                                    self.ally_search[i].clear();
+                                                }
+                                            }
+                                        });
+                                    if self.session.draft.allies[i].is_some()
+                                        && ui.small_button("×").clicked()
+                                    {
+                                        let _ = self.session.draft.set_ally(i, None);
+                                    }
+                                });
+                            }
                             ui.end_row();
 
-                            for rec in &recs_all {
-                                let name = self
-                                    .session
-                                    .matrix
-                                    .hero(rec.hero_id)
-                                    .map(|h| h.display_name.as_str())
-                                    .unwrap_or("Unknown");
-                                if !self.search_query.is_empty()
-                                    && !name
-                                        .to_ascii_lowercase()
-                                        .contains(&self.search_query.to_ascii_lowercase())
-                                {
-                                    continue;
-                                }
+                            ui.label(RichText::new("ENEMIES").color(red).strong());
+                            for j in 0..TEAM_SIZE {
+                                let current_name = self.session.draft.enemies[j]
+                                    .and_then(|p| self.session.matrix.hero(p.hero_id))
+                                    .map(|h| h.display_name.clone())
+                                    .unwrap_or_else(|| format!("E{} [Select Hero]", j + 1));
 
-                                if ui.button(name).clicked() {
-                                    let pick = Some(DraftPick {
-                                        hero_id: rec.hero_id,
-                                        role: Role::ALL.get(self.selected_slot).copied(),
-                                    });
-                                    let _ = match self.selected_side {
-                                        Side::Allies => {
-                                            self.session.draft.set_ally(self.selected_slot, pick)
-                                        }
-                                        Side::Enemies => {
-                                            self.session.draft.set_enemy(self.selected_slot, pick)
-                                        }
-                                    };
-                                }
-
-                                let gain = rec.net_probability_delta * 100.0;
-                                let cnt = rec.counter_delta_sum * 100.0;
-                                let syn = rec.synergy_delta_sum * 100.0;
-                                let com = rec.comfort_delta * 100.0;
-
-                                ui.label(format!("{:5.1}%", rec.projected_win_probability * 100.0));
-                                ui.label(
-                                    RichText::new(format!("{gain:+5.2}%"))
-                                        .strong()
-                                        .color(if gain >= 0.0 { green } else { red }),
-                                );
-                                ui.label(format!("{:5.1}%", rec.base_meta_wr * 100.0));
-                                ui.label(
-                                    RichText::new(format!("{cnt:+5.2}%"))
-                                        .color(if cnt >= 0.0 { green } else { red }),
-                                );
-                                ui.label(
-                                    RichText::new(format!("{syn:+5.2}%"))
-                                        .color(if syn >= 0.0 { green } else { red }),
-                                );
-                                ui.label(format!("{com:+5.2}%"));
-                                ui.end_row();
+                                ui.horizontal(|ui| {
+                                    egui::ComboBox::from_id_salt(format!("enemy_combo_{j}"))
+                                        .selected_text(format!("E{}: {}", j + 1, current_name))
+                                        .width(155.0)
+                                        .show_ui(ui, |ui| {
+                                            ui.text_edit_singleline(&mut self.enemy_search[j]);
+                                            let q = self.enemy_search[j].to_ascii_lowercase();
+                                            if ui.selectable_label(false, "— [Clear Slot] —").clicked()
+                                            {
+                                                let _ = self.session.draft.set_enemy(j, None);
+                                            }
+                                            for &(hid, ref hname) in &all_heroes {
+                                                if !q.is_empty()
+                                                    && !hname.to_ascii_lowercase().contains(&q)
+                                                {
+                                                    continue;
+                                                }
+                                                let unavailable =
+                                                    self.session.draft.is_unavailable(hid);
+                                                let is_cur = self.session.draft.enemies[j]
+                                                    .map(|p| p.hero_id == hid)
+                                                    .unwrap_or(false);
+                                                if (!unavailable || is_cur)
+                                                    && ui.selectable_label(is_cur, hname).clicked()
+                                                {
+                                                    let _ = self.session.draft.set_enemy(
+                                                        j,
+                                                        Some(DraftPick {
+                                                            hero_id: hid,
+                                                            role: Role::ALL.get(j).copied(),
+                                                        }),
+                                                    );
+                                                    self.enemy_search[j].clear();
+                                                }
+                                            }
+                                        });
+                                    if self.session.draft.enemies[j].is_some()
+                                        && ui.small_button("×").clicked()
+                                    {
+                                        let _ = self.session.draft.set_enemy(j, None);
+                                    }
+                                });
                             }
+                            ui.end_row();
                         });
-                });
-                let _ = recs;
-            });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("5v5 Live Counter & Synergy Matrix");
-            ui.label(
-                RichText::new(
-                    "Click any Ally (A1..A5) or Enemy (E1..E5) slot button to target it for quick-pick assignment.",
-                )
-                .color(dim),
-            );
-            ui.add_space(6.0);
+                    ui.add_space(10.0);
+                    ui.separator();
 
-            egui::Grid::new("matrix_5v5_grid")
-                .striped(true)
-                .min_col_width(92.0)
-                .spacing([8.0, 8.0])
-                .show(ui, |ui| {
-                    ui.label(RichText::new("ALLY \\ ENEMY").strong());
-                    for j in 0..TEAM_SIZE {
-                        let enemy_name = self.session.draft.enemies[j]
-                            .and_then(|p| self.session.matrix.hero(p.hero_id))
-                            .map(|h| format!("E{}: {}", j + 1, h.display_name))
-                            .unwrap_or_else(|| format!("E{}: [Empty]", j + 1));
-                        let selected =
-                            self.selected_side == Side::Enemies && self.selected_slot == j;
-                        if ui.selectable_label(selected, RichText::new(enemy_name).strong()).clicked()
-                        {
-                            self.selected_side = Side::Enemies;
-                            self.selected_slot = j;
-                        }
-                    }
-                    ui.label(RichText::new("Net Slot Edge").strong());
-                    ui.end_row();
+                    // --- 3B. SIDE-BY-SIDE 5v5 COUNTER MATRIX & ALLIED SYNERGY MATRIX ---
+                    ui.columns(2, |cols| {
+                        // Left Column: 5v5 Counter Matrix (Allies vs Enemies)
+                        cols[0].heading("5v5 Counter Matrix (Allies vs Enemies)");
+                        cols[0].add_space(4.0);
+                        egui::Grid::new("matrix_5v5_grid")
+                            .striped(true)
+                            .min_col_width(82.0)
+                            .spacing([8.0, 7.0])
+                            .show(&mut cols[0], |ui| {
+                                ui.label(RichText::new("ALLY \\ ENEMY").strong());
+                                for j in 0..TEAM_SIZE {
+                                    let enemy_name = self.session.draft.enemies[j]
+                                        .and_then(|p| self.session.matrix.hero(p.hero_id))
+                                        .map(|h| format!("E{}: {}", j + 1, h.display_name))
+                                        .unwrap_or_else(|| format!("E{}: Empty", j + 1));
+                                    ui.label(RichText::new(enemy_name).strong().color(red));
+                                }
+                                ui.label(RichText::new("Net Slot Edge").strong());
+                                ui.end_row();
 
-                    for i in 0..TEAM_SIZE {
-                        let ally_name = self.session.draft.allies[i]
-                            .and_then(|p| self.session.matrix.hero(p.hero_id))
-                            .map(|h| format!("A{}: {}", i + 1, h.display_name))
-                            .unwrap_or_else(|| format!("A{}: [Empty]", i + 1));
-                        let selected =
-                            self.selected_side == Side::Allies && self.selected_slot == i;
-                        if ui.selectable_label(selected, RichText::new(ally_name).strong()).clicked()
-                        {
-                            self.selected_side = Side::Allies;
-                            self.selected_slot = i;
-                        }
+                                for i in 0..TEAM_SIZE {
+                                    let ally_name = self.session.draft.allies[i]
+                                        .and_then(|p| self.session.matrix.hero(p.hero_id))
+                                        .map(|h| format!("A{}: {}", i + 1, h.display_name))
+                                        .unwrap_or_else(|| format!("A{}: Empty", i + 1));
+                                    ui.label(RichText::new(ally_name).strong().color(green));
 
-                        for j in 0..TEAM_SIZE {
-                            if let Some(delta) = analysis.counter_grid[i][j] {
-                                let pct = delta * 100.0;
-                                let c = if pct > 0.15 {
-                                    green
-                                } else if pct < -0.15 {
-                                    red
-                                } else {
-                                    dim
-                                };
-                                ui.label(RichText::new(format!("{pct:+6.2}%")).strong().color(c));
-                            } else {
-                                ui.label(RichText::new("·").color(dim));
-                            }
-                        }
+                                    for j in 0..TEAM_SIZE {
+                                        if let Some(delta) = analysis.counter_grid[i][j] {
+                                            let pct = delta * 100.0;
+                                            let c = delta_color(pct, green, red, dim);
+                                            ui.label(
+                                                RichText::new(format!("{pct:+6.2}%"))
+                                                    .strong()
+                                                    .color(c),
+                                            );
+                                        } else {
+                                            ui.label(RichText::new("·").color(dim));
+                                        }
+                                    }
 
-                        if let Some(net) = analysis.ally_slot_net_delta[i] {
-                            let pct = net * 100.0;
-                            ui.label(
-                                RichText::new(format!("{pct:+6.2}%"))
-                                    .strong()
-                                    .color(if pct >= 0.0 { green } else { red }),
-                            );
-                        } else {
-                            ui.label(RichText::new("—").color(dim));
-                        }
-                        ui.end_row();
-                    }
-                });
+                                    if let Some(net) = analysis.ally_slot_net_delta[i] {
+                                        let pct = net * 100.0;
+                                        ui.label(
+                                            RichText::new(format!("{pct:+6.2}%"))
+                                                .strong()
+                                                .color(delta_color(pct, green, red, dim)),
+                                        );
+                                    } else {
+                                        ui.label(RichText::new("—").color(dim));
+                                    }
+                                    ui.end_row();
+                                }
+                            });
 
-            ui.add_space(16.0);
-            ui.separator();
-            ui.heading("Allied Pairwise Synergy Matrix");
+                        // Right Column: 5v5 Allied Pairwise Synergy Matrix
+                        cols[1].heading("Allied Pairwise Synergy Matrix");
+                        cols[1].add_space(4.0);
+                        egui::Grid::new("synergy_grid")
+                            .striped(true)
+                            .min_col_width(82.0)
+                            .spacing([8.0, 7.0])
+                            .show(&mut cols[1], |ui| {
+                                ui.label(RichText::new("ALLY \\ ALLY").strong());
+                                for k in 0..TEAM_SIZE {
+                                    let col_name = self.session.draft.allies[k]
+                                        .and_then(|p| self.session.matrix.hero(p.hero_id))
+                                        .map(|h| format!("A{}: {}", k + 1, h.display_name))
+                                        .unwrap_or_else(|| format!("A{}: Empty", k + 1));
+                                    ui.label(RichText::new(col_name).strong().color(cyan));
+                                }
+                                ui.end_row();
 
-            egui::Grid::new("synergy_grid")
-                .striped(true)
-                .min_col_width(90.0)
-                .spacing([8.0, 6.0])
-                .show(ui, |ui| {
-                    ui.label("");
-                    for k in 0..TEAM_SIZE {
-                        ui.label(RichText::new(format!("Ally #{}", k + 1)).strong());
-                    }
-                    ui.end_row();
+                                for i in 0..TEAM_SIZE {
+                                    let row_name = self.session.draft.allies[i]
+                                        .and_then(|p| self.session.matrix.hero(p.hero_id))
+                                        .map(|h| format!("A{}: {}", i + 1, h.display_name))
+                                        .unwrap_or_else(|| format!("A{}: Empty", i + 1));
+                                    ui.label(RichText::new(row_name).strong().color(cyan));
 
-                    for i in 0..TEAM_SIZE {
-                        let name_i = self.session.draft.allies[i]
-                            .and_then(|p| self.session.matrix.hero(p.hero_id))
-                            .map(|h| h.display_name.as_str())
-                            .unwrap_or("Empty");
-                        ui.label(RichText::new(format!("A{}: {name_i}", i + 1)).strong());
-                        for k in 0..TEAM_SIZE {
-                            if i == k {
-                                ui.label(RichText::new("—").color(dim));
-                            } else if let Some(syn) = analysis.ally_synergy_grid[i][k] {
-                                let pct = syn * 100.0;
-                                ui.label(
-                                    RichText::new(format!("{pct:+6.2}%"))
-                                        .strong()
-                                        .color(if pct >= 0.0 { green } else { red }),
-                                );
-                            } else {
-                                ui.label(RichText::new("·").color(dim));
-                            }
-                        }
-                        ui.end_row();
-                    }
+                                    for k in 0..TEAM_SIZE {
+                                        if i == k {
+                                            ui.label(RichText::new("—").color(dim));
+                                        } else if let Some(syn) = analysis.ally_synergy_grid[i][k] {
+                                            let pct = syn * 100.0;
+                                            let c = delta_color(pct, green, red, dim);
+                                            ui.label(
+                                                RichText::new(format!("{pct:+6.2}%"))
+                                                    .strong()
+                                                    .color(c),
+                                            );
+                                        } else {
+                                            ui.label(RichText::new("·").color(dim));
+                                        }
+                                    }
+                                    ui.end_row();
+                                }
+                            });
+                    });
                 });
         });
 
@@ -385,7 +531,7 @@ impl eframe::App for TrueSightGuiApp {
 pub fn run_gui(session: AppSession, gsi_listener: Option<BoundedGsiListener>) -> Result<(), String> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1260.0, 760.0])
+            .with_inner_size([1360.0, 820.0])
             .with_title("TrueSight Dota — 5v5 Live Draft Oracle"),
         ..Default::default()
     };

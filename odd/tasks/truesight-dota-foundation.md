@@ -11,6 +11,7 @@ Branch: feat/truesight-dota-foundation
 - **S5**: Create project architecture documentation in `docs/` and a project `README.md` (`creemos documentacion con la architecura del proyecto en docs/ tras terminar de definir o tambien creemos el readme`).
 - **S6**: Synchronize the complete 127-hero catalog and real player comfort history (`127255741`) into a local snapshot adapter (`SeededMetaRepository`) and add a native `eframe`/`egui` desktop GUI alongside the CLI/TUI (`ok procede`).
 - **S7**: Upgrade and pin the Rust toolchain to `1.99.1`, package a release desktop executable (`~/.local/bin/truesight-dota` + `~/.local/share/applications/truesight-dota.desktop`), and install the Dota 2 GSI integration config (`por que no usamos la ultima version 1.99.1? cual seria el sifuiente paso, deberiamos tener un ejecutable de escritorio` / `1. autorizo actualizacion 2. procedamos`).
+- **S8**: Fix manual testing findings (`solo veo 0% en todos los calculos`, `los suggest deberia ser otra seccion`, `la eleccion de cada herore por slot no permite escoger todos lo heores de manera independiente. se tiene que pickear desde el panel de suggetsed pick`, `revisa la imagen para notar otras inconsistencias y corregirlo`): embed all 15,966 (`127x127`) empirical OpenDota matchup & synergy pairs, add independent 127-hero dropdown selectors per slot (`A1..A5`, `E1..E5`), move `Suggested Heroes` into its own dedicated bottom section, fix neutral `0.00%` coloring, and evaluate `Draft Gain` against the vacated target slot.
 
 ## Tasks
 
@@ -19,7 +20,8 @@ Branch: feat/truesight-dota-foundation
 - [x] **T3** (S1, S2, S3, S5) — Route: direct inline (small cohesive UI + docs unit, no Writer trigger) — Commit: `932c2f5` — Create `truesight-app` native UI, `README.md`, and `docs/architecture.md`.
 - [x] **T4** (S4, S6) — Route: direct inline (cohesive adapter unit, no Writer trigger) — Commit: `878603f` — Synchronize the full 127-hero OpenDota dataset and player `127255741` comfort history into `truesight-adapters` (`SeededMetaRepository`) with bracket-aware winrates and unit tests.
 - [x] **T5** (S1, S2, S3, S5, S6) — Route: direct inline (cohesive GUI + docs unit, no Writer trigger) — Commit: `cfd19ec` — Add native desktop `eframe`/`egui` GUI mode (`--gui`) in `truesight-app` sharing `AppSession` with CLI/TUI, and update documentation.
-- [x] **T6** (S7) — Route: direct inline (cohesive release packaging + GSI hook unit, no Writer trigger) — Commit: `8f2aaeb` — Pin `rust-toolchain.toml` to `1.99.1`, make GUI the default binary entrypoint (`truesight-dota`), build `--release`, install `~/.local/bin/truesight-dota`, `~/.local/share/applications/truesight-dota.desktop`, and Dota 2 `gamestate_integration_truesight.cfg`.
+- [x] **T6** (S7) — Route: direct inline (cohesive release packaging + GSI hook unit, no Writer trigger) — Commit: `2799255` — Pin `rust-toolchain.toml` to `1.99.1`, make GUI the default binary entrypoint (`truesight-dota`), build `--release`, install `~/.local/bin/truesight-dota`, `~/.local/share/applications/truesight-dota.desktop`, and Dota 2 `gamestate_integration_truesight.cfg`.
+- [x] **T7** (S8) — Route: direct inline (cohesive data + GUI layout + math baseline fix, no Writer trigger) — Commit: `4ecf99e` — Embed all 15,966 `127x127` OpenDota matchup & synergy pairs, add independent per-slot 127-hero dropdown pickers, move Suggested Heroes to a dedicated bottom section, and fix neutral color thresholds + slot replacement baseline.
 
 ## Log
 
@@ -32,3 +34,4 @@ Branch: feat/truesight-dota-foundation
 - **L7**: "ok procede"
 - **L8**: "por que no usamos la ultima version 1.99.1? cual seria el sifuiente paso, deberiamos tener un ejecutable de escritorio"
 - **L9**: "1. autorizo actualizacion 2. procedamos"
+- **L10**: "acabo de probar manualmente y tengo varias dudas y veo errores - solo veo 0% en todos los calculos - los suggest deberia ser otra seccion - la eleccion de cada herore por slot no permite escoger todos lo heores de manera independiente. se tiene que pickear desde el panel de suggetsed pick = revisa la imagen para notar otras inconsistencias y corregirlo"

@@ -1,4 +1,5 @@
 use crate::snapshot_data::OPENDOTA_HERO_SNAPSHOT;
+use crate::snapshot_pairs::OPENDOTA_PAIR_SNAPSHOT;
 use truesight_core::domain::{Bracket, HeroId, HeroProfile, PairStats, Role};
 use truesight_core::math::MatchupMatrix;
 use truesight_core::ports::{PortError, StatsRepository};
@@ -123,7 +124,23 @@ impl StatsRepository for SeededMetaRepository {
             }
         }
 
-        // 3. Pairwise counter & synergy statistics (STRATZ / OpenDota baseline)
+        // 3. Load all 15,966 empirical pairwise OpenDota matchups (every 127x127 hero pair)
+        for &(a, b, vs_m, vs_w, with_m, with_w) in OPENDOTA_PAIR_SNAPSHOT {
+            m.set_pair_stats(
+                HeroId(a),
+                HeroId(b),
+                PairStats {
+                    with_matches: with_m,
+                    with_wins: with_w,
+                    vs_matches: vs_m,
+                    vs_wins: vs_w,
+                },
+                30.0,
+            )
+            .map_err(|e| PortError(e.to_string()))?;
+        }
+
+        // 4. High-confidence STRATZ/OpenDota notable pairs override
         let notable_pairs: &[(u16, u16, u32, u32)] = &[
             (1, 94, 635, 455),    // Anti-Mage hard-counters Medusa
             (1, 17, 610, 485),    // Anti-Mage counters Storm Spirit

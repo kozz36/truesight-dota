@@ -1,6 +1,7 @@
 pub mod gsi;
 pub mod meta_repo;
 pub mod snapshot_data;
+pub mod snapshot_pairs;
 
 #[cfg(test)]
 mod tests {
@@ -62,9 +63,21 @@ mod tests {
             127,
             "All 127 official OpenDota heroes must be loaded"
         );
-        // Player 127255741 top hero Tiny (id=19) should carry personal comfort history (69 games)
-        let tiny = matrix.hero(HeroId(19)).expect("Tiny present");
-        assert_eq!(tiny.personal_matches, 69);
+        // Verify arbitrary non-curated heroes (e.g. Slardar=28 vs Silencer=75, Enigma=33 vs Necrophos=36)
+        // have populated non-zero empirical counter & synergy deltas from the 15,966-pair table.
+        let slardar_vs_silencer = matrix.cell(HeroId(28), HeroId(75));
+        assert!(
+            slardar_vs_silencer.vs_matches > 0
+                && slardar_vs_silencer.counter_delta.abs() > 0.0001,
+            "Slardar vs Silencer must have empirical matchup data: {:?}",
+            slardar_vs_silencer
+        );
+        let fv_with_enigma = matrix.cell(HeroId(41), HeroId(33));
+        assert!(
+            fv_with_enigma.with_matches > 0 && fv_with_enigma.synergy_delta.abs() > 0.0001,
+            "Faceless Void + Enigma must have empirical synergy data: {:?}",
+            fv_with_enigma
+        );
     }
 
     #[test]
