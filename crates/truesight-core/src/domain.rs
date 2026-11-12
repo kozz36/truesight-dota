@@ -240,6 +240,31 @@ impl HeroProfile {
     pub fn meta_winrate(&self, role: Role) -> f32 {
         (self.role_winrates[role.index()] + 0.45 * self.trend_delta).clamp(0.05, 0.95)
     }
+
+    /// Personal Comfort Engine v3: combines empirical-Bayes performance on time-decayed
+    /// effective matches (`g_eff = personal_matches * comfort_decay`, prior `m = 16`)
+    /// with an active practice volume mastery bonus `0.0065 * ln(1 + g_eff)`.
+    /// Heroes with `g_eff < 0.15` (unplayed for many months) decay cleanly to `0.0`.
+    #[inline]
+    pub fn comfort_delta(&self) -> f32 {
+        if self.personal_matches == 0 {
+            return 0.0;
+        }
+        let d = self.comfort_decay.clamp(0.0, 1.0);
+        let g_eff = (self.personal_matches as f32) * d;
+        if g_eff < 0.15 {
+            return 0.0;
+        }
+        let w_eff = (self.personal_wins as f32) * d;
+        let perf_wr = (w_eff + 16.0 * 0.50) / (g_eff + 16.0);
+        let perf_edge = perf_wr - 0.50;
+        let vol_bonus = if perf_wr >= 0.50 && g_eff >= 0.50 {
+            0.0065 * (1.0 + g_eff).ln()
+        } else {
+            0.0
+        };
+        (perf_edge + vol_bonus).clamp(-0.05, 0.05)
+    }
 }
 
 /// Pairwise empirical statistics between two heroes.

@@ -398,12 +398,20 @@ pub fn evaluate_draft_5v5(
     let enemy_comp = evaluate_team_composition(&draft.enemies, matrix);
     let total_composition_edge = ally_comp - enemy_comp;
 
+    // Personal comfort contribution for the user's selected role slot (`draft.target_role`)
+    let target_slot = draft.target_role.index();
+    let player_comfort_edge = draft.allies[target_slot]
+        .and_then(|p| matrix.hero(p.hero_id))
+        .map(|h| h.comfort_delta())
+        .unwrap_or(0.0);
+
     // Combine normalized edges in logit space (scale factor 3.2 maps realistic draft edges into [32%, 68%])
     let combined_logit = 3.2
         * (weights.meta_weight * total_meta_edge
             + weights.counter_weight * total_counter_edge
             + weights.synergy_weight * total_synergy_edge
-            + 0.85 * total_composition_edge);
+            + 0.85 * total_composition_edge
+            + (weights.comfort_weight / 2.236_068) * player_comfort_edge);
 
     let ally_win_probability = sigmoid(combined_logit);
 
@@ -533,18 +541,7 @@ pub fn recommend_heroes(
             synergy_delta_sum /= ally_cnt as f32;
         }
 
-        let comfort_delta = if profile.personal_matches > 0 {
-            let personal_wr = bayesian_winrate(
-                profile.personal_wins,
-                profile.personal_matches,
-                0.50,
-                25.0,
-            );
-            let decay = profile.comfort_decay.clamp(0.25, 1.0);
-            ((personal_wr - 0.50) * decay).clamp(-0.06, 0.06)
-        } else {
-            0.0
-        };
+        let comfort_delta = profile.comfort_delta();
 
         let mut simulated = *draft;
         simulated.allies[target_slot] = Some(DraftPick {

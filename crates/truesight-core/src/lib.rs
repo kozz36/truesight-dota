@@ -358,4 +358,69 @@ mod tests {
         assert_eq!(analysis.ally_synergy_norm, 0.0);
         assert_eq!(analysis.enemy_synergy_norm, 0.0);
     }
+
+    #[test]
+    fn personal_comfort_v3_penalizes_stale_heroes_rewards_active_volume_and_shifts_projected_win() {
+        use crate::domain::AttackType;
+
+        let mut m = MatchupMatrix::new();
+        // Hero 1: Stale 7/8 hero unplayed for 10 months (decay = 0.015 -> g_eff = 0.12 < 0.15)
+        m.upsert_hero(HeroProfile {
+            id: HeroId(1),
+            slug: "stale_am".into(),
+            display_name: "Stale AM".into(),
+            primary_roles: vec![Role::Carry],
+            role_winrates: [0.51; 5],
+            personal_matches: 8,
+            personal_wins: 7,
+            attack_type: AttackType::Melee,
+            has_disable: false,
+            has_initiation: false,
+            trend_delta: 0.0,
+            comfort_decay: 0.015,
+        })
+        .unwrap();
+
+        // Hero 2: Active practiced hero (43 games, 24 blended wins, decay = 0.12 -> g_eff = 5.16)
+        m.upsert_hero(HeroProfile {
+            id: HeroId(2),
+            slug: "active_db".into(),
+            display_name: "Active DB".into(),
+            primary_roles: vec![Role::Carry],
+            role_winrates: [0.51; 5],
+            personal_matches: 43,
+            personal_wins: 24,
+            attack_type: AttackType::Melee,
+            has_disable: false,
+            has_initiation: false,
+            trend_delta: 0.0,
+            comfort_decay: 0.12,
+        })
+        .unwrap();
+
+        let draft = DraftState {
+            target_role: Role::Carry,
+            ..DraftState::default()
+        };
+        let recs = recommend_heroes(&draft, &m, &ModelWeights::default(), 5);
+        let stale = recs.iter().find(|r| r.hero_id == HeroId(1)).unwrap();
+        let active = recs.iter().find(|r| r.hero_id == HeroId(2)).unwrap();
+
+        assert_eq!(
+            stale.comfort_delta, 0.0,
+            "Stale hero with g_eff < 0.15 must decay to 0.0 comfort: {}",
+            stale.comfort_delta
+        );
+        assert!(
+            active.comfort_delta > 0.015,
+            "Actively practiced hero must receive positive comfort + volume mastery: {}",
+            active.comfort_delta
+        );
+        assert!(
+            active.projected_win_probability > stale.projected_win_probability,
+            "Active comfort hero must have higher projected win% ({}) than stale hero ({})",
+            active.projected_win_probability,
+            stale.projected_win_probability
+        );
+    }
 }

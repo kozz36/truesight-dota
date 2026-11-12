@@ -357,4 +357,34 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
+
+    #[test]
+    fn comfort_v3_snapshot_demotes_inactive_antimage_and_juggernaut_below_active_pool() {
+        let repo = SeededMetaRepository::new();
+        let mat = repo.load_matrix(Bracket::Legend).unwrap();
+
+        let tiny = mat.hero(HeroId(19)).unwrap().comfort_delta();
+        let hoodwink = mat.hero(HeroId(123)).unwrap().comfort_delta();
+        let dawnbreaker = mat.hero(HeroId(135)).unwrap().comfort_delta();
+        let lifestealer = mat.hero(HeroId(54)).unwrap().comfort_delta();
+        let antimage = mat.hero(HeroId(1)).unwrap().comfort_delta();
+        let juggernaut = mat.hero(HeroId(8)).unwrap().comfort_delta();
+
+        assert!(
+            tiny >= 0.04 && hoodwink >= 0.04,
+            "Active high-volume comfort heroes (Tiny={tiny}, Hoodwink={hoodwink}) must be >= +4.0%"
+        );
+        assert!(
+            dawnbreaker > 0.015 && lifestealer > 0.015,
+            "Active practiced heroes (Dawnbreaker={dawnbreaker}, Lifestealer={lifestealer}) must exceed +1.5%"
+        );
+        assert_eq!(
+            antimage, 0.0,
+            "Anti-Mage (unplayed for 10 months / 302d) must decay to 0.0 comfort: {antimage}"
+        );
+        assert!(
+            juggernaut <= 0.0,
+            "Juggernaut (2W-5L in 2026 recent matches) must not have positive comfort: {juggernaut}"
+        );
+    }
 }

@@ -63,6 +63,10 @@ impl LocalCacheManager {
         self.cache_dir.join("player_heroes.json")
     }
 
+    fn player_matches_json_path(&self) -> PathBuf {
+        self.cache_dir.join("player_matches.json")
+    }
+
     pub fn read_timestamps(&self) -> (Option<u64>, Option<u64>) {
         let Ok(content) = fs::read_to_string(self.metadata_path()) else {
             return (None, None);
@@ -158,6 +162,16 @@ impl LocalCacheManager {
                 fetched_player = Some(body);
                 updated_parts.push("player comfort (1h TTL)");
             }
+            let matches_url = format!(
+                "https://api.opendota.com/api/players/{}/matches?limit=500",
+                self.player_account_id
+            );
+            if let Ok(m_body) = fetch_url(&matches_url) {
+                if m_body.trim_start().starts_with('[') {
+                    let _ = fs::create_dir_all(&self.cache_dir);
+                    let _ = fs::write(self.player_matches_json_path(), m_body);
+                }
+            }
         }
 
         self.write_cached_files(
@@ -186,7 +200,9 @@ impl LocalCacheManager {
             repo.custom_hero_meta = parse_hero_stats_json(&m_json);
         }
         if let Ok(p_json) = fs::read_to_string(self.player_json_path()) {
-            repo.custom_personal_pool = parse_player_comfort_json(&p_json);
+            let matches_json = fs::read_to_string(self.player_matches_json_path()).ok();
+            repo.custom_personal_pool =
+                parse_player_comfort_with_matches_json(&p_json, matches_json.as_deref());
         }
         repo
     }
@@ -296,10 +312,21 @@ fn fetch_url(url: &str) -> Result<String, PortError> {
 /// Lightweight parser for OpenDota `/api/players/{id}/heroes` JSON array.
 /// Returns `Vec<(HeroId, games, wins, comfort_decay)>`.
 pub fn parse_player_comfort_json(json: &str) -> Vec<(HeroId, u32, u32, f32)> {
-    let mut raw_rows: Vec<(u16, u64, u32, u32)> = Vec::new();
-    let mut max_last_played = 0_u64;
+    parse_player_comfort_with_matches_json(json, None)
+}
 
-    for obj_chunk in json.split('{').skip(1) {
+/// Parses OpenDota `/api/players/{id}/heroes` combined with optional `/api/players/{id}/matches`
+/// to compute per-match exponentially time-decayed effective games and wins (`tau = 75d`, floor `0.0`).
+pub fn parse_player_comfort_with_matches_json(
+    heroes_json: &str,
+    matches_json: Option<&str>,
+) -> Vec<(HeroId, u32, u32, f32)> {
+    const TAU_DAYS: f32 = 75.0;
+
+    let mut raw_rows: Vec<(u16, u64, u32, u32)> = Vec::new();
+    let mut max_ts = 0_u64;
+
+    for obj_chunk in heroes_json.split('{').skip(1) {
         let Some(end) = obj_chunk.find('}') else {
             continue;
         };
@@ -310,24 +337,102 @@ pub fn parse_player_comfort_json(json: &str) -> Vec<(HeroId, u32, u32, f32)> {
         let last_played = extract_u64_field(block, "\"last_played\"").unwrap_or(0);
         let games = extract_u64_field(block, "\"games\"").unwrap_or(0) as u32;
         let wins = extract_u64_field(block, "\"win\"").unwrap_or(0) as u32;
-        if games > 0 && last_played > max_last_played {
-            max_last_played = last_played;
+        if games > 0 && last_played > max_ts {
+            max_ts = last_played;
         }
         raw_rows.push((hid as u16, last_played, games, wins));
+    }
+
+    // Optional per-match recency accumulator: (g_eff, w_eff, match_cnt) indexed by hero_id
+    let mut match_acc = [(0.0_f32, 0.0_f32, 0_u32); truesight_core::domain::MAX_HEROES];
+    let mut has_matches = false;
+
+    if let Some(m_json) = matches_json {
+        for obj_chunk in m_json.split('{').skip(1) {
+            let Some(end) = obj_chunk.find('}') else {
+                continue;
+            };
+            let block = &obj_chunk[..end];
+            if let Some(st) = extract_u64_field(block, "\"start_time\"") {
+                if st > max_ts {
+                    max_ts = st;
+                }
+            }
+        }
+        for obj_chunk in m_json.split('{').skip(1) {
+            let Some(end) = obj_chunk.find('}') else {
+                continue;
+            };
+            let block = &obj_chunk[..end];
+            let Some(hid) = extract_u64_field(block, "\"hero_id\"") else {
+                continue;
+            };
+            let idx = hid as usize;
+            if idx >= truesight_core::domain::MAX_HEROES {
+                continue;
+            }
+            let Some(st) = extract_u64_field(block, "\"start_time\"") else {
+                continue;
+            };
+            let slot = extract_u64_field(block, "\"player_slot\"").unwrap_or(0);
+            let rad_win = extract_bool_field(block, "\"radiant_win\"").unwrap_or(false);
+            let won = (slot < 128) == rad_win;
+            let age_days = (max_ts.saturating_sub(st)) as f32 / 86_400.0;
+            let w = (-age_days / TAU_DAYS).exp();
+            match_acc[idx].0 += w;
+            if won {
+                match_acc[idx].1 += w;
+            }
+            match_acc[idx].2 += 1;
+            has_matches = true;
+        }
     }
 
     raw_rows
         .into_iter()
         .map(|(hid, last_played, games, wins)| {
-            let decay = if games > 0 && last_played > 0 && max_last_played > 0 {
-                let age_days = (max_last_played.saturating_sub(last_played)) as f32 / 86_400.0;
-                (-age_days / 540.0).exp().clamp(0.35, 1.0)
+            if games == 0 {
+                return (HeroId(hid), 0, 0, 0.0);
+            }
+            let idx = hid as usize;
+            let (g_eff, w_eff, cnt) = if has_matches && idx < truesight_core::domain::MAX_HEROES {
+                match_acc[idx]
             } else {
-                1.0
+                (0.0, 0.0, 0)
             };
-            (HeroId(hid), games, wins, decay)
+
+            if cnt > 0 {
+                let decay = (g_eff / (games as f32)).clamp(0.0, 1.0);
+                let career_wr = (wins as f32) / (games as f32);
+                let rec_wr = if g_eff > 0.01 { w_eff / g_eff } else { career_wr };
+                let blended_wr = 0.65 * rec_wr + 0.35 * career_wr;
+                let eff_wins = ((games as f32) * blended_wr).round() as u32;
+                (HeroId(hid), games, eff_wins, decay)
+            } else {
+                let decay = if last_played > 0 && max_ts > 0 {
+                    let age_days = (max_ts.saturating_sub(last_played)) as f32 / 86_400.0;
+                    (-age_days / TAU_DAYS).exp().clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                (HeroId(hid), games, wins, decay)
+            }
         })
         .collect()
+}
+
+fn extract_bool_field(block: &str, key: &str) -> Option<bool> {
+    let pos = block.find(key)?;
+    let after_key = &block[pos + key.len()..];
+    let colon = after_key.find(':')?;
+    let after_colon = after_key[colon + 1..].trim_start();
+    if after_colon.starts_with("true") {
+        Some(true)
+    } else if after_colon.starts_with("false") {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 fn extract_u64_field(block: &str, key: &str) -> Option<u64> {
