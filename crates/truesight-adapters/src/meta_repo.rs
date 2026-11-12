@@ -1,7 +1,7 @@
 use crate::snapshot_data::OPENDOTA_HERO_SNAPSHOT;
-use crate::snapshot_pairs::OPENDOTA_PAIR_SNAPSHOT;
+use crate::snapshot_pairs::OPENDOTA_CALIBRATED_PAIRS;
 use truesight_core::domain::{Bracket, HeroId, HeroProfile, PairStats, Role};
-use truesight_core::math::MatchupMatrix;
+use truesight_core::math::{MatchupCell, MatchupMatrix};
 use truesight_core::ports::{PortError, StatsRepository};
 
 /// Full 127-hero repository backed by the OpenDota / STRATZ meta snapshot and
@@ -124,18 +124,17 @@ impl StatsRepository for SeededMetaRepository {
             }
         }
 
-        // 3. Load all 15,966 empirical pairwise OpenDota matchups (every 127x127 hero pair)
-        for &(a, b, vs_m, vs_w, with_m, with_w) in OPENDOTA_PAIR_SNAPSHOT {
-            m.set_pair_stats(
+        // 3. Load all 15,966 cohort-calibrated pairwise OpenDota matchups (every 127x127 hero pair)
+        for &(a, b, c_bp, s_bp, vs_m) in OPENDOTA_CALIBRATED_PAIRS {
+            m.set_calibrated_cell(
                 HeroId(a),
                 HeroId(b),
-                PairStats {
-                    with_matches: with_m,
-                    with_wins: with_w,
+                MatchupCell {
+                    counter_delta: (c_bp as f32) / 10000.0,
+                    synergy_delta: (s_bp as f32) / 10000.0,
                     vs_matches: vs_m,
-                    vs_wins: vs_w,
+                    with_matches: 400,
                 },
-                30.0,
             )
             .map_err(|e| PortError(e.to_string()))?;
         }

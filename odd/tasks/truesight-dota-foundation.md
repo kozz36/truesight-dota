@@ -21,7 +21,8 @@ Branch: feat/truesight-dota-foundation
 - [x] **T4** (S4, S6) — Route: direct inline (cohesive adapter unit, no Writer trigger) — Commit: `878603f` — Synchronize the full 127-hero OpenDota dataset and player `127255741` comfort history into `truesight-adapters` (`SeededMetaRepository`) with bracket-aware winrates and unit tests.
 - [x] **T5** (S1, S2, S3, S5, S6) — Route: direct inline (cohesive GUI + docs unit, no Writer trigger) — Commit: `cfd19ec` — Add native desktop `eframe`/`egui` GUI mode (`--gui`) in `truesight-app` sharing `AppSession` with CLI/TUI, and update documentation.
 - [x] **T6** (S7) — Route: direct inline (cohesive release packaging + GSI hook unit, no Writer trigger) — Commit: `2799255` — Pin `rust-toolchain.toml` to `1.99.1`, make GUI the default binary entrypoint (`truesight-dota`), build `--release`, install `~/.local/bin/truesight-dota`, `~/.local/share/applications/truesight-dota.desktop`, and Dota 2 `gamestate_integration_truesight.cfg`.
-- [x] **T7** (S8) — Route: direct inline (cohesive data + GUI layout + math baseline fix, no Writer trigger) — Commit: `4ecf99e` — Embed all 15,966 `127x127` OpenDota matchup & synergy pairs, add independent per-slot 127-hero dropdown pickers, move Suggested Heroes to a dedicated bottom section, and fix neutral color thresholds + slot replacement baseline.
+- [x] **T7** (S8) — Route: direct inline (cohesive data + GUI layout + math baseline fix, no Writer trigger) — Commit: `c4e7853` — Embed all 15,966 `127x127` OpenDota matchup & synergy pairs, add independent per-slot 127-hero dropdown pickers, move Suggested Heroes to a dedicated bottom section, and fix neutral color thresholds + slot replacement baseline.
+- [x] **T8** (S2, S3, S8) — Route: direct inline (statistical calibration fix, no Writer trigger) — Commit: `564f476` — Fix 96.5% win-probability inflation by computing cohort-consistent baseline winrates inside `/heroes/{id}/matchups`, applying $\sqrt{N}$ variance normalization across the 25 correlated 5v5 pairs, and averaging per-slot/suggestion deltas.
 
 ## Log
 
@@ -35,3 +36,4 @@ Branch: feat/truesight-dota-foundation
 - **L8**: "por que no usamos la ultima version 1.99.1? cual seria el sifuiente paso, deberiamos tener un ejecutable de escritorio"
 - **L9**: "1. autorizo actualizacion 2. procedamos"
 - **L10**: "acabo de probar manualmente y tengo varias dudas y veo errores - solo veo 0% en todos los calculos - los suggest deberia ser otra seccion - la eleccion de cada herore por slot no permite escoger todos lo heores de manera independiente. se tiene que pickear desde el panel de suggetsed pick = revisa la imagen para notar otras inconsistencias y corregirlo"
+- **L11**: "me parece exagerado la probabilidad de ganar revisa si es correcto"

@@ -114,6 +114,24 @@ impl MatchupMatrix {
         Ok(())
     }
 
+    pub fn set_calibrated_cell(
+        &mut self,
+        hero_a: HeroId,
+        hero_b: HeroId,
+        cell: MatchupCell,
+    ) -> Result<(), DomainError> {
+        let ia = hero_a.as_index();
+        let ib = hero_b.as_index();
+        if ia >= MAX_HEROES {
+            return Err(DomainError::HeroOutOfBounds(hero_a));
+        }
+        if ib >= MAX_HEROES {
+            return Err(DomainError::HeroOutOfBounds(hero_b));
+        }
+        self.cells[ia][ib] = cell;
+        Ok(())
+    }
+
     #[inline]
     pub fn cell(&self, hero_a: HeroId, hero_b: HeroId) -> MatchupCell {
         let ia = hero_a.as_index();
@@ -233,12 +251,20 @@ pub fn evaluate_draft_5v5(
     let mut enemy_slot_net_delta = [None; TEAM_SIZE];
 
     let mut total_meta_edge = 0.0_f32;
-    let mut total_counter_edge = 0.0_f32;
-    let mut total_synergy_edge = 0.0_f32;
+    let mut counter_pair_count = 0_u32;
+    let mut ally_synergy_count = 0_u32;
+    let mut enemy_synergy_count = 0_u32;
+    let mut raw_counter_sum = 0.0_f32;
+    let mut raw_ally_synergy_sum = 0.0_f32;
+    let mut raw_enemy_synergy_sum = 0.0_f32;
 
     // 1. Base Meta Edge + Per-Slot Initialization
+    let mut ally_picked_count = 0_u32;
+    let mut enemy_picked_count = 0_u32;
+
     for (i, slot) in draft.allies.iter().enumerate() {
         if let Some(pick) = slot {
+            ally_picked_count += 1;
             let role = pick.role.unwrap_or_else(|| default_role_for_slot(i));
             let base_wr = matrix
                 .hero(pick.hero_id)
@@ -252,6 +278,7 @@ pub fn evaluate_draft_5v5(
 
     for (j, slot) in draft.enemies.iter().enumerate() {
         if let Some(pick) = slot {
+            enemy_picked_count += 1;
             let role = pick.role.unwrap_or_else(|| default_role_for_slot(j));
             let base_wr = matrix
                 .hero(pick.hero_id)
@@ -264,18 +291,22 @@ pub fn evaluate_draft_5v5(
     }
 
     // 2. 5v5 Counter Matrix (Allies vs Enemies)
+    let enemy_norm = (enemy_picked_count.max(1)) as f32;
+    let ally_norm = (ally_picked_count.max(1)) as f32;
+
     for (i, ally_opt) in draft.allies.iter().enumerate() {
         let Some(ally) = ally_opt else { continue };
         for (j, enemy_opt) in draft.enemies.iter().enumerate() {
             let Some(enemy) = enemy_opt else { continue };
             let delta = matrix.cell(ally.hero_id, enemy.hero_id).counter_delta;
             counter_grid[i][j] = Some(delta);
-            total_counter_edge += delta;
+            raw_counter_sum += delta;
+            counter_pair_count += 1;
             if let Some(net) = &mut ally_slot_net_delta[i] {
-                *net += delta;
+                *net += delta / enemy_norm;
             }
             if let Some(enemy_net) = &mut enemy_slot_net_delta[j] {
-                *enemy_net -= delta;
+                *enemy_net -= delta / ally_norm;
             }
         }
     }
@@ -288,12 +319,13 @@ pub fn evaluate_draft_5v5(
             let syn = matrix.cell(ally_a.hero_id, ally_b.hero_id).synergy_delta;
             ally_synergy_grid[i][k] = Some(syn);
             ally_synergy_grid[k][i] = Some(syn);
-            total_synergy_edge += syn;
+            raw_ally_synergy_sum += syn;
+            ally_synergy_count += 1;
             if let Some(net_a) = &mut ally_slot_net_delta[i] {
-                *net_a += 0.5 * syn;
+                *net_a += syn / (ally_norm - 1.0).max(1.0);
             }
             if let Some(net_b) = &mut ally_slot_net_delta[k] {
-                *net_b += 0.5 * syn;
+                *net_b += syn / (ally_norm - 1.0).max(1.0);
             }
         }
     }
@@ -304,18 +336,39 @@ pub fn evaluate_draft_5v5(
         for l in (j + 1)..TEAM_SIZE {
             let Some(enemy_b) = draft.enemies[l] else { continue };
             let syn = matrix.cell(enemy_a.hero_id, enemy_b.hero_id).synergy_delta;
-            total_synergy_edge -= syn;
+            raw_enemy_synergy_sum += syn;
+            enemy_synergy_count += 1;
             if let Some(net_a) = &mut enemy_slot_net_delta[j] {
-                *net_a += 0.5 * syn;
+                *net_a += syn / (enemy_norm - 1.0).max(1.0);
             }
             if let Some(net_b) = &mut enemy_slot_net_delta[l] {
-                *net_b += 0.5 * syn;
+                *net_b += syn / (enemy_norm - 1.0).max(1.0);
             }
         }
     }
 
-    // Combine edges in logit space (scale factor 4.0 converts linear WR delta around 0.5 to log-odds)
-    let combined_logit = 4.0
+    // Normalize team-wide edges by √N (correlated 5v5 interactions in a single match)
+    // so a full 25-pair counter matrix scales by √25 = 5 instead of raw 25x summation.
+    total_meta_edge /= 2.236_068; // √5
+    let total_counter_edge = if counter_pair_count > 0 {
+        raw_counter_sum / (counter_pair_count as f32).sqrt()
+    } else {
+        0.0
+    };
+    let ally_syn_norm = if ally_synergy_count > 0 {
+        raw_ally_synergy_sum / (ally_synergy_count as f32).sqrt()
+    } else {
+        0.0
+    };
+    let enemy_syn_norm = if enemy_synergy_count > 0 {
+        raw_enemy_synergy_sum / (enemy_synergy_count as f32).sqrt()
+    } else {
+        0.0
+    };
+    let total_synergy_edge = ally_syn_norm - enemy_syn_norm;
+
+    // Combine normalized edges in logit space (scale factor 3.2 maps realistic draft edges into [32%, 68%])
+    let combined_logit = 3.2
         * (weights.meta_weight * total_meta_edge
             + weights.counter_weight * total_counter_edge
             + weights.synergy_weight * total_synergy_edge);
@@ -369,18 +422,28 @@ pub fn recommend_heroes(
         let base_meta_wr = profile.meta_winrate(role);
 
         let mut counter_delta_sum = 0.0_f32;
+        let mut enemy_cnt = 0_u32;
         for enemy in draft.enemies.iter().flatten() {
             counter_delta_sum += matrix.cell(profile.id, enemy.hero_id).counter_delta;
+            enemy_cnt += 1;
+        }
+        if enemy_cnt > 0 {
+            counter_delta_sum /= enemy_cnt as f32;
         }
 
         let mut synergy_delta_sum = 0.0_f32;
+        let mut ally_cnt = 0_u32;
         for (idx, ally_opt) in draft.allies.iter().enumerate() {
             if idx == target_slot {
                 continue;
             }
             if let Some(ally) = ally_opt {
                 synergy_delta_sum += matrix.cell(profile.id, ally.hero_id).synergy_delta;
+                ally_cnt += 1;
             }
+        }
+        if ally_cnt > 0 {
+            synergy_delta_sum /= ally_cnt as f32;
         }
 
         let comfort_delta = if profile.personal_matches > 0 {
@@ -388,9 +451,9 @@ pub fn recommend_heroes(
                 profile.personal_wins,
                 profile.personal_matches,
                 0.50,
-                15.0,
+                25.0,
             );
-            (personal_wr - 0.50).clamp(-0.12, 0.12)
+            (personal_wr - 0.50).clamp(-0.06, 0.06)
         } else {
             0.0
         };
@@ -402,7 +465,7 @@ pub fn recommend_heroes(
         });
         let sim_eval = evaluate_draft_5v5(&simulated, matrix, weights);
         let logit_with_comfort =
-            logit(sim_eval.ally_win_probability) + 4.0 * weights.comfort_weight * comfort_delta;
+            logit(sim_eval.ally_win_probability) + 1.6 * weights.comfort_weight * comfort_delta;
         let projected_win_probability = sigmoid(logit_with_comfort);
         let net_probability_delta = projected_win_probability - baseline.ally_win_probability;
 
