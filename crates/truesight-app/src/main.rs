@@ -180,7 +180,7 @@ pub fn render_dashboard_string(session: &AppSession, color: bool) -> String {
             .unwrap_or_else(|| format!("Enemy #{}", j + 1));
         out.push_str(&format!("| {:^10} ", col_title));
     }
-    out.push_str("|  Net Slot \n");
+    out.push_str("| Avg Cntr \n");
     out.push_str(
         "----------------------+------------+------------+------------+------------+------------+-----------\n",
     );
@@ -208,8 +208,8 @@ pub fn render_dashboard_string(session: &AppSession, color: bool) -> String {
             }
         }
 
-        if let Some(net) = analysis.ally_slot_net_delta[i] {
-            let pct = net * 100.0;
+        if let Some(avg_c) = analysis.ally_counter_avg[i] {
+            let pct = avg_c * 100.0;
             let nc = if pct >= 0.0 { g } else { rd };
             out.push_str(&format!("| {nc}{b}{pct:+8.2}%{r}\n"));
         } else {
@@ -437,15 +437,16 @@ fn main() {
         session.last_gsi_state = format!("LISTENING on http://{}", l.local_addr());
     }
 
-    let force_cli = args.iter().any(|a| a == "--cli" || a == "--tui");
-
     #[cfg(feature = "gui")]
-    if !force_cli {
-        if let Err(e) = gui::run_gui(session, gsi_listener) {
-            let _ = writeln!(io::stderr(), "GUI error: {e}");
-            std::process::exit(1);
+    {
+        let force_cli = args.iter().any(|a| a == "--cli" || a == "--tui");
+        if !force_cli {
+            if let Err(e) = gui::run_gui(session, gsi_listener) {
+                let _ = writeln!(io::stderr(), "GUI error: {e}");
+                std::process::exit(1);
+            }
+            return;
         }
-        return;
     }
 
     let stdin = io::stdin();

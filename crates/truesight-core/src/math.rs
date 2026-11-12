@@ -213,7 +213,11 @@ pub struct DraftAnalysis5v5 {
     pub counter_grid: [[Option<f32>; TEAM_SIZE]; TEAM_SIZE],
     /// `ally_synergy_grid[ally_a][ally_b]` = normalized synergy delta between allies.
     pub ally_synergy_grid: [[Option<f32>; TEAM_SIZE]; TEAM_SIZE],
-    /// Net contribution per allied slot (meta edge + sum of counters + sum of synergies).
+    /// Pure arithmetic mean of `counter_grid[ally_slot][..]` against picked enemies.
+    pub ally_counter_avg: [Option<f32>; TEAM_SIZE],
+    /// Pure arithmetic mean of `ally_synergy_grid[ally_slot][..]` with picked allies.
+    pub ally_synergy_avg: [Option<f32>; TEAM_SIZE],
+    /// Net contribution per allied slot (meta edge + avg counter + avg synergy).
     pub ally_slot_net_delta: [Option<f32>; TEAM_SIZE],
     /// Net contribution per enemy slot (from enemy perspective).
     pub enemy_slot_net_delta: [Option<f32>; TEAM_SIZE],
@@ -226,15 +230,15 @@ pub struct DraftAnalysis5v5 {
 pub struct HeroRecommendation {
     pub hero_id: HeroId,
     pub role: Role,
-    /// Projected Allied win probability `[0.0, 1.0]` if this hero is picked now.
+    /// Exact projected Allied win probability `[0.0, 1.0]` if this hero is picked into the role slot.
     pub projected_win_probability: f32,
-    /// Net win probability gain vs current draft state.
+    /// Net win probability gain vs the baseline draft (with the target role slot vacant).
     pub net_probability_delta: f32,
     /// Base meta winrate in the requested role (`0.532` = `53.2%`).
     pub base_meta_wr: f32,
-    /// Sum of counter deltas against already picked enemies (green/red).
+    /// Average counter delta against already picked enemies (matches `ally_counter_avg` when picked).
     pub counter_delta_sum: f32,
-    /// Sum of synergy deltas with already picked allies (green/red).
+    /// Average synergy delta with already picked allies (matches `ally_synergy_avg` when picked).
     pub synergy_delta_sum: f32,
     /// Player personal comfort delta (`0.0` if no personal games recorded).
     pub comfort_delta: f32,
@@ -247,6 +251,8 @@ pub fn evaluate_draft_5v5(
 ) -> DraftAnalysis5v5 {
     let mut counter_grid = [[None; TEAM_SIZE]; TEAM_SIZE];
     let mut ally_synergy_grid = [[None; TEAM_SIZE]; TEAM_SIZE];
+    let mut ally_counter_avg = [None; TEAM_SIZE];
+    let mut ally_synergy_avg = [None; TEAM_SIZE];
     let mut ally_slot_net_delta = [None; TEAM_SIZE];
     let mut enemy_slot_net_delta = [None; TEAM_SIZE];
 
@@ -296,10 +302,14 @@ pub fn evaluate_draft_5v5(
 
     for (i, ally_opt) in draft.allies.iter().enumerate() {
         let Some(ally) = ally_opt else { continue };
+        let mut row_sum = 0.0_f32;
+        let mut row_cnt = 0_u32;
         for (j, enemy_opt) in draft.enemies.iter().enumerate() {
             let Some(enemy) = enemy_opt else { continue };
             let delta = matrix.cell(ally.hero_id, enemy.hero_id).counter_delta;
             counter_grid[i][j] = Some(delta);
+            row_sum += delta;
+            row_cnt += 1;
             raw_counter_sum += delta;
             counter_pair_count += 1;
             if let Some(net) = &mut ally_slot_net_delta[i] {
@@ -309,9 +319,15 @@ pub fn evaluate_draft_5v5(
                 *enemy_net -= delta / ally_norm;
             }
         }
+        if row_cnt > 0 {
+            ally_counter_avg[i] = Some(row_sum / row_cnt as f32);
+        }
     }
 
     // 3. Allied Synergy Matrix
+    let mut ally_syn_row_sum = [0.0_f32; TEAM_SIZE];
+    let mut ally_syn_row_cnt = [0_u32; TEAM_SIZE];
+
     for i in 0..TEAM_SIZE {
         let Some(ally_a) = draft.allies[i] else { continue };
         for k in (i + 1)..TEAM_SIZE {
@@ -319,6 +335,10 @@ pub fn evaluate_draft_5v5(
             let syn = matrix.cell(ally_a.hero_id, ally_b.hero_id).synergy_delta;
             ally_synergy_grid[i][k] = Some(syn);
             ally_synergy_grid[k][i] = Some(syn);
+            ally_syn_row_sum[i] += syn;
+            ally_syn_row_cnt[i] += 1;
+            ally_syn_row_sum[k] += syn;
+            ally_syn_row_cnt[k] += 1;
             raw_ally_synergy_sum += syn;
             ally_synergy_count += 1;
             if let Some(net_a) = &mut ally_slot_net_delta[i] {
@@ -327,6 +347,11 @@ pub fn evaluate_draft_5v5(
             if let Some(net_b) = &mut ally_slot_net_delta[k] {
                 *net_b += syn / (ally_norm - 1.0).max(1.0);
             }
+        }
+    }
+    for i in 0..TEAM_SIZE {
+        if ally_syn_row_cnt[i] > 0 {
+            ally_synergy_avg[i] = Some(ally_syn_row_sum[i] / ally_syn_row_cnt[i] as f32);
         }
     }
 
@@ -379,6 +404,8 @@ pub fn evaluate_draft_5v5(
         ally_win_probability,
         counter_grid,
         ally_synergy_grid,
+        ally_counter_avg,
+        ally_synergy_avg,
         ally_slot_net_delta,
         enemy_slot_net_delta,
         total_meta_edge,
@@ -388,8 +415,8 @@ pub fn evaluate_draft_5v5(
 }
 
 /// Evaluates all available heroes for the target slot (`draft.target_role.index()`)
-/// against the draft *without* that slot's current occupant, so `Draft Gain` always
-/// reflects the true probabilistic contribution of picking that hero in that slot.
+/// against the draft *without* that slot's current occupant, so `Projected Win%`
+/// and `Draft Gain` match the exact 5v5 evaluation when picked into that slot.
 pub fn recommend_heroes(
     draft: &DraftState,
     matrix: &MatchupMatrix,
@@ -397,11 +424,7 @@ pub fn recommend_heroes(
     top_k: usize,
 ) -> Vec<HeroRecommendation> {
     let role = draft.target_role;
-    let target_slot = draft
-        .allies
-        .iter()
-        .position(Option::is_none)
-        .unwrap_or_else(|| role.index());
+    let target_slot = role.index();
 
     // Baseline is the draft with `target_slot` vacant so replacing an already-filled
     // slot still compares against the 4 remaining allies + 5 enemies.
@@ -464,9 +487,7 @@ pub fn recommend_heroes(
             role: Some(role),
         });
         let sim_eval = evaluate_draft_5v5(&simulated, matrix, weights);
-        let logit_with_comfort =
-            logit(sim_eval.ally_win_probability) + 1.6 * weights.comfort_weight * comfort_delta;
-        let projected_win_probability = sigmoid(logit_with_comfort);
+        let projected_win_probability = sim_eval.ally_win_probability;
         let net_probability_delta = projected_win_probability - baseline.ally_win_probability;
 
         recommendations.push(HeroRecommendation {
@@ -484,6 +505,7 @@ pub fn recommend_heroes(
     recommendations.sort_by(|a, b| {
         b.projected_win_probability
             .total_cmp(&a.projected_win_probability)
+            .then_with(|| b.comfort_delta.total_cmp(&a.comfort_delta))
             .then_with(|| a.hero_id.cmp(&b.hero_id))
     });
     recommendations.truncate(top_k);

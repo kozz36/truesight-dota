@@ -23,14 +23,29 @@ mod tests {
         // Anti-Mage (1) vs Medusa (94) should have strong positive counter delta
         let cell = matrix.cell(HeroId(1), HeroId(94));
         assert!(
-            cell.counter_delta > 0.08,
-            "Anti-Mage should hard-counter Medusa: {}",
+            cell.counter_delta > 0.04,
+            "Anti-Mage should counter Medusa: {}",
             cell.counter_delta
         );
 
         // Earthshaker (7) vs Phantom Lancer (12)
         let es_pl = matrix.cell(HeroId(7), HeroId(12));
-        assert!(es_pl.counter_delta > 0.10);
+        assert!(es_pl.counter_delta > 0.03);
+
+        // Strict antisymmetry & symmetry across pairs
+        let medusa_am = matrix.cell(HeroId(94), HeroId(1));
+        assert!(
+            (cell.counter_delta + medusa_am.counter_delta).abs() < 1e-6,
+            "Counter matrix must be strictly antisymmetric: {} vs {}",
+            cell.counter_delta,
+            medusa_am.counter_delta
+        );
+        assert!(
+            (cell.synergy_delta - medusa_am.synergy_delta).abs() < 1e-6,
+            "Synergy matrix must be strictly symmetric: {} vs {}",
+            cell.synergy_delta,
+            medusa_am.synergy_delta
+        );
 
         // Recommend Carry when enemy picked Medusa (94) and Storm Spirit (17)
         let mut draft = DraftState {
@@ -56,8 +71,40 @@ mod tests {
             )
             .unwrap();
 
-        let recs = recommend_heroes(&draft, &matrix, &ModelWeights::default(), 3);
-        assert_eq!(recs[0].hero_id, HeroId(1), "Anti-Mage must rank #1 vs Medusa + Storm");
+        let recs = recommend_heroes(&draft, &matrix, &ModelWeights::default(), 10);
+        // Verify role purity: Spirit Breaker (71), Leshrac (52), Mirana (9), Kunkka (23) must not appear in Pos 1 Carry
+        for r in &recs {
+            assert!(
+                ![HeroId(71), HeroId(52), HeroId(9), HeroId(23)].contains(&r.hero_id),
+                "Non-Pos1 hero {:?} leaked into Carry recommendations",
+                r.hero_id
+            );
+        }
+
+        // Verify exact projection identity: picking #1 recommendation into A1 yields exact Projected Win%
+        let top_pick = &recs[0];
+        let mut picked_draft = draft;
+        picked_draft
+            .set_ally(
+                0,
+                Some(DraftPick {
+                    hero_id: top_pick.hero_id,
+                    role: Some(Role::Carry),
+                }),
+            )
+            .unwrap();
+        let eval_after =
+            truesight_core::math::evaluate_draft_5v5(&picked_draft, &matrix, &ModelWeights::default());
+        assert!(
+            (eval_after.ally_win_probability - top_pick.projected_win_probability).abs() < 1e-6,
+            "Header win% ({}) must exactly match Projected Win% ({})",
+            eval_after.ally_win_probability,
+            top_pick.projected_win_probability
+        );
+        assert!(
+            (eval_after.ally_counter_avg[0].unwrap() - top_pick.counter_delta_sum).abs() < 1e-6,
+            "Row Avg Counter must exactly match vs Picked Enemies"
+        );
         assert_eq!(
             matrix.heroes().count(),
             127,

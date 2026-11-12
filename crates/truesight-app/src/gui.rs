@@ -196,13 +196,7 @@ impl eframe::App for TrueSightGuiApp {
                     &self.session.weights,
                     40,
                 );
-                let target_slot_idx = self
-                    .session
-                    .draft
-                    .allies
-                    .iter()
-                    .position(Option::is_none)
-                    .unwrap_or_else(|| self.session.draft.target_role.index());
+                let target_slot_idx = self.session.draft.target_role.index();
 
                 egui::ScrollArea::vertical()
                     .id_salt("bottom_suggestions_scroll")
@@ -439,7 +433,7 @@ impl eframe::App for TrueSightGuiApp {
                                         .unwrap_or_else(|| format!("E{}: Empty", j + 1));
                                     ui.label(RichText::new(enemy_name).strong().color(red));
                                 }
-                                ui.label(RichText::new("Net Slot Edge").strong());
+                                ui.label(RichText::new("Avg Counter").strong());
                                 ui.end_row();
 
                                 for i in 0..TEAM_SIZE {
@@ -463,8 +457,8 @@ impl eframe::App for TrueSightGuiApp {
                                         }
                                     }
 
-                                    if let Some(net) = analysis.ally_slot_net_delta[i] {
-                                        let pct = net * 100.0;
+                                    if let Some(avg_c) = analysis.ally_counter_avg[i] {
+                                        let pct = avg_c * 100.0;
                                         ui.label(
                                             RichText::new(format!("{pct:+6.2}%"))
                                                 .strong()
@@ -493,6 +487,7 @@ impl eframe::App for TrueSightGuiApp {
                                         .unwrap_or_else(|| format!("A{}: Empty", k + 1));
                                     ui.label(RichText::new(col_name).strong().color(cyan));
                                 }
+                                ui.label(RichText::new("Avg Synergy").strong());
                                 ui.end_row();
 
                                 for i in 0..TEAM_SIZE {
@@ -516,6 +511,17 @@ impl eframe::App for TrueSightGuiApp {
                                         } else {
                                             ui.label(RichText::new("·").color(dim));
                                         }
+                                    }
+
+                                    if let Some(avg_s) = analysis.ally_synergy_avg[i] {
+                                        let pct = avg_s * 100.0;
+                                        ui.label(
+                                            RichText::new(format!("{pct:+6.2}%"))
+                                                .strong()
+                                                .color(delta_color(pct, green, red, dim)),
+                                        );
+                                    } else {
+                                        ui.label(RichText::new("—").color(dim));
                                     }
                                     ui.end_row();
                                 }
