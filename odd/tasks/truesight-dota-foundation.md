@@ -1,5 +1,5 @@
 # Feature: truesight-dota-foundation
-Status: in_progress
+Status: completed
 Branch: feat/truesight-dota-foundation
 
 ## Specs
@@ -13,8 +13,8 @@ Branch: feat/truesight-dota-foundation
 ## Tasks
 
 - [x] **T1** (S1, S2, S3) — Route: direct inline (small cohesive core unit, no Writer trigger) — Commit: `c05e077` — Create Cargo workspace, `truesight-core` domain, Logit/Bayesian 5v5 math engine, hero recommendation simulator, ports, and unit tests.
-- [ ] **T2** (S1, S4) — Route: direct inline (small cohesive adapter unit, no Writer trigger) — Commit: pending — Create `truesight-adapters` with seeded meta dataset + JSON snapshot repository (`StatsRepository`), bounded Dota 2 GSI HTTP listener (`DraftEventSource`), and adapter tests.
-- [ ] **T3** (S1, S2, S3, S5) — Route: direct inline (small cohesive UI + docs unit, no Writer trigger) — Commit: pending — Create `truesight-app` native UI (`eframe`/`egui` + headless/CLI state verification), `README.md`, and `docs/architecture.md`.
+- [x] **T2** (S1, S4) — Route: direct inline (small cohesive adapter unit, no Writer trigger) — Commit: `7991cbd` — Create `truesight-adapters` with seeded meta dataset + JSON snapshot repository (`StatsRepository`), bounded Dota 2 GSI HTTP listener (`DraftEventSource`), and adapter tests.
+- [x] **T3** (S1, S2, S3, S5) — Route: direct inline (small cohesive UI + docs unit, no Writer trigger) — Commit: `fd7a795` — Create `truesight-app` native UI, `README.md`, and `docs/architecture.md`.
 
 ## Log
 

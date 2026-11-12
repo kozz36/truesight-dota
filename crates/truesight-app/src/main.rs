@@ -1,1 +1,487 @@
-pub fn main() {}
+use std::io::{self, BufRead, Write};
+use truesight_adapters::gsi::BoundedGsiListener;
+use truesight_adapters::meta_repo::SeededMetaRepository;
+use truesight_core::domain::{Bracket, DraftPick, DraftState, HeroId, Role, Side, TEAM_SIZE};
+use truesight_core::math::{
+    DraftAnalysis5v5, HeroRecommendation, MatchupMatrix, ModelWeights, evaluate_draft_5v5,
+    recommend_heroes,
+};
+use truesight_core::ports::{DraftEvent, DraftEventSource, StatsRepository};
+
+const ANSI_RESET: &str = "\x1b[0m";
+const ANSI_BOLD: &str = "\x1b[1m";
+const ANSI_DIM: &str = "\x1b[2m";
+const ANSI_GREEN: &str = "\x1b[38;2;46;204;113m";
+const ANSI_RED: &str = "\x1b[38;2;231;76;60m";
+const ANSI_CYAN: &str = "\x1b[38;2;52;152;219m";
+const ANSI_GOLD: &str = "\x1b[38;2;241;196;15m";
+
+pub struct AppSession {
+    pub draft: DraftState,
+    pub matrix: MatchupMatrix,
+    pub weights: ModelWeights,
+    pub last_gsi_state: String,
+}
+
+impl AppSession {
+    pub fn new() -> Result<Self, String> {
+        let repo = SeededMetaRepository::new();
+        let matrix = repo
+            .load_matrix(Bracket::DivineImmortal)
+            .map_err(|e| e.to_string())?;
+        Ok(Self {
+            draft: DraftState::default(),
+            matrix,
+            weights: ModelWeights::default(),
+            last_gsi_state: "IDLE (Waiting for Dota 2 GSI)".into(),
+        })
+    }
+
+    pub fn find_hero(&self, query: &str) -> Option<HeroId> {
+        let q = query.trim().to_ascii_lowercase();
+        if q.is_empty() {
+            return None;
+        }
+        if let Ok(num) = q.parse::<u16>() {
+            if self.matrix.hero(HeroId(num)).is_some() {
+                return Some(HeroId(num));
+            }
+        }
+        // Exact prefix or substring match on display_name or slug
+        self.matrix
+            .heroes()
+            .find(|h| {
+                let name = h.display_name.to_ascii_lowercase();
+                let slug = h
+                    .slug
+                    .strip_prefix("npc_dota_hero_")
+                    .unwrap_or(&h.slug)
+                    .to_ascii_lowercase();
+                name == q || slug == q || name.starts_with(&q) || slug.starts_with(&q)
+            })
+            .or_else(|| {
+                self.matrix
+                    .heroes()
+                    .find(|h| h.display_name.to_ascii_lowercase().contains(&q))
+            })
+            .map(|h| h.id)
+    }
+
+    pub fn apply_event(&mut self, event: DraftEvent) {
+        match event {
+            DraftEvent::GameRulesStateChanged {
+                state_name,
+                game_time_secs,
+            } => {
+                self.last_gsi_state = format!("{state_name} (t={game_time_secs}s)");
+            }
+            DraftEvent::LocalPlayerHeroDetected { hero_slug } => {
+                if let Some(id) = self.find_hero(&hero_slug) {
+                    let _ = self.draft.set_ally(
+                        0,
+                        Some(DraftPick {
+                            hero_id: id,
+                            role: Some(self.draft.target_role),
+                        }),
+                    );
+                }
+            }
+            DraftEvent::PickDetected {
+                side,
+                slot,
+                hero_id,
+                role,
+            } => {
+                let pick = Some(DraftPick { hero_id, role });
+                match side {
+                    Side::Allies => {
+                        let _ = self.draft.set_ally(slot, pick);
+                    }
+                    Side::Enemies => {
+                        let _ = self.draft.set_enemy(slot, pick);
+                    }
+                }
+            }
+            DraftEvent::DraftReset => {
+                self.draft.clear();
+            }
+            _ => {}
+        }
+    }
+
+    pub fn evaluate(&self) -> (DraftAnalysis5v5, Vec<HeroRecommendation>) {
+        let analysis = evaluate_draft_5v5(&self.draft, &self.matrix, &self.weights);
+        let recs = recommend_heroes(&self.draft, &self.matrix, &self.weights, 6);
+        (analysis, recs)
+    }
+}
+
+pub fn render_dashboard_string(session: &AppSession, color: bool) -> String {
+    let (analysis, recs) = session.evaluate();
+    let mut out = String::with_capacity(4096);
+
+    let (b, r, g, rd, c, y, d) = if color {
+        (
+            ANSI_BOLD, ANSI_RESET, ANSI_GREEN, ANSI_RED, ANSI_CYAN, ANSI_GOLD, ANSI_DIM,
+        )
+    } else {
+        ("", "", "", "", "", "", "")
+    };
+
+    let ally_pct = analysis.ally_win_probability * 100.0;
+    let enemy_pct = 100.0 - ally_pct;
+    let win_color = if ally_pct >= 50.0 { g } else { rd };
+
+    out.push_str(&format!(
+        "{b}========================================================================================{r}\n"
+    ));
+    out.push_str(&format!(
+        "{b} TRUESIGHT-DOTA · 5v5 LIVE DRAFT ORACLE{r}   | Bracket: {c}{}{r} | Target: {y}{}{r}\n",
+        session.draft.bracket.label(),
+        session.draft.target_role.label()
+    ));
+    out.push_str(&format!(
+        " GSI State: {d}{}{r}\n",
+        session.last_gsi_state
+    ));
+    out.push_str(&format!(
+        "{b}----------------------------------------------------------------------------------------{r}\n"
+    ));
+    out.push_str(&format!(
+        " {b}WIN PROBABILITY:{r}  Allies {win_color}{b}{ally_pct:5.1}%{r}  vs  Enemies {b}{enemy_pct:5.1}%{r}   \
+         (Meta: {:+5.1}% | Counter: {:+5.1}% | Synergy: {:+5.1}%)\n",
+        analysis.total_meta_edge * 100.0,
+        analysis.total_counter_edge * 100.0,
+        analysis.total_synergy_edge * 100.0,
+    ));
+    out.push_str(&format!(
+        "{b}========================================================================================{r}\n\n"
+    ));
+
+    // 5v5 Counter Matrix Header
+    out.push_str(&format!(
+        "{b} [5v5 COUNTER MATRIX — Allies (Rows) vs Enemies (Columns)]{r}\n"
+    ));
+    out.push_str(&format!("{:<22}", " ALLY \\ ENEMY"));
+    for j in 0..TEAM_SIZE {
+        let col_title = session.draft.enemies[j]
+            .and_then(|p| session.matrix.hero(p.hero_id))
+            .map(|h| truncate_name(&h.display_name, 10))
+            .unwrap_or_else(|| format!("Enemy #{}", j + 1));
+        out.push_str(&format!("| {:^10} ", col_title));
+    }
+    out.push_str("|  Net Slot \n");
+    out.push_str(
+        "----------------------+------------+------------+------------+------------+------------+-----------\n",
+    );
+
+    for i in 0..TEAM_SIZE {
+        let ally_label = session.draft.allies[i]
+            .and_then(|p| session.matrix.hero(p.hero_id))
+            .map(|h| format!("A{}: {}", i + 1, truncate_name(&h.display_name, 17)))
+            .unwrap_or_else(|| format!("A{}: [Empty Slot]", i + 1));
+        out.push_str(&format!(" {:<21}", ally_label));
+
+        for j in 0..TEAM_SIZE {
+            if let Some(delta) = analysis.counter_grid[i][j] {
+                let pct = delta * 100.0;
+                let cell_color = if pct > 0.15 {
+                    g
+                } else if pct < -0.15 {
+                    rd
+                } else {
+                    d
+                };
+                out.push_str(&format!("| {cell_color}{pct:+9.2}%{r} "));
+            } else {
+                out.push_str(&format!("| {d}{:^10}{r} ", "·"));
+            }
+        }
+
+        if let Some(net) = analysis.ally_slot_net_delta[i] {
+            let pct = net * 100.0;
+            let nc = if pct >= 0.0 { g } else { rd };
+            out.push_str(&format!("| {nc}{b}{pct:+8.2}%{r}\n"));
+        } else {
+            out.push_str(&format!("| {d}{:^9}{r}\n", "—"));
+        }
+    }
+
+    // Allied Synergy Summary
+    out.push_str(&format!("\n{b} [ALLIED SYNERGY PAIRS]{r}\n "));
+    let mut any_syn = false;
+    for i in 0..TEAM_SIZE {
+        for k in (i + 1)..TEAM_SIZE {
+            if let Some(syn) = analysis.ally_synergy_grid[i][k] {
+                any_syn = true;
+                let name_a = session.draft.allies[i]
+                    .and_then(|p| session.matrix.hero(p.hero_id))
+                    .map(|h| h.display_name.as_str())
+                    .unwrap_or("?");
+                let name_b = session.draft.allies[k]
+                    .and_then(|p| session.matrix.hero(p.hero_id))
+                    .map(|h| h.display_name.as_str())
+                    .unwrap_or("?");
+                let pct = syn * 100.0;
+                let sc = if pct >= 0.0 { g } else { rd };
+                out.push_str(&format!("{name_a} + {name_b}: {sc}{pct:+.2}%{r}   "));
+            }
+        }
+    }
+    if !any_syn {
+        out.push_str(&format!("{d}Pick at least 2 allied heroes to see pairwise synergy deltas.{r}"));
+    }
+    out.push_str("\n\n");
+
+    // Top Hero Recommendations
+    out.push_str(&format!(
+        "{b} [TOP RECOMMENDED PICKS FOR {}]{r}\n",
+        session.draft.target_role.label()
+    ));
+    out.push_str(
+        "  #  Hero                 | Proj Win% | Draft Gain | Meta WR  | vs Enemy | w/ Allies | Comfort \n",
+    );
+    out.push_str(
+        " -------------------------+-----------+------------+----------+----------+-----------+---------\n",
+    );
+
+    for (rank, rec) in recs.iter().enumerate() {
+        let name = session
+            .matrix
+            .hero(rec.hero_id)
+            .map(|h| h.display_name.as_str())
+            .unwrap_or("Unknown");
+        let gain_pct = rec.net_probability_delta * 100.0;
+        let cnt_pct = rec.counter_delta_sum * 100.0;
+        let syn_pct = rec.synergy_delta_sum * 100.0;
+        let com_pct = rec.comfort_delta * 100.0;
+
+        let gc = if gain_pct >= 0.0 { g } else { rd };
+        let cc = if cnt_pct >= 0.0 { g } else { rd };
+        let sc = if syn_pct >= 0.0 { g } else { rd };
+
+        out.push_str(&format!(
+            " {:>2}. {:<20} | {:>8.2}% | {gc}{b}{:>9.2}%{r} | {:>7.2}% | {cc}{:>7.2}%{r} | {sc}{:>8.2}%{r} | {:>+6.2}%\n",
+            rank + 1,
+            truncate_name(name, 20),
+            rec.projected_win_probability * 100.0,
+            gain_pct,
+            rec.base_meta_wr * 100.0,
+            cnt_pct,
+            syn_pct,
+            com_pct,
+        ));
+    }
+
+    out
+}
+
+fn truncate_name(s: &str, max_len: usize) -> String {
+    if s.chars().count() <= max_len {
+        s.to_string()
+    } else {
+        let mut t: String = s.chars().take(max_len.saturating_sub(1)).collect();
+        t.push('…');
+        t
+    }
+}
+
+pub fn execute_command(session: &mut AppSession, line: &str) -> Result<bool, String> {
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    let Some(&cmd) = parts.first() else {
+        return Ok(true);
+    };
+
+    match cmd {
+        "q" | "quit" | "exit" => return Ok(false),
+        "reset" | "clear" => {
+            session.draft.clear();
+        }
+        "role" => {
+            let Some(&r_str) = parts.get(1) else {
+                return Err("Usage: role <1..5>".into());
+            };
+            session.draft.target_role = match r_str {
+                "1" | "carry" => Role::Carry,
+                "2" | "mid" => Role::Mid,
+                "3" | "off" | "offlane" => Role::Offlane,
+                "4" | "soft" => Role::SoftSupport,
+                "5" | "hard" | "sup" => Role::HardSupport,
+                _ => return Err("Role must be 1..5".into()),
+            };
+        }
+        "ally" | "a" => {
+            if parts.len() < 3 {
+                return Err("Usage: ally <1..5> <hero_name>".into());
+            }
+            let slot = parts[1]
+                .parse::<usize>()
+                .map_err(|_| "Slot must be 1..5".to_string())?;
+            if !(1..=5).contains(&slot) {
+                return Err("Slot must be between 1 and 5".into());
+            }
+            let query = parts[2..].join(" ");
+            if query == "none" || query == "-" {
+                session
+                    .draft
+                    .set_ally(slot - 1, None)
+                    .map_err(|e| e.to_string())?;
+            } else {
+                let hero_id = session
+                    .find_hero(&query)
+                    .ok_or_else(|| format!("Hero not found: '{query}'"))?;
+                session
+                    .draft
+                    .set_ally(
+                        slot - 1,
+                        Some(DraftPick {
+                            hero_id,
+                            role: Role::ALL.get(slot - 1).copied(),
+                        }),
+                    )
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        "enemy" | "e" => {
+            if parts.len() < 3 {
+                return Err("Usage: enemy <1..5> <hero_name>".into());
+            }
+            let slot = parts[1]
+                .parse::<usize>()
+                .map_err(|_| "Slot must be 1..5".to_string())?;
+            if !(1..=5).contains(&slot) {
+                return Err("Slot must be between 1 and 5".into());
+            }
+            let query = parts[2..].join(" ");
+            if query == "none" || query == "-" {
+                session
+                    .draft
+                    .set_enemy(slot - 1, None)
+                    .map_err(|e| e.to_string())?;
+            } else {
+                let hero_id = session
+                    .find_hero(&query)
+                    .ok_or_else(|| format!("Hero not found: '{query}'"))?;
+                session
+                    .draft
+                    .set_enemy(
+                        slot - 1,
+                        Some(DraftPick {
+                            hero_id,
+                            role: Role::ALL.get(slot - 1).copied(),
+                        }),
+                    )
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        "ban" | "b" => {
+            if parts.len() < 2 {
+                return Err("Usage: ban <hero_name>".into());
+            }
+            let query = parts[1..].join(" ");
+            let hero_id = session
+                .find_hero(&query)
+                .ok_or_else(|| format!("Hero not found: '{query}'"))?;
+            session
+                .draft
+                .toggle_ban(hero_id)
+                .map_err(|e| e.to_string())?;
+        }
+        _ => {
+            return Err(
+                "Commands: ally <1..5> <hero> | enemy <1..5> <hero> | ban <hero> | role <1..5> | reset | quit"
+                    .into(),
+            );
+        }
+    }
+    Ok(true)
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let mut session = match AppSession::new() {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "Failed to initialize truesight-dota: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    if args.iter().any(|a| a == "--demo") {
+        let _ = execute_command(&mut session, "ally 3 magnus");
+        let _ = execute_command(&mut session, "ally 5 crystal maiden");
+        let _ = execute_command(&mut session, "enemy 1 medusa");
+        let _ = execute_command(&mut session, "enemy 2 storm spirit");
+        let _ = execute_command(&mut session, "enemy 3 axe");
+        let _ = execute_command(&mut session, "role 1");
+        let no_color = args.iter().any(|a| a == "--no-color");
+        if writeln!(io::stdout(), "{}", render_dashboard_string(&session, !no_color)).is_err() {
+            std::process::exit(0);
+        }
+        return;
+    }
+
+    let gsi_addr = std::env::var("TRUESIGHT_GSI_ADDR").unwrap_or_else(|_| "127.0.0.1:4001".into());
+    let mut gsi_listener = BoundedGsiListener::bind(&gsi_addr).ok();
+    if let Some(ref l) = gsi_listener {
+        session.last_gsi_state = format!("LISTENING on http://{}", l.local_addr());
+    }
+
+    let stdin = io::stdin();
+    let mut stdout = io::stdout();
+
+    loop {
+        if let Some(ref mut listener) = gsi_listener {
+            if let Ok(events) = listener.poll_events() {
+                for ev in events {
+                    session.apply_event(ev);
+                }
+            }
+        }
+
+        if write!(
+            stdout,
+            "\x1b[2J\x1b[H{}\n{ANSI_BOLD}truesight>{ANSI_RESET} (ally <1..5> <hero> | enemy <1..5> <hero> | role <1..5> | reset | quit): ",
+            render_dashboard_string(&session, true)
+        )
+        .is_err()
+            || stdout.flush().is_err()
+        {
+            break;
+        }
+
+        let mut line = String::new();
+        match stdin.lock().read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => match execute_command(&mut session, &line) {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(msg) => {
+                    let _ = writeln!(stdout, "{ANSI_RED}Error: {msg}{ANSI_RESET}");
+                }
+            },
+            Err(_) => break,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AppSession, execute_command, render_dashboard_string};
+
+    #[test]
+    fn interactive_commands_update_5v5_table_and_recommendations() {
+        let mut session = AppSession::new().unwrap();
+        assert!(execute_command(&mut session, "ally 3 magnus").unwrap());
+        assert!(execute_command(&mut session, "enemy 1 medusa").unwrap());
+        assert!(execute_command(&mut session, "enemy 2 storm").unwrap());
+        assert!(execute_command(&mut session, "role 1").unwrap());
+
+        let rendered = render_dashboard_string(&session, false);
+        assert!(rendered.contains("TRUESIGHT-DOTA · 5v5 LIVE DRAFT ORACLE"));
+        assert!(rendered.contains("A3: Magnus"));
+        assert!(rendered.contains("Medusa"));
+        assert!(rendered.contains("Storm Spi"));
+        assert!(rendered.contains("1. Anti-Mage"));
+    }
+}

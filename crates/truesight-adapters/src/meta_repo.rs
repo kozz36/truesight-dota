@@ -104,6 +104,13 @@ impl StatsRepository for SeededMetaRepository {
             (86, 7, 555, 515),   // Rubick steals Fissure/Echo Slam vs Earthshaker
             (86, 97, 560, 520),  // Rubick steals Reverse Polarity vs Magnus
             (11, 5, 550, 565),   // Shadow Fiend + Crystal Maiden aura/setup
+            (97, 94, 480, 520),  // Magnus vs Medusa
+            (97, 17, 540, 535),  // Magnus Reverse Polarity catches Storm Spirit
+            (97, 2, 485, 550),   // Magnus vs Axe; strong teamfight synergy
+            (97, 5, 525, 560),   // Magnus Reverse Polarity + Crystal Maiden Freezing Field
+            (5, 94, 465, 530),   // Crystal Maiden vs Medusa
+            (5, 17, 520, 540),   // Crystal Maiden Frostbite roots Storm Spirit
+            (5, 2, 450, 555),    // Axe jumps Crystal Maiden; strong lane synergy together
         ];
 
         for &(a, b, vs_wins_a, with_wins) in notable_pairs {
