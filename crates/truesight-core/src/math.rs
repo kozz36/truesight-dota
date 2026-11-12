@@ -356,6 +356,9 @@ pub fn recommend_heroes(
         if draft.is_unavailable(profile.id) {
             continue;
         }
+        if !profile.primary_roles.is_empty() && !profile.primary_roles.contains(&role) {
+            continue;
+        }
 
         let base_meta_wr = profile.meta_winrate(role);
 
@@ -378,10 +381,10 @@ pub fn recommend_heroes(
             let personal_wr = bayesian_winrate(
                 profile.personal_wins,
                 profile.personal_matches,
-                base_meta_wr,
-                12.0,
+                0.50,
+                15.0,
             );
-            personal_wr - base_meta_wr
+            (personal_wr - 0.50).clamp(-0.12, 0.12)
         } else {
             0.0
         };

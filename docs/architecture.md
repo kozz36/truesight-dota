@@ -37,8 +37,8 @@
 | Crate | Role | I/O & Concurrency Contract |
 |-------|------|----------------------------|
 | `crates/truesight-core` | Pure domain model, mathematical 5v5 engine, and port traits (`StatsRepository`, `DraftEventSource`). | Zero I/O, zero network, zero async dependencies. `#![forbid(unsafe_code)]`. |
-| `crates/truesight-adapters` | Infrastructure implementations for `StatsRepository` and `DraftEventSource`. | Bounded TCP read (`MAX_GSI_PAYLOAD_BYTES = 64 KiB`), bounded `mpsc::sync_channel(16)` backpressure, explicit shutdown on `Drop`. |
-| `crates/truesight-app` | User-facing 5v5 live matrix renderer, command loop, and `--demo` verification mode. | Separates deterministic state transitions (`AppSession`) from terminal/UI rendering (`render_dashboard_string`) and handles `BrokenPipe` cleanly. |
+| `crates/truesight-adapters` | Infrastructure implementations for `StatsRepository` (`SeededMetaRepository` with all 127 OpenDota heroes + player `127255741` comfort pool) and `DraftEventSource`. | Bounded TCP read (`MAX_GSI_PAYLOAD_BYTES = 64 KiB`), bounded `mpsc::sync_channel(16)` backpressure, explicit shutdown on `Drop`. |
+| `crates/truesight-app` | User-facing native `eframe`/`egui` desktop GUI (`--gui`), interactive TrueColor 5v5 CLI/TUI, and `--demo` verification mode. | Separates deterministic state transitions (`AppSession`) from GUI/TUI rendering and handles `BrokenPipe` cleanly. Additive `gui` Cargo feature (`--no-default-features` builds pure CLI with 0 external crates). |
 
 ## 3. Mathematical Formulation
 

@@ -1,3 +1,6 @@
+#[cfg(feature = "gui")]
+mod gui;
+
 use std::io::{self, BufRead, Write};
 use truesight_adapters::gsi::BoundedGsiListener;
 use truesight_adapters::meta_repo::SeededMetaRepository;
@@ -35,6 +38,13 @@ impl AppSession {
             weights: ModelWeights::default(),
             last_gsi_state: "IDLE (Waiting for Dota 2 GSI)".into(),
         })
+    }
+
+    pub fn set_bracket(&mut self, bracket: Bracket) {
+        self.draft.bracket = bracket;
+        if let Ok(m) = SeededMetaRepository::new().load_matrix(bracket) {
+            self.matrix = m;
+        }
     }
 
     pub fn find_hero(&self, query: &str) -> Option<HeroId> {
@@ -425,6 +435,15 @@ fn main() {
     let mut gsi_listener = BoundedGsiListener::bind(&gsi_addr).ok();
     if let Some(ref l) = gsi_listener {
         session.last_gsi_state = format!("LISTENING on http://{}", l.local_addr());
+    }
+
+    #[cfg(feature = "gui")]
+    if args.iter().any(|a| a == "--gui") {
+        if let Err(e) = gui::run_gui(session, gsi_listener) {
+            let _ = writeln!(io::stderr(), "GUI error: {e}");
+            std::process::exit(1);
+        }
+        return;
     }
 
     let stdin = io::stdin();

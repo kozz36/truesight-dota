@@ -4,17 +4,21 @@ High-performance, native Rust 5v5 live draft analyzer and probabilistic hero rec
 
 ## Quick Path
 
-1. **Run the live 5v5 draft demo**:
+1. **Launch the Native Desktop GUI (`eframe`/`egui`)**:
+   ```bash
+   cargo run -p truesight-app -- --gui
+   ```
+2. **Run the live 5v5 draft CLI/TUI demo**:
    ```bash
    cargo run -p truesight-app -- --demo
    ```
-2. **Start the interactive live draft session + Dota 2 GSI listener** (`127.0.0.1:4001`):
+3. **Start the interactive CLI/TUI draft session + Dota 2 GSI listener** (`127.0.0.1:4001`):
    ```bash
    cargo run -p truesight-app
    ```
-3. **Run the full deterministic test suite**:
+4. **Run the full deterministic test suite**:
    ```bash
-   cargo test --workspace
+   cargo test --workspace --all-features
    ```
 
 ## Architectural Highlights

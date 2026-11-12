@@ -1,5 +1,5 @@
 # Feature: truesight-dota-foundation
-Status: in_progress
+Status: completed
 Branch: feat/truesight-dota-foundation
 
 ## Specs
@@ -17,7 +17,7 @@ Branch: feat/truesight-dota-foundation
 - [x] **T2** (S1, S4) — Route: direct inline (small cohesive adapter unit, no Writer trigger) — Commit: `7991cbd` — Create `truesight-adapters` with seeded meta dataset + JSON snapshot repository (`StatsRepository`), bounded Dota 2 GSI HTTP listener (`DraftEventSource`), and adapter tests.
 - [x] **T3** (S1, S2, S3, S5) — Route: direct inline (small cohesive UI + docs unit, no Writer trigger) — Commit: `932c2f5` — Create `truesight-app` native UI, `README.md`, and `docs/architecture.md`.
 - [x] **T4** (S4, S6) — Route: direct inline (cohesive adapter unit, no Writer trigger) — Commit: `e38ea85` — Synchronize the full 127-hero OpenDota dataset and player `127255741` comfort history into `truesight-adapters` (`OpenDotaSnapshotRepository`) with bracket-aware winrates and unit tests.
-- [ ] **T5** (S1, S2, S3, S5, S6) — Route: direct inline (cohesive GUI + docs unit, no Writer trigger) — Commit: pending — Add native desktop `eframe`/`egui` GUI mode (`--gui`) in `truesight-app` sharing `AppSession` with CLI/TUI, and update documentation.
+- [x] **T5** (S1, S2, S3, S5, S6) — Route: direct inline (cohesive GUI + docs unit, no Writer trigger) — Commit: `09ab3b0` — Add native desktop `eframe`/`egui` GUI mode (`--gui`) in `truesight-app` sharing `AppSession` with CLI/TUI, and update documentation.
 
 ## Log
 
