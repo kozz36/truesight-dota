@@ -2,6 +2,7 @@ pub mod gsi;
 pub mod meta_repo;
 pub mod snapshot_data;
 pub mod snapshot_pairs;
+pub mod sync;
 
 #[cfg(test)]
 mod tests {
@@ -306,5 +307,54 @@ mod tests {
                 bracket
             );
         }
+    }
+
+    #[test]
+    fn local_cache_manager_enforces_24h_meta_ttl_1h_player_ttl_and_applies_cached_comfort() {
+        use crate::sync::{LocalCacheManager, META_TTL_SECS, PLAYER_TTL_SECS};
+
+        assert_eq!(META_TTL_SECS, 86_400, "Meta DB TTL must be 24 hours (86400s)");
+        assert_eq!(PLAYER_TTL_SECS, 3_600, "Player comfort TTL must be 1 hour (3600s)");
+
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "truesight_cache_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        let mgr = LocalCacheManager::with_dir(tmp_dir.clone(), 127_255_741);
+
+        let now = 1_794_500_000_u64;
+        assert!(mgr.is_meta_stale(now));
+        assert!(mgr.is_player_stale(now));
+
+        let sample_meta_json = r#"[
+            {"id": 1, "1_pick": 1000, "1_win": 600, "2_pick": 1000, "2_win": 600, "3_pick": 1000, "3_win": 600, "4_pick": 1000, "4_win": 600, "5_pick": 1000, "5_win": 600, "6_pick": 1000, "6_win": 600, "7_pick": 1000, "7_win": 600, "pub_pick_trend": [1000,1000,1000,1000,1000,1000,1000], "pub_win_trend": [500,500,500,500,580,580,580]}
+        ]"#;
+        let sample_player_json = r#"[
+            {"hero_id": 1, "last_played": 1794499000, "games": 50, "win": 40},
+            {"hero_id": 8, "last_played": 1700000000, "games": 30, "win": 20}
+        ]"#;
+        mgr.write_cached_files(Some(sample_meta_json), Some(sample_player_json), now)
+            .unwrap();
+
+        assert!(!mgr.is_meta_stale(now + 3600), "Meta cache at +1h must be fresh (<24h)");
+        assert!(mgr.is_meta_stale(now + 86_401), "Meta cache at +24h1s must be stale (>24h)");
+        assert!(!mgr.is_player_stale(now + 1800), "Player cache at +30m must be fresh (<1h)");
+        assert!(mgr.is_player_stale(now + 3601), "Player cache at +60m1s must be stale (>1h)");
+
+        let repo = mgr.build_repository();
+        let mat = repo.load_matrix(Bracket::Legend).unwrap();
+        let am = mat.hero(HeroId(1)).unwrap();
+        assert_eq!(am.personal_matches, 50);
+        assert_eq!(am.personal_wins, 40);
+        assert!(am.comfort_decay > 0.98, "Recently played Anti-Mage must have ~1.0 decay");
+        assert!(am.role_winrates[0] > 0.59, "Cached heroStats 60% winrate must override snapshot: {}", am.role_winrates[0]);
+        assert!(am.trend_delta > 0.01, "Cached 7-day trend jump must populate trend_delta: {}", am.trend_delta);
+
+        let jugg = mat.hero(HeroId(8)).unwrap();
+        assert_eq!(jugg.personal_matches, 30);
+        assert!(jugg.comfort_decay < 0.50, "Stale Juggernaut games must decay: {}", jugg.comfort_decay);
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 }

@@ -8,7 +8,8 @@ use truesight_core::ports::{PortError, StatsRepository};
 /// player `127255741` personal comfort history.
 #[derive(Debug, Clone, Default)]
 pub struct SeededMetaRepository {
-    pub custom_personal_pool: Vec<(HeroId, u32, u32)>,
+    pub custom_personal_pool: Vec<(HeroId, u32, u32, f32)>,
+    pub custom_hero_meta: Vec<(HeroId, [f32; 8], f32)>,
     pub use_demo_comfort_defaults: bool,
 }
 
@@ -16,6 +17,7 @@ impl SeededMetaRepository {
     pub fn new() -> Self {
         Self {
             custom_personal_pool: Vec::new(),
+            custom_hero_meta: Vec::new(),
             use_demo_comfort_defaults: false,
         }
     }
@@ -23,6 +25,7 @@ impl SeededMetaRepository {
     pub fn with_demo_comfort() -> Self {
         Self {
             custom_personal_pool: Vec::new(),
+            custom_hero_meta: Vec::new(),
             use_demo_comfort_defaults: true,
         }
     }
@@ -48,11 +51,22 @@ impl StatsRepository for SeededMetaRepository {
         let mut shift_sum = 0.0_f32;
         let mut shift_cnt = 0_u32;
 
-        // 1. Load all 127 official Dota 2 heroes from the OpenDota snapshot
+        // 1. Load all 127 official Dota 2 heroes from the OpenDota snapshot (with optional live cache overrides)
         for row in OPENDOTA_HERO_SNAPSHOT {
-            let base_wr = row.bracket_winrates[b_idx];
-            let mean_wr = row.bracket_winrates.iter().copied().sum::<f32>()
-                / (row.bracket_winrates.len() as f32);
+            let override_meta = self
+                .custom_hero_meta
+                .iter()
+                .find(|(hid, _, _)| hid.0 == row.id);
+            let bracket_wrs = override_meta
+                .map(|(_, bw, _)| *bw)
+                .unwrap_or(row.bracket_winrates);
+            let trend_delta = override_meta
+                .map(|(_, _, td)| *td)
+                .unwrap_or(row.trend_delta);
+
+            let base_wr = bracket_wrs[b_idx];
+            let mean_wr =
+                bracket_wrs.iter().copied().sum::<f32>() / (bracket_wrs.len() as f32);
             let shift = base_wr - mean_wr;
             if (row.id as usize) < truesight_core::domain::MAX_HEROES {
                 hero_bracket_shift[row.id as usize] = shift;
@@ -76,7 +90,7 @@ impl StatsRepository for SeededMetaRepository {
                 attack_type: row.attack_type,
                 has_disable: row.has_disable,
                 has_initiation: row.has_initiation,
-                trend_delta: row.trend_delta,
+                trend_delta,
                 comfort_decay: row.comfort_decay,
             })
             .map_err(|e| PortError(e.to_string()))?;
@@ -89,11 +103,12 @@ impl StatsRepository for SeededMetaRepository {
         };
 
         // 2. Apply custom personal pool overrides when provided
-        for &(hero_id, matches, wins) in &self.custom_personal_pool {
+        for &(hero_id, matches, wins, decay) in &self.custom_personal_pool {
             if let Some(existing) = m.hero(hero_id).cloned() {
                 m.upsert_hero(HeroProfile {
                     personal_matches: matches,
                     personal_wins: wins,
+                    comfort_decay: decay,
                     ..existing
                 })
                 .map_err(|e| PortError(e.to_string()))?;

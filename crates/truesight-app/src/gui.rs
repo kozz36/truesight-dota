@@ -67,6 +67,8 @@ impl eframe::App for TrueSightGuiApp {
                 ui.heading(RichText::new("TRUESIGHT-DOTA · 5v5 LIVE DRAFT ORACLE").strong());
                 ui.separator();
                 ui.label(RichText::new(&self.session.last_gsi_state).color(dim));
+                ui.separator();
+                ui.label(RichText::new(&self.session.db_status).color(cyan));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("Reset Draft").clicked() {
                         self.session.draft.clear();
@@ -83,6 +85,12 @@ impl eframe::App for TrueSightGuiApp {
                         self.status_banner =
                             "Loaded Demo 5v5 (Faceless Void + Magnus + CM vs Medusa + Storm + Axe)."
                                 .into();
+                    }
+                    if ui.button("Sync DB").clicked() {
+                        match self.session.sync_db(true) {
+                            Ok(msg) => self.status_banner = msg,
+                            Err(e) => self.status_banner = format!("Sync notice: {e} (using embedded snapshot)"),
+                        }
                     }
                 });
             });
@@ -108,10 +116,13 @@ impl eframe::App for TrueSightGuiApp {
                 );
                 ui.separator();
                 ui.label(format!(
-                    "Meta Edge: {:+.2}%  |  Counter Edge: {:+.2}%  |  Synergy Edge: {:+.2}%",
+                    "Meta: {:+.2}% | Counter: {:+.2}% | Synergy: {:+.2}% (A:{:+.1}% E:{:+.1}%) | Comp: {:+.2}%",
                     analysis.total_meta_edge * 100.0,
                     analysis.total_counter_edge * 100.0,
-                    analysis.total_synergy_edge * 100.0
+                    analysis.total_synergy_edge * 100.0,
+                    analysis.ally_synergy_norm * 100.0,
+                    analysis.enemy_synergy_norm * 100.0,
+                    analysis.total_composition_edge * 100.0,
                 ));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     for bracket in Bracket::ALL.into_iter().rev() {
@@ -306,8 +317,9 @@ impl eframe::App for TrueSightGuiApp {
                                 let is_active = self.active_picker == Some((Side::Allies, i));
 
                                 ui.horizontal(|ui| {
+                                    let arrow = if is_active { "[^]" } else { "[v]" };
                                     let btn_label =
-                                        format!("A{}: {} ▾", i + 1, current_name);
+                                        format!("A{}: {} {}", i + 1, current_name, arrow);
                                     if ui
                                         .selectable_label(
                                             is_active,
@@ -348,8 +360,9 @@ impl eframe::App for TrueSightGuiApp {
                                 let is_active = self.active_picker == Some((Side::Enemies, j));
 
                                 ui.horizontal(|ui| {
+                                    let arrow = if is_active { "[^]" } else { "[v]" };
                                     let btn_label =
-                                        format!("E{}: {} ▾", j + 1, current_name);
+                                        format!("E{}: {} {}", j + 1, current_name, arrow);
                                     if ui
                                         .selectable_label(
                                             is_active,
@@ -460,7 +473,7 @@ impl eframe::App for TrueSightGuiApp {
                                             let btn_text = if idx == 0
                                                 && !self.picker_search.trim().is_empty()
                                             {
-                                                RichText::new(format!("⏎ {hname}"))
+                                                RichText::new(format!("[Enter] {hname}"))
                                                     .strong()
                                                     .color(gold)
                                             } else {

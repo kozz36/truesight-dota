@@ -3,7 +3,7 @@ mod gui;
 
 use std::io::{self, BufRead, Write};
 use truesight_adapters::gsi::BoundedGsiListener;
-use truesight_adapters::meta_repo::SeededMetaRepository;
+use truesight_adapters::sync::LocalCacheManager;
 use truesight_core::domain::{Bracket, DraftPick, DraftState, HeroId, Role, Side, TEAM_SIZE};
 use truesight_core::math::{
     DraftAnalysis5v5, HeroRecommendation, MatchupMatrix, ModelWeights, evaluate_draft_5v5,
@@ -23,28 +23,50 @@ pub struct AppSession {
     pub draft: DraftState,
     pub matrix: MatchupMatrix,
     pub weights: ModelWeights,
+    pub cache_mgr: LocalCacheManager,
+    pub db_status: String,
     pub last_gsi_state: String,
 }
 
 impl AppSession {
     pub fn new() -> Result<Self, String> {
-        let repo = SeededMetaRepository::new();
+        let cache_mgr = LocalCacheManager::default();
+        let repo = cache_mgr.build_repository();
         let matrix = repo
             .load_matrix(Bracket::Legend)
             .map_err(|e| e.to_string())?;
+        let db_status = cache_mgr.freshness_badge(LocalCacheManager::now_unix());
         Ok(Self {
             draft: DraftState::default(),
             matrix,
             weights: ModelWeights::default(),
+            cache_mgr,
+            db_status,
             last_gsi_state: "IDLE (Waiting for Dota 2 GSI)".into(),
         })
     }
 
     pub fn set_bracket(&mut self, bracket: Bracket) {
         self.draft.bracket = bracket;
-        if let Ok(m) = SeededMetaRepository::new().load_matrix(bracket) {
+        if let Ok(m) = self.cache_mgr.build_repository().load_matrix(bracket) {
             self.matrix = m;
         }
+    }
+
+    pub fn sync_db(&mut self, force: bool) -> Result<String, String> {
+        let msg = self
+            .cache_mgr
+            .sync_from_opendota(force)
+            .map_err(|e| e.to_string())?;
+        if let Ok(m) = self
+            .cache_mgr
+            .build_repository()
+            .load_matrix(self.draft.bracket)
+        {
+            self.matrix = m;
+        }
+        self.db_status = self.cache_mgr.freshness_badge(LocalCacheManager::now_unix());
+        Ok(msg)
     }
 
     /// Returns available heroes for `(side, slot)` matching `query`, ordered with prefix
@@ -196,18 +218,21 @@ pub fn render_dashboard_string(session: &AppSession, color: bool) -> String {
         session.draft.target_role.label()
     ));
     out.push_str(&format!(
-        " GSI State: {d}{}{r}\n",
-        session.last_gsi_state
+        " GSI State: {d}{}{r}   |   {d}{}{r}\n",
+        session.last_gsi_state, session.db_status
     ));
     out.push_str(&format!(
         "{b}----------------------------------------------------------------------------------------{r}\n"
     ));
     out.push_str(&format!(
         " {b}WIN PROBABILITY:{r}  Allies {win_color}{b}{ally_pct:5.1}%{r}  vs  Enemies {b}{enemy_pct:5.1}%{r}   \
-         (Meta: {:+5.1}% | Counter: {:+5.1}% | Synergy: {:+5.1}%)\n",
+         (Meta: {:+5.1}% | Counter: {:+5.1}% | Synergy: {:+5.1}% [A:{:+.1}%/E:{:+.1}%] | Comp: {:+5.1}%)\n",
         analysis.total_meta_edge * 100.0,
         analysis.total_counter_edge * 100.0,
         analysis.total_synergy_edge * 100.0,
+        analysis.ally_synergy_norm * 100.0,
+        analysis.enemy_synergy_norm * 100.0,
+        analysis.total_composition_edge * 100.0,
     ));
     out.push_str(&format!(
         "{b}========================================================================================{r}\n\n"
@@ -352,6 +377,9 @@ pub fn execute_command(session: &mut AppSession, line: &str) -> Result<bool, Str
         "reset" | "clear" => {
             session.draft.clear();
         }
+        "sync" => {
+            let _ = session.sync_db(true)?;
+        }
         "role" => {
             let Some(&r_str) = parts.get(1) else {
                 return Err("Usage: role <1..5>".into());
@@ -468,7 +496,7 @@ pub fn execute_command(session: &mut AppSession, line: &str) -> Result<bool, Str
         }
         _ => {
             return Err(
-                "Commands: ally <1..5> <hero> | enemy <1..5> <hero> | ban <hero> | role <1..5> | reset | quit"
+                "Commands: ally <1..5> <hero> | enemy <1..5> <hero> | ban <hero> | role <1..5> | bracket <medal> | sync | reset | quit"
                     .into(),
             );
         }
@@ -486,6 +514,19 @@ fn main() {
         }
     };
 
+    if args.iter().any(|a| a == "--sync") {
+        match session.sync_db(true) {
+            Ok(msg) => {
+                let _ = writeln!(io::stdout(), "{msg} ({})", session.db_status);
+                return;
+            }
+            Err(e) => {
+                let _ = writeln!(io::stderr(), "Sync failed: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     if args.iter().any(|a| a == "--demo") {
         let _ = execute_command(&mut session, "ally 3 magnus");
         let _ = execute_command(&mut session, "ally 5 crystal maiden");
@@ -498,6 +539,17 @@ fn main() {
             std::process::exit(0);
         }
         return;
+    }
+
+    // Background non-blocking auto-sync when cache TTL (24h meta / 1h player) has expired
+    {
+        let now = LocalCacheManager::now_unix();
+        if session.cache_mgr.is_meta_stale(now) || session.cache_mgr.is_player_stale(now) {
+            let bg_mgr = session.cache_mgr.clone();
+            std::thread::spawn(move || {
+                let _ = bg_mgr.sync_from_opendota(false);
+            });
+        }
     }
 
     let gsi_addr = std::env::var("TRUESIGHT_GSI_ADDR").unwrap_or_else(|_| "127.0.0.1:4001".into());
