@@ -79,7 +79,7 @@ $$\text{Logit}(P_{\text{win}}) = 4.0 \cdot \left( w_{\text{meta}} \sum \Delta M 
 |-----------|-------|-------------|
 | `edition` | `2024` | Workspace Rust edition |
 | `rust-version` (MSRV) | `1.85` | Minimum supported Rust version declared in manifests |
-| `selected_toolchain` | `rustc 1.99.0 (b940084d7 2026-09-28)` | Verified local compiler on CachyOS Linux (`x86_64-unknown-linux-gnu`) |
+| `selected_toolchain` | `rustc 1.99.1 (58cf8f9c3 2026-10-13)` | Pinned via `rust-toolchain.toml` on CachyOS Linux (`x86_64-unknown-linux-gnu`) |
 | `TRUESIGHT_GSI_ADDR` | `127.0.0.1:4001` (default) | Local bind address for Dota 2 Game State Integration HTTP POST payloads |
 
 ## 5. Implementation & Usage Guide

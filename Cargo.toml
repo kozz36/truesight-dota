@@ -16,3 +16,9 @@ authors = ["kozz36"]
 [workspace.lints.rust]
 unsafe_code = "forbid"
 unused_must_use = "deny"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+

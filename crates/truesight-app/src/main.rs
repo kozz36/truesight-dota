@@ -437,8 +437,10 @@ fn main() {
         session.last_gsi_state = format!("LISTENING on http://{}", l.local_addr());
     }
 
+    let force_cli = args.iter().any(|a| a == "--cli" || a == "--tui");
+
     #[cfg(feature = "gui")]
-    if args.iter().any(|a| a == "--gui") {
+    if !force_cli {
         if let Err(e) = gui::run_gui(session, gsi_listener) {
             let _ = writeln!(io::stderr(), "GUI error: {e}");
             std::process::exit(1);

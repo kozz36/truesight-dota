@@ -5,6 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 description = "Native 5v5 draft analyzer and recommender for Dota 2"
+default-run = "truesight-dota"
+
+[[bin]]
+name = "truesight-dota"
+path = "src/main.rs"
 
 [features]
 default = ["gui"]

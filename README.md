@@ -4,17 +4,17 @@ High-performance, native Rust 5v5 live draft analyzer and probabilistic hero rec
 
 ## Quick Path
 
-1. **Launch the Native Desktop GUI (`eframe`/`egui`)**:
+1. **Launch the Installed Desktop App** (or from your CachyOS/KDE App Launcher as **TrueSight Dota**):
    ```bash
-   cargo run -p truesight-app -- --gui
+   truesight-dota
    ```
 2. **Run the live 5v5 draft CLI/TUI demo**:
    ```bash
-   cargo run -p truesight-app -- --demo
+   truesight-dota --demo
    ```
-3. **Start the interactive CLI/TUI draft session + Dota 2 GSI listener** (`127.0.0.1:4001`):
+3. **Start the interactive CLI/TUI draft session in terminal** (`127.0.0.1:4001`):
    ```bash
-   cargo run -p truesight-app
+   truesight-dota --cli
    ```
 4. **Run the full deterministic test suite**:
    ```bash

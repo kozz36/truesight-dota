@@ -9,15 +9,17 @@ Branch: feat/truesight-dota-foundation
 - **S3**: Implement hero suggestions ranked from current draft picks by contrasting base meta hero winrates against match picks (`heroes sugeridos a partir de los picks asi tambien este supongo ya tiene el winrate de los heores meta que luego se contrastan contra los picks de la partida para entregar la mejor probabilidad`).
 - **S4**: Follow the Phase 1 sequence (`esa secuencia me parece correcta`): mathematical engine + interactive quick-pick selector + local GSI state listener + STRATZ/OpenDota data adapter, with clean port boundaries for Phase 2 screen capture.
 - **S5**: Create project architecture documentation in `docs/` and a project `README.md` (`creemos documentacion con la architecura del proyecto en docs/ tras terminar de definir o tambien creemos el readme`).
-- **S6**: Synchronize the complete 127-hero catalog and real player comfort history (`127255741`) into a local snapshot adapter (`OpenDotaSnapshotRepository`) and add a native `eframe`/`egui` desktop GUI alongside the CLI/TUI (`ok procede`).
+- **S6**: Synchronize the complete 127-hero catalog and real player comfort history (`127255741`) into a local snapshot adapter (`SeededMetaRepository`) and add a native `eframe`/`egui` desktop GUI alongside the CLI/TUI (`ok procede`).
+- **S7**: Upgrade and pin the Rust toolchain to `1.99.1`, package a release desktop executable (`~/.local/bin/truesight-dota` + `~/.local/share/applications/truesight-dota.desktop`), and install the Dota 2 GSI integration config (`por que no usamos la ultima version 1.99.1? cual seria el sifuiente paso, deberiamos tener un ejecutable de escritorio` / `1. autorizo actualizacion 2. procedamos`).
 
 ## Tasks
 
 - [x] **T1** (S1, S2, S3) — Route: direct inline (small cohesive core unit, no Writer trigger) — Commit: `c05e077` — Create Cargo workspace, `truesight-core` domain, Logit/Bayesian 5v5 math engine, hero recommendation simulator, ports, and unit tests.
 - [x] **T2** (S1, S4) — Route: direct inline (small cohesive adapter unit, no Writer trigger) — Commit: `7991cbd` — Create `truesight-adapters` with seeded meta dataset + JSON snapshot repository (`StatsRepository`), bounded Dota 2 GSI HTTP listener (`DraftEventSource`), and adapter tests.
 - [x] **T3** (S1, S2, S3, S5) — Route: direct inline (small cohesive UI + docs unit, no Writer trigger) — Commit: `932c2f5` — Create `truesight-app` native UI, `README.md`, and `docs/architecture.md`.
-- [x] **T4** (S4, S6) — Route: direct inline (cohesive adapter unit, no Writer trigger) — Commit: `e38ea85` — Synchronize the full 127-hero OpenDota dataset and player `127255741` comfort history into `truesight-adapters` (`OpenDotaSnapshotRepository`) with bracket-aware winrates and unit tests.
-- [x] **T5** (S1, S2, S3, S5, S6) — Route: direct inline (cohesive GUI + docs unit, no Writer trigger) — Commit: `09ab3b0` — Add native desktop `eframe`/`egui` GUI mode (`--gui`) in `truesight-app` sharing `AppSession` with CLI/TUI, and update documentation.
+- [x] **T4** (S4, S6) — Route: direct inline (cohesive adapter unit, no Writer trigger) — Commit: `878603f` — Synchronize the full 127-hero OpenDota dataset and player `127255741` comfort history into `truesight-adapters` (`SeededMetaRepository`) with bracket-aware winrates and unit tests.
+- [x] **T5** (S1, S2, S3, S5, S6) — Route: direct inline (cohesive GUI + docs unit, no Writer trigger) — Commit: `cfd19ec` — Add native desktop `eframe`/`egui` GUI mode (`--gui`) in `truesight-app` sharing `AppSession` with CLI/TUI, and update documentation.
+- [x] **T6** (S7) — Route: direct inline (cohesive release packaging + GSI hook unit, no Writer trigger) — Commit: `8f2aaeb` — Pin `rust-toolchain.toml` to `1.99.1`, make GUI the default binary entrypoint (`truesight-dota`), build `--release`, install `~/.local/bin/truesight-dota`, `~/.local/share/applications/truesight-dota.desktop`, and Dota 2 `gamestate_integration_truesight.cfg`.
 
 ## Log
 
@@ -28,3 +30,5 @@ Branch: feat/truesight-dota-foundation
 - **L5**: "autorizo la creacion que me sugieres gui o tui? yo estaria bien con una tui pero si quiesiera que mi app escale open source seria mejor ir por una gui yambien revisemos sis en git existe ya el nombre para elegir otro"
 - **L6**: "vamos por tu recomendacion nombre puede ser truesight-dota creemos documentacion con la architecura del proyecto en docs/ tras terminar de definir o tambien creemos el readme"
 - **L7**: "ok procede"
+- **L8**: "por que no usamos la ultima version 1.99.1? cual seria el sifuiente paso, deberiamos tener un ejecutable de escritorio"
+- **L9**: "1. autorizo actualizacion 2. procedamos"
