@@ -30,7 +30,7 @@ impl AppSession {
     pub fn new() -> Result<Self, String> {
         let repo = SeededMetaRepository::new();
         let matrix = repo
-            .load_matrix(Bracket::DivineImmortal)
+            .load_matrix(Bracket::Legend)
             .map_err(|e| e.to_string())?;
         Ok(Self {
             draft: DraftState::default(),
@@ -45,6 +45,51 @@ impl AppSession {
         if let Ok(m) = SeededMetaRepository::new().load_matrix(bracket) {
             self.matrix = m;
         }
+    }
+
+    /// Returns available heroes for `(side, slot)` matching `query`, ordered with prefix
+    /// matches first and then alphabetical substring matches.
+    pub fn filter_heroes_for_slot(
+        &self,
+        side: Side,
+        slot: usize,
+        query: &str,
+    ) -> Vec<(HeroId, String)> {
+        let q = query.trim().to_ascii_lowercase();
+        let current_hid = match side {
+            Side::Allies => self.draft.allies.get(slot).and_then(|p| p.map(|d| d.hero_id)),
+            Side::Enemies => self.draft.enemies.get(slot).and_then(|p| p.map(|d| d.hero_id)),
+        };
+
+        let mut matches: Vec<(bool, HeroId, String)> = self
+            .matrix
+            .heroes()
+            .filter_map(|h| {
+                let is_cur = current_hid == Some(h.id);
+                if self.draft.is_unavailable(h.id) && !is_cur {
+                    return None;
+                }
+                if q.is_empty() {
+                    return Some((true, h.id, h.display_name.clone()));
+                }
+                let name_lower = h.display_name.to_ascii_lowercase();
+                let slug_short = h
+                    .slug
+                    .strip_prefix("npc_dota_hero_")
+                    .unwrap_or(&h.slug)
+                    .to_ascii_lowercase();
+                if name_lower.starts_with(&q) || slug_short.starts_with(&q) {
+                    Some((true, h.id, h.display_name.clone()))
+                } else if name_lower.contains(&q) || slug_short.contains(&q) {
+                    Some((false, h.id, h.display_name.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        matches.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.2.cmp(&b.2)));
+        matches.into_iter().map(|(_, id, name)| (id, name)).collect()
     }
 
     pub fn find_hero(&self, query: &str) -> Option<HeroId> {
@@ -320,6 +365,30 @@ pub fn execute_command(session: &mut AppSession, line: &str) -> Result<bool, Str
                 _ => return Err("Role must be 1..5".into()),
             };
         }
+        "bracket" | "medal" => {
+            let Some(&b_str) = parts.get(1) else {
+                return Err(
+                    "Usage: bracket <herald|guardian|crusader|archon|legend|ancient|divine|immortal>"
+                        .into(),
+                );
+            };
+            let bracket = match b_str.to_ascii_lowercase().as_str() {
+                "1" | "herald" => Bracket::Herald,
+                "2" | "guardian" => Bracket::Guardian,
+                "3" | "crusader" => Bracket::Crusader,
+                "4" | "archon" => Bracket::Archon,
+                "5" | "legend" => Bracket::Legend,
+                "6" | "ancient" => Bracket::Ancient,
+                "7" | "divine" => Bracket::Divine,
+                "8" | "immortal" => Bracket::Immortal,
+                _ => {
+                    return Err(
+                        "Bracket must be 1..8 or herald..immortal".into(),
+                    );
+                }
+            };
+            session.set_bracket(bracket);
+        }
         "ally" | "a" => {
             if parts.len() < 3 {
                 return Err("Usage: ally <1..5> <hero_name>".into());
@@ -505,5 +574,39 @@ mod tests {
         assert!(rendered.contains("Medusa"));
         assert!(rendered.contains("Storm Spi"));
         assert!(rendered.contains("1. Anti-Mage"));
+    }
+
+    #[test]
+    fn bracket_command_and_slot_search_filter_work_across_all_eight_medals() {
+        let mut session = AppSession::new().unwrap();
+        assert!(execute_command(&mut session, "ally 1 faceless void").unwrap());
+        assert!(execute_command(&mut session, "ally 2 invoker").unwrap());
+        assert!(execute_command(&mut session, "ally 3 magnus").unwrap());
+        assert!(execute_command(&mut session, "ally 4 spirit breaker").unwrap());
+        assert!(execute_command(&mut session, "ally 5 crystal maiden").unwrap());
+        assert!(execute_command(&mut session, "enemy 1 medusa").unwrap());
+        assert!(execute_command(&mut session, "enemy 2 storm spirit").unwrap());
+        assert!(execute_command(&mut session, "enemy 3 axe").unwrap());
+        assert!(execute_command(&mut session, "enemy 4 shadow demon").unwrap());
+        assert!(execute_command(&mut session, "enemy 5 abaddon").unwrap());
+
+        assert!(execute_command(&mut session, "bracket herald").unwrap());
+        let (eval_herald, _) = session.evaluate();
+
+        assert!(execute_command(&mut session, "bracket immortal").unwrap());
+        let (eval_immortal, _) = session.evaluate();
+
+        assert!(
+            (eval_herald.total_counter_edge - eval_immortal.total_counter_edge).abs() > 0.001,
+            "Switching bracket via command must update Counter Edge"
+        );
+        assert!(
+            (eval_herald.total_synergy_edge - eval_immortal.total_synergy_edge).abs() > 0.0002,
+            "Switching bracket via command must update Synergy Edge"
+        );
+
+        let matches = session.filter_heroes_for_slot(truesight_core::domain::Side::Allies, 1, "inv");
+        assert!(!matches.is_empty());
+        assert_eq!(matches[0].1, "Invoker");
     }
 }

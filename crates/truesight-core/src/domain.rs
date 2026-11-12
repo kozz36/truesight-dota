@@ -58,26 +58,52 @@ impl Role {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Bracket {
-    HeraldGuardian,
-    CrusaderArchon,
-    LegendAncient,
-    DivineImmortal,
+    Herald,
+    Guardian,
+    Crusader,
+    Archon,
+    Legend,
+    Ancient,
+    Divine,
+    Immortal,
 }
 
 impl Bracket {
-    pub const ALL: [Self; 4] = [
-        Self::HeraldGuardian,
-        Self::CrusaderArchon,
-        Self::LegendAncient,
-        Self::DivineImmortal,
+    pub const ALL: [Self; 8] = [
+        Self::Herald,
+        Self::Guardian,
+        Self::Crusader,
+        Self::Archon,
+        Self::Legend,
+        Self::Ancient,
+        Self::Divine,
+        Self::Immortal,
     ];
+
+    #[inline]
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Herald => 0,
+            Self::Guardian => 1,
+            Self::Crusader => 2,
+            Self::Archon => 3,
+            Self::Legend => 4,
+            Self::Ancient => 5,
+            Self::Divine => 6,
+            Self::Immortal => 7,
+        }
+    }
 
     pub const fn label(self) -> &'static str {
         match self {
-            Self::HeraldGuardian => "Herald / Guardian",
-            Self::CrusaderArchon => "Crusader / Archon",
-            Self::LegendAncient => "Legend / Ancient",
-            Self::DivineImmortal => "Divine / Immortal",
+            Self::Herald => "Herald",
+            Self::Guardian => "Guardian",
+            Self::Crusader => "Crusader",
+            Self::Archon => "Archon",
+            Self::Legend => "Legend",
+            Self::Ancient => "Ancient",
+            Self::Divine => "Divine",
+            Self::Immortal => "Immortal",
         }
     }
 }
@@ -110,7 +136,7 @@ impl Default for DraftState {
             allies: [None; TEAM_SIZE],
             enemies: [None; TEAM_SIZE],
             bans: [None; 16],
-            bracket: Bracket::DivineImmortal,
+            bracket: Bracket::Legend,
             target_role: Role::Carry,
         }
     }

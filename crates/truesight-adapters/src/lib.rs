@@ -18,7 +18,7 @@ mod tests {
     #[test]
     fn seeded_meta_repository_loads_heroes_and_matchup_deltas() {
         let repo = SeededMetaRepository::new();
-        let matrix = repo.load_matrix(Bracket::DivineImmortal).unwrap();
+        let matrix = repo.load_matrix(Bracket::Immortal).unwrap();
 
         // Anti-Mage (1) vs Medusa (94) should have strong positive counter delta
         let cell = matrix.cell(HeroId(1), HeroId(94));
@@ -195,5 +195,116 @@ mod tests {
                 game_time_secs: -30,
             }]
         );
+    }
+
+    #[test]
+    fn eight_individual_brackets_dynamically_update_meta_counter_and_synergy_edges() {
+        assert_eq!(
+            Bracket::ALL.len(),
+            8,
+            "All 8 individual Dota 2 medals (Herald..Immortal) must be exposed"
+        );
+        assert_eq!(Bracket::Herald.label(), "Herald");
+        assert_eq!(Bracket::Guardian.label(), "Guardian");
+        assert_eq!(Bracket::Crusader.label(), "Crusader");
+        assert_eq!(Bracket::Archon.label(), "Archon");
+        assert_eq!(Bracket::Legend.label(), "Legend");
+        assert_eq!(Bracket::Ancient.label(), "Ancient");
+        assert_eq!(Bracket::Divine.label(), "Divine");
+        assert_eq!(Bracket::Immortal.label(), "Immortal");
+
+        let repo = SeededMetaRepository::new();
+        let weights = ModelWeights::default();
+
+        // Build the exact 5v5 draft from user simulation:
+        // Allies: Faceless Void (41), Invoker (74), Magnus (97), Spirit Breaker (71), Crystal Maiden (5)
+        // Enemies: Medusa (94), Storm Spirit (17), Axe (2), Shadow Demon (79), Abaddon (102)
+        let mut base_draft = DraftState::default();
+        for (slot, (hid, role)) in [
+            (HeroId(41), Role::Carry),
+            (HeroId(74), Role::Mid),
+            (HeroId(97), Role::Offlane),
+            (HeroId(71), Role::SoftSupport),
+            (HeroId(5), Role::HardSupport),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            base_draft
+                .set_ally(slot, Some(DraftPick { hero_id: hid, role: Some(role) }))
+                .unwrap();
+        }
+        for (slot, (hid, role)) in [
+            (HeroId(94), Role::Carry),
+            (HeroId(17), Role::Mid),
+            (HeroId(2), Role::Offlane),
+            (HeroId(79), Role::SoftSupport),
+            (HeroId(102), Role::HardSupport),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            base_draft
+                .set_enemy(slot, Some(DraftPick { hero_id: hid, role: Some(role) }))
+                .unwrap();
+        }
+
+        let m_herald = repo.load_matrix(Bracket::Herald).unwrap();
+        let m_legend = repo.load_matrix(Bracket::Legend).unwrap();
+        let m_divine = repo.load_matrix(Bracket::Divine).unwrap();
+        let m_immortal = repo.load_matrix(Bracket::Immortal).unwrap();
+
+        let eval_herald = truesight_core::math::evaluate_draft_5v5(&base_draft, &m_herald, &weights);
+        let eval_legend = truesight_core::math::evaluate_draft_5v5(&base_draft, &m_legend, &weights);
+        let eval_divine = truesight_core::math::evaluate_draft_5v5(&base_draft, &m_divine, &weights);
+        let eval_immortal =
+            truesight_core::math::evaluate_draft_5v5(&base_draft, &m_immortal, &weights);
+
+        // Adjacent high-MMR medals (Divine -> Immortal) must progress smoothly without >3% cliff jumps
+        assert!(
+            (eval_divine.ally_win_probability - eval_immortal.ally_win_probability).abs() < 0.03,
+            "Divine ({}) and Immortal ({}) must not have an artificial cliff jump from tiny pro samples",
+            eval_divine.ally_win_probability,
+            eval_immortal.ally_win_probability
+        );
+
+        // Meta edge, Counter edge, Synergy edge, and Win Probability must all change across brackets
+        assert!(
+            (eval_herald.total_meta_edge - eval_immortal.total_meta_edge).abs() > 0.001,
+            "Meta edge must differ between Herald and Immortal"
+        );
+        assert!(
+            (eval_herald.total_counter_edge - eval_immortal.total_counter_edge).abs() > 0.001,
+            "Counter edge must differ between Herald ({}) and Immortal ({})",
+            eval_herald.total_counter_edge,
+            eval_immortal.total_counter_edge
+        );
+        assert!(
+            (eval_herald.total_synergy_edge - eval_immortal.total_synergy_edge).abs() > 0.0002,
+            "Synergy edge must differ between Herald ({}) and Immortal ({})",
+            eval_herald.total_synergy_edge,
+            eval_immortal.total_synergy_edge
+        );
+        assert!(
+            (eval_legend.ally_win_probability - eval_immortal.ally_win_probability).abs() > 0.001,
+            "Overall win probability must differ between Legend and Immortal"
+        );
+
+        // Verify strict antisymmetry and symmetry in all brackets
+        for bracket in Bracket::ALL {
+            let mat = repo.load_matrix(bracket).unwrap();
+            let ab = mat.cell(HeroId(41), HeroId(94));
+            let ba = mat.cell(HeroId(94), HeroId(41));
+            assert!(
+                (ab.counter_delta + ba.counter_delta).abs() < 1e-6,
+                "Antisymmetry violated in {:?}",
+                bracket
+            );
+            assert!(
+                (ab.synergy_delta - ba.synergy_delta).abs() < 1e-6,
+                "Symmetry violated in {:?}",
+                bracket
+            );
+        }
     }
 }

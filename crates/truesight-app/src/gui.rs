@@ -1,14 +1,15 @@
 use crate::AppSession;
 use eframe::egui::{self, Color32, RichText};
 use truesight_adapters::gsi::BoundedGsiListener;
-use truesight_core::domain::{Bracket, DraftPick, HeroId, Role, TEAM_SIZE};
+use truesight_core::domain::{Bracket, DraftPick, Role, Side, TEAM_SIZE};
 use truesight_core::ports::DraftEventSource;
 
 pub struct TrueSightGuiApp {
     session: AppSession,
     gsi_listener: Option<BoundedGsiListener>,
-    ally_search: [String; TEAM_SIZE],
-    enemy_search: [String; TEAM_SIZE],
+    active_picker: Option<(Side, usize)>,
+    picker_search: String,
+    focus_picker_input: bool,
     suggest_filter: String,
     status_banner: String,
 }
@@ -18,24 +19,14 @@ impl TrueSightGuiApp {
         Self {
             session,
             gsi_listener,
-            ally_search: Default::default(),
-            enemy_search: Default::default(),
+            active_picker: None,
+            picker_search: String::new(),
+            focus_picker_input: false,
             suggest_filter: String::new(),
             status_banner:
-                "Click any Ally (A1..A5) or Enemy (E1..E5) dropdown to pick from all 127 heroes independently."
+                "Click any Ally (A1..A5) or Enemy (E1..E5) slot button once, then type hero name directly and press Enter."
                     .into(),
         }
-    }
-
-    fn all_heroes_sorted(&self) -> Vec<(HeroId, String)> {
-        let mut list: Vec<(HeroId, String)> = self
-            .session
-            .matrix
-            .heroes()
-            .map(|h| (h.id, h.display_name.clone()))
-            .collect();
-        list.sort_by(|a, b| a.1.cmp(&b.1));
-        list
     }
 }
 
@@ -61,7 +52,6 @@ impl eframe::App for TrueSightGuiApp {
         }
 
         let (analysis, _top_recs) = self.session.evaluate();
-        let all_heroes = self.all_heroes_sorted();
 
         let green = Color32::from_rgb(46, 204, 113);
         let red = Color32::from_rgb(231, 76, 60);
@@ -312,48 +302,38 @@ impl eframe::App for TrueSightGuiApp {
                                 let current_name = self.session.draft.allies[i]
                                     .and_then(|p| self.session.matrix.hero(p.hero_id))
                                     .map(|h| h.display_name.clone())
-                                    .unwrap_or_else(|| format!("A{} [Select Hero]", i + 1));
+                                    .unwrap_or_else(|| "[Select Hero]".into());
+                                let is_active = self.active_picker == Some((Side::Allies, i));
 
                                 ui.horizontal(|ui| {
-                                    egui::ComboBox::from_id_salt(format!("ally_combo_{i}"))
-                                        .selected_text(format!("A{}: {}", i + 1, current_name))
-                                        .width(155.0)
-                                        .show_ui(ui, |ui| {
-                                            ui.text_edit_singleline(&mut self.ally_search[i]);
-                                            let q = self.ally_search[i].to_ascii_lowercase();
-                                            if ui.selectable_label(false, "— [Clear Slot] —").clicked()
-                                            {
-                                                let _ = self.session.draft.set_ally(i, None);
-                                            }
-                                            for &(hid, ref hname) in &all_heroes {
-                                                if !q.is_empty()
-                                                    && !hname.to_ascii_lowercase().contains(&q)
-                                                {
-                                                    continue;
-                                                }
-                                                let unavailable =
-                                                    self.session.draft.is_unavailable(hid);
-                                                let is_cur = self.session.draft.allies[i]
-                                                    .map(|p| p.hero_id == hid)
-                                                    .unwrap_or(false);
-                                                if (!unavailable || is_cur)
-                                                    && ui.selectable_label(is_cur, hname).clicked()
-                                                {
-                                                    let _ = self.session.draft.set_ally(
-                                                        i,
-                                                        Some(DraftPick {
-                                                            hero_id: hid,
-                                                            role: Role::ALL.get(i).copied(),
-                                                        }),
-                                                    );
-                                                    self.ally_search[i].clear();
-                                                }
-                                            }
-                                        });
+                                    let btn_label =
+                                        format!("A{}: {} ▾", i + 1, current_name);
+                                    if ui
+                                        .selectable_label(
+                                            is_active,
+                                            RichText::new(btn_label).strong().color(if is_active {
+                                                gold
+                                            } else {
+                                                green
+                                            }),
+                                        )
+                                        .clicked()
+                                    {
+                                        if is_active {
+                                            self.active_picker = None;
+                                        } else {
+                                            self.active_picker = Some((Side::Allies, i));
+                                            self.picker_search.clear();
+                                            self.focus_picker_input = true;
+                                        }
+                                    }
                                     if self.session.draft.allies[i].is_some()
                                         && ui.small_button("×").clicked()
                                     {
                                         let _ = self.session.draft.set_ally(i, None);
+                                        if is_active {
+                                            self.active_picker = None;
+                                        }
                                     }
                                 });
                             }
@@ -364,53 +344,156 @@ impl eframe::App for TrueSightGuiApp {
                                 let current_name = self.session.draft.enemies[j]
                                     .and_then(|p| self.session.matrix.hero(p.hero_id))
                                     .map(|h| h.display_name.clone())
-                                    .unwrap_or_else(|| format!("E{} [Select Hero]", j + 1));
+                                    .unwrap_or_else(|| "[Select Hero]".into());
+                                let is_active = self.active_picker == Some((Side::Enemies, j));
 
                                 ui.horizontal(|ui| {
-                                    egui::ComboBox::from_id_salt(format!("enemy_combo_{j}"))
-                                        .selected_text(format!("E{}: {}", j + 1, current_name))
-                                        .width(155.0)
-                                        .show_ui(ui, |ui| {
-                                            ui.text_edit_singleline(&mut self.enemy_search[j]);
-                                            let q = self.enemy_search[j].to_ascii_lowercase();
-                                            if ui.selectable_label(false, "— [Clear Slot] —").clicked()
-                                            {
-                                                let _ = self.session.draft.set_enemy(j, None);
-                                            }
-                                            for &(hid, ref hname) in &all_heroes {
-                                                if !q.is_empty()
-                                                    && !hname.to_ascii_lowercase().contains(&q)
-                                                {
-                                                    continue;
-                                                }
-                                                let unavailable =
-                                                    self.session.draft.is_unavailable(hid);
-                                                let is_cur = self.session.draft.enemies[j]
-                                                    .map(|p| p.hero_id == hid)
-                                                    .unwrap_or(false);
-                                                if (!unavailable || is_cur)
-                                                    && ui.selectable_label(is_cur, hname).clicked()
-                                                {
-                                                    let _ = self.session.draft.set_enemy(
-                                                        j,
-                                                        Some(DraftPick {
-                                                            hero_id: hid,
-                                                            role: Role::ALL.get(j).copied(),
-                                                        }),
-                                                    );
-                                                    self.enemy_search[j].clear();
-                                                }
-                                            }
-                                        });
+                                    let btn_label =
+                                        format!("E{}: {} ▾", j + 1, current_name);
+                                    if ui
+                                        .selectable_label(
+                                            is_active,
+                                            RichText::new(btn_label).strong().color(if is_active {
+                                                gold
+                                            } else {
+                                                red
+                                            }),
+                                        )
+                                        .clicked()
+                                    {
+                                        if is_active {
+                                            self.active_picker = None;
+                                        } else {
+                                            self.active_picker = Some((Side::Enemies, j));
+                                            self.picker_search.clear();
+                                            self.focus_picker_input = true;
+                                        }
+                                    }
                                     if self.session.draft.enemies[j].is_some()
                                         && ui.small_button("×").clicked()
                                     {
                                         let _ = self.session.draft.set_enemy(j, None);
+                                        if is_active {
+                                            self.active_picker = None;
+                                        }
                                     }
                                 });
                             }
                             ui.end_row();
                         });
+
+                    if let Some((side, slot_idx)) = self.active_picker {
+                        ui.add_space(6.0);
+                        egui::Frame::group(ui.style()).show(ui, |ui| {
+                            let side_tag = match side {
+                                Side::Allies => format!("Ally A{}", slot_idx + 1),
+                                Side::Enemies => format!("Enemy E{}", slot_idx + 1),
+                            };
+                            let matches = self.session.filter_heroes_for_slot(
+                                side,
+                                slot_idx,
+                                &self.picker_search,
+                            );
+
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(format!("Picking for {side_tag}:"))
+                                        .strong()
+                                        .color(gold),
+                                );
+                                let resp = ui.add(
+                                    egui::TextEdit::singleline(&mut self.picker_search)
+                                        .desired_width(240.0)
+                                        .hint_text("Type hero name & press Enter (or click below)..."),
+                                );
+                                if self.focus_picker_input {
+                                    resp.request_focus();
+                                    self.focus_picker_input = false;
+                                }
+                                let enter_pressed =
+                                    ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                if enter_pressed {
+                                    if let Some(&(hid, ref hname)) = matches.first() {
+                                        let pick = Some(DraftPick {
+                                            hero_id: hid,
+                                            role: Role::ALL.get(slot_idx).copied(),
+                                        });
+                                        match side {
+                                            Side::Allies => {
+                                                let _ = self.session.draft.set_ally(slot_idx, pick);
+                                            }
+                                            Side::Enemies => {
+                                                let _ =
+                                                    self.session.draft.set_enemy(slot_idx, pick);
+                                            }
+                                        }
+                                        self.status_banner =
+                                            format!("Picked {hname} into {side_tag}.");
+                                        self.active_picker = None;
+                                    }
+                                }
+                                if ui.small_button("Clear Slot").clicked() {
+                                    match side {
+                                        Side::Allies => {
+                                            let _ = self.session.draft.set_ally(slot_idx, None);
+                                        }
+                                        Side::Enemies => {
+                                            let _ = self.session.draft.set_enemy(slot_idx, None);
+                                        }
+                                    }
+                                    self.active_picker = None;
+                                }
+                                if ui.small_button("Close ×").clicked()
+                                    || ui.input(|i| i.key_pressed(egui::Key::Escape))
+                                {
+                                    self.active_picker = None;
+                                }
+                            });
+
+                            ui.add_space(4.0);
+                            egui::ScrollArea::vertical()
+                                .id_salt("active_slot_picker_scroll")
+                                .max_height(135.0)
+                                .show(ui, |ui| {
+                                    ui.horizontal_wrapped(|ui| {
+                                        for (idx, &(hid, ref hname)) in matches.iter().enumerate() {
+                                            let btn_text = if idx == 0
+                                                && !self.picker_search.trim().is_empty()
+                                            {
+                                                RichText::new(format!("⏎ {hname}"))
+                                                    .strong()
+                                                    .color(gold)
+                                            } else {
+                                                RichText::new(hname.as_str())
+                                            };
+                                            if ui.button(btn_text).clicked() {
+                                                let pick = Some(DraftPick {
+                                                    hero_id: hid,
+                                                    role: Role::ALL.get(slot_idx).copied(),
+                                                });
+                                                match side {
+                                                    Side::Allies => {
+                                                        let _ = self
+                                                            .session
+                                                            .draft
+                                                            .set_ally(slot_idx, pick);
+                                                    }
+                                                    Side::Enemies => {
+                                                        let _ = self
+                                                            .session
+                                                            .draft
+                                                            .set_enemy(slot_idx, pick);
+                                                    }
+                                                }
+                                                self.status_banner =
+                                                    format!("Picked {hname} into {side_tag}.");
+                                                self.active_picker = None;
+                                            }
+                                        }
+                                    });
+                                });
+                        });
+                    }
 
                     ui.add_space(10.0);
                     ui.separator();
