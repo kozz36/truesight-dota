@@ -32,8 +32,8 @@ High-performance, native Rust 5v5 live draft analyzer and probabilistic hero rec
 | **Hexagonal Core (`truesight-core`)** | Zero I/O, zero async, `#![forbid(unsafe_code)]`. Stack-allocated `DraftState` (`Copy`) and dense `MatchupMatrix` (`O(1)` lookup across all 127 heroes and 16,002 pairs). |
 | **8 Individual Dota 2 Medals** | Instant switching across `Herald`, `Guardian`, `Crusader`, `Archon`, `Legend`, `Ancient`, `Divine`, and `Immortal`, dynamically scaling meta winrates, counter sharpness ($\tau_b$), and pairwise synergies. |
 | **Mathematical Invariants** | Strict counter antisymmetry ($\Delta C(A,B) = -\Delta C(B,A)$), zero-mean double-centered synergy ($\Delta S(A,B) = \Delta S(B,A)$), $\sqrt{N}$ variance normalization, and exact identity between `Projected Win%` and header `ALLIES WIN PROBABILITY`. |
-| **Engine v2 Signals** | Incorporates **7-day patch momentum** (`pub_pick_trend`/`pub_win_trend`), **exponential comfort recency decay** (`last_played`), and **structural team composition balance** (`Melee`/`Ranged` ratio + `Disabler`/`Initiator` coverage). |
-| **Auto-Sync Local Cache (`24h` / `1h` TTL)** | Stores cached OpenDota snapshots in `~/.local/share/truesight-dota/cache/` with automatic background refresh on startup (`24h` Meta TTL, `1h` Player TTL) plus a **`[Sync DB]`** button in the GUI. |
+| **Engine v2 & Comfort v3** | Incorporates **7-day patch momentum** (`pub_pick_trend`/`pub_win_trend`), **Personal Comfort v3** (per-match exponential recency decay $\tau = 75\text{d}$ over `/matches` + active volume mastery $\ln(1 + G_{\text{eff}})$), and **structural team composition balance** (`Melee`/`Ranged` ratio + `Disabler`/`Initiator` coverage). |
+| **Auto-Sync Local Cache (`24h` / `1h` TTL)** | Stores cached OpenDota snapshots (`opendota_hero_stats.json`, `player_heroes.json`, `player_matches.json`) in `~/.local/share/truesight-dota/cache/` with automatic background refresh on startup (`24h` Meta TTL, `1h` Player TTL) plus a **`[Sync DB]`** button in the GUI. |
 | **Hands-Free Slot Picker** | Click any Ally (`A1..A5`) or Enemy (`E1..E5`) slot button once, type the hero name directly with auto-focus, and press `Enter` to assign. |
 
 ## Interactive CLI Commands (`truesight-dota --cli`)
@@ -51,5 +51,5 @@ quit                    # Exit session
 
 ## Documentation
 
-- [`docs/architecture.md`](docs/architecture.md) — Hexagonal architecture, Engine v2 mathematical equations, and GSI / Vision port specifications.
-- [`docs/roadmap-and-tasks.md`](docs/roadmap-and-tasks.md) — Formal engineering task plan (`T1`–`T13`), TDD verification gates, and data sync schedule.
+- [`docs/architecture.md`](docs/architecture.md) — Hexagonal architecture, Engine v2 & Comfort v3 mathematical equations, and GSI / Vision port specifications.
+- [`docs/roadmap-and-tasks.md`](docs/roadmap-and-tasks.md) — Formal engineering task plan (`T1`–`T15`), TDD verification gates, and data sync schedule.

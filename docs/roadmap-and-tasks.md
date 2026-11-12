@@ -2,9 +2,9 @@
 
 ## 1. Executive Summary
 
-This document tracks the formal engineering work units (`T1`–`T13`), statistical invariants, TDD verification gates, and data synchronization schedule for `truesight-dota`.
+This document tracks the formal engineering work units (`T1`–`T15`), statistical invariants, TDD verification gates, and data synchronization schedule for `truesight-dota`.
 
-## 2. Work-Unit Execution Matrix (`T1`–`T13`)
+## 2. Work-Unit Execution Matrix (`T1`–`T15`)
 
 | Task ID | Scope & Deliverable | Verification Gate | Status |
 |---------|---------------------|-------------------|--------|
@@ -20,7 +20,9 @@ This document tracks the formal engineering work units (`T1`–`T13`), statistic
 | **T10** | Split `Bracket` into all 8 individual Dota 2 medals (`Herald`..`Immortal`), dynamic per-medal counter/synergy scaling ($\tau_b, d_{i,b}$), and auto-focused click-to-type slot picker. | Red-Green TDD 8-medal & continuity tests | Completed (`5d9c533`) |
 | **T11** | Statistical Engine v2: 7-day patch momentum (`pub_pick_trend`/`pub_win_trend`), exponential comfort recency decay (`last_played`), structural team composition balance (`AttackType::Melee/Ranged`, `Disabler`, `Initiator`), and explicit `A:/E:` synergy breakdown. | Red-Green TDD v2 engine test | Completed (`155aaf3`) |
 | **T12** | Local Database Cache Manager (`~/.local/share/truesight-dota/cache/`) with **24h Meta TTL** and **1h Player TTL**, background startup auto-refresh, GUI `[Sync DB]` button + freshness badge, CLI `--sync`/`sync`, and ASCII `[v]` slot glyph fix. | Red-Green TDD cache TTL & override test | Completed (`f369e45`) |
-| **T13** | Formal update of `docs/roadmap-and-tasks.md`, `docs/architecture.md`, and `README.md`. | Structural readback & doc consistency | Completed (`6a340d5`) |
+| **T13** | Formal update of `docs/roadmap-and-tasks.md`, `docs/architecture.md`, and `README.md`. | Structural readback & doc consistency | Completed (`fffe119`) |
+| **T14** | Personal Comfort Engine v3: per-match exponential recency decay ($\tau = 75\text{d}$, floor `0.0`) over `/api/players/127255741/matches` (`player_matches.json`) + active practice volume mastery bonus $\ln(1 + G_{\text{eff}})$ + target-role comfort edge in `evaluate_draft_5v5`. | Red-Green TDD Comfort v3 core & adapter tests | Completed (`4f8ffcc`) |
+| **T15** | Update `docs/architecture.md`, `docs/roadmap-and-tasks.md`, `README.md`, and `odd/tasks/truesight-dota-foundation.md` for Comfort Engine v3. | Structural readback & doc consistency | Completed (`fb6e622`) |
 
 ## 3. Data Sources & Synchronization Cadence
 
@@ -28,6 +30,7 @@ This document tracks the formal engineering work units (`T1`–`T13`), statistic
 |----------|----------------|-----------------|-----------------------------------------------------|
 | `https://api.opendota.com/api/heroStats` | Rolling daily aggregation (updates once every 24h UTC) | **24 hours (`86,400 s`)** | `opendota_hero_stats.json` |
 | `https://api.opendota.com/api/players/127255741/heroes` | 5–15 minutes after each public match completes | **1 hour (`3,600 s`)** | `player_heroes.json` |
+| `https://api.opendota.com/api/players/127255741/matches?limit=500` | 5–15 minutes after each public match completes | **1 hour (`3,600 s`)** | `player_matches.json` |
 | `https://api.opendota.com/api/heroes/{id}/matchups` | Rolling patch window (`< 0.05%` daily drift outside major patch day) | Embedded calibrated $127 \times 127$ table (`16,002` pairs) | Compiled into `snapshot_pairs.rs` |
 
 ### Synchronization Modes
