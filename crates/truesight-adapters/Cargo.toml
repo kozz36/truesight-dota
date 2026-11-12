@@ -1,0 +1,13 @@
+[package]
+name = "truesight-adapters"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Driven and driving adapters for truesight-dota (meta repository, Dota 2 GSI listener)"
+
+[dependencies]
+truesight-core = { path = "../truesight-core" }
+
+[lints]
+workspace = true

@@ -1,0 +1,10 @@
+[package]
+name = "truesight-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Pure hexagonal domain and 5v5 probabilistic draft engine for truesight-dota"
+
+[lints]
+workspace = true
