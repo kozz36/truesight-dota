@@ -49,7 +49,13 @@ reset                   # Clear current draft
 quit                    # Exit session
 ```
 
-## Documentation
+## Documentation & Governance
 
+- [`AGENTS.md`](AGENTS.md) — Engineering, hexagonal architecture, statistical invariants, and Red-Green TDD testing policy.
+- [`skills/truesight-dota-domain/SKILL.md`](skills/truesight-dota-domain/SKILL.md) — Product domain skill and invariant reference for AI agents and contributors.
 - [`docs/architecture.md`](docs/architecture.md) — Hexagonal architecture, Engine v2 & Comfort v3 mathematical equations, and GSI / Vision port specifications.
-- [`docs/roadmap-and-tasks.md`](docs/roadmap-and-tasks.md) — Formal engineering task plan (`T1`–`T15`), TDD verification gates, and data sync schedule.
+- [`docs/roadmap-and-tasks.md`](docs/roadmap-and-tasks.md) — Formal engineering task plan (`T1`–`T16`), TDD verification gates, and data sync schedule.
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE) (`Apache-2.0`).

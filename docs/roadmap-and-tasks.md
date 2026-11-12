@@ -2,9 +2,9 @@
 
 ## 1. Executive Summary
 
-This document tracks the formal engineering work units (`T1`–`T15`), statistical invariants, TDD verification gates, and data synchronization schedule for `truesight-dota`.
+This document tracks the formal engineering work units (`T1`–`T16`), statistical invariants, TDD verification gates, and data synchronization schedule for `truesight-dota`.
 
-## 2. Work-Unit Execution Matrix (`T1`–`T15`)
+## 2. Work-Unit Execution Matrix (`T1`–`T16`)
 
 | Task ID | Scope & Deliverable | Verification Gate | Status |
 |---------|---------------------|-------------------|--------|
@@ -22,7 +22,8 @@ This document tracks the formal engineering work units (`T1`–`T15`), statistic
 | **T12** | Local Database Cache Manager (`~/.local/share/truesight-dota/cache/`) with **24h Meta TTL** and **1h Player TTL**, background startup auto-refresh, GUI `[Sync DB]` button + freshness badge, CLI `--sync`/`sync`, and ASCII `[v]` slot glyph fix. | Red-Green TDD cache TTL & override test | Completed (`f369e45`) |
 | **T13** | Formal update of `docs/roadmap-and-tasks.md`, `docs/architecture.md`, and `README.md`. | Structural readback & doc consistency | Completed (`fffe119`) |
 | **T14** | Personal Comfort Engine v3: per-match exponential recency decay ($\tau = 75\text{d}$, floor `0.0`) over `/api/players/127255741/matches` (`player_matches.json`) + active practice volume mastery bonus $\ln(1 + G_{\text{eff}})$ + target-role comfort edge in `evaluate_draft_5v5`. | Red-Green TDD Comfort v3 core & adapter tests | Completed (`4f8ffcc`) |
-| **T15** | Update `docs/architecture.md`, `docs/roadmap-and-tasks.md`, `README.md`, and `odd/tasks/truesight-dota-foundation.md` for Comfort Engine v3. | Structural readback & doc consistency | Completed (`fb6e622`) |
+| **T15** | Update `docs/architecture.md`, `docs/roadmap-and-tasks.md`, `README.md`, and `odd/tasks/truesight-dota-foundation.md` for Comfort Engine v3. | Structural readback & doc consistency | Completed (`d3bac92`) |
+| **T16** | Create `AGENTS.md` (implementation & TDD testing policy), product domain skill `skills/truesight-dota-domain/SKILL.md` + `.atl/skill-registry.md`, and root `LICENSE` (`Apache-2.0`). | Skill style guide & workspace test check | Completed (`b4595cf`) |
 
 ## 3. Data Sources & Synchronization Cadence
 
