@@ -114,6 +114,12 @@ pub enum Side {
     Enemies,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AttackType {
+    Melee,
+    Ranged,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DraftPick {
     pub hero_id: HeroId,
@@ -220,12 +226,19 @@ pub struct HeroProfile {
     /// Personal matches and wins for player comfort weighting.
     pub personal_matches: u32,
     pub personal_wins: u32,
+    pub attack_type: AttackType,
+    pub has_disable: bool,
+    pub has_initiation: bool,
+    /// 7-day patch winrate momentum delta (`recent_wr - week_wr`), clamped to `[-0.03, 0.03]`.
+    pub trend_delta: f32,
+    /// Recency decay factor `[0.25, 1.0]` computed from `last_played` Unix timestamp.
+    pub comfort_decay: f32,
 }
 
 impl HeroProfile {
     #[inline]
     pub fn meta_winrate(&self, role: Role) -> f32 {
-        self.role_winrates[role.index()].clamp(0.05, 0.95)
+        (self.role_winrates[role.index()] + 0.45 * self.trend_delta).clamp(0.05, 0.95)
     }
 }
 

@@ -4,7 +4,7 @@ pub mod ports;
 
 #[cfg(test)]
 mod tests {
-    use crate::domain::{DraftPick, DraftState, HeroId, HeroProfile, PairStats, Role};
+    use crate::domain::{AttackType, DraftPick, DraftState, HeroId, HeroProfile, PairStats, Role};
     use crate::math::{
         MatchupMatrix, ModelWeights, bayesian_winrate, evaluate_draft_5v5,
         expected_head_to_head_wr, recommend_heroes,
@@ -21,6 +21,11 @@ mod tests {
             role_winrates: [0.515, 0.460, 0.440, 0.410, 0.410],
             personal_matches: 40,
             personal_wins: 26,
+            attack_type: AttackType::Melee,
+            has_disable: false,
+            has_initiation: false,
+            trend_delta: 0.0,
+            comfort_decay: 1.0,
         })
         .unwrap();
 
@@ -33,6 +38,11 @@ mod tests {
             role_winrates: [0.470, 0.490, 0.535, 0.480, 0.460],
             personal_matches: 15,
             personal_wins: 9,
+            attack_type: AttackType::Melee,
+            has_disable: true,
+            has_initiation: true,
+            trend_delta: 0.0,
+            comfort_decay: 1.0,
         })
         .unwrap();
 
@@ -45,6 +55,11 @@ mod tests {
             role_winrates: [0.480, 0.510, 0.460, 0.440, 0.430],
             personal_matches: 0,
             personal_wins: 0,
+            attack_type: AttackType::Ranged,
+            has_disable: true,
+            has_initiation: true,
+            trend_delta: 0.0,
+            comfort_decay: 1.0,
         })
         .unwrap();
 
@@ -57,6 +72,11 @@ mod tests {
             role_winrates: [0.480, 0.515, 0.525, 0.495, 0.480],
             personal_matches: 20,
             personal_wins: 12,
+            attack_type: AttackType::Melee,
+            has_disable: true,
+            has_initiation: true,
+            trend_delta: 0.0,
+            comfort_decay: 1.0,
         })
         .unwrap();
 
@@ -257,5 +277,85 @@ mod tests {
             "Anti-Mage should rank #1 with Magnus ally + Storm Spirit enemy"
         );
         assert!(recs[0].net_probability_delta > 0.05);
+    }
+
+    #[test]
+    fn statistical_engine_v2_applies_trend_comfort_decay_and_composition_balance() {
+        use crate::domain::AttackType;
+
+        let mut m = MatchupMatrix::new();
+        // 5 Melee carries with 0 disables on Ally side (structural composition flaw)
+        for id in 1..=5 {
+            m.upsert_hero(HeroProfile {
+                id: HeroId(id),
+                slug: format!("melee_{id}"),
+                display_name: format!("Melee {id}"),
+                primary_roles: vec![Role::Carry, Role::Mid, Role::Offlane, Role::SoftSupport, Role::HardSupport],
+                role_winrates: [0.50; 5],
+                personal_matches: 40,
+                personal_wins: 28,
+                attack_type: AttackType::Melee,
+                has_disable: false,
+                has_initiation: false,
+                trend_delta: 0.015,
+                comfort_decay: 0.50,
+            })
+            .unwrap();
+        }
+        // Balanced Enemy side (2 Melee with disable/init + 3 Ranged with disable)
+        for id in 6..=10 {
+            let is_melee = id <= 7;
+            m.upsert_hero(HeroProfile {
+                id: HeroId(id),
+                slug: format!("bal_{id}"),
+                display_name: format!("Balanced {id}"),
+                primary_roles: vec![Role::Carry, Role::Mid, Role::Offlane, Role::SoftSupport, Role::HardSupport],
+                role_winrates: [0.50; 5],
+                personal_matches: 0,
+                personal_wins: 0,
+                attack_type: if is_melee { AttackType::Melee } else { AttackType::Ranged },
+                has_disable: true,
+                has_initiation: is_melee,
+                trend_delta: 0.0,
+                comfort_decay: 1.0,
+            })
+            .unwrap();
+        }
+
+        let mut draft = DraftState::default();
+        for slot in 0..5 {
+            draft
+                .set_ally(
+                    slot,
+                    Some(DraftPick {
+                        hero_id: HeroId((slot + 1) as u16),
+                        role: Some(Role::ALL[slot]),
+                    }),
+                )
+                .unwrap();
+            draft
+                .set_enemy(
+                    slot,
+                    Some(DraftPick {
+                        hero_id: HeroId((slot + 6) as u16),
+                        role: Some(Role::ALL[slot]),
+                    }),
+                )
+                .unwrap();
+        }
+
+        let analysis = evaluate_draft_5v5(&draft, &m, &ModelWeights::default());
+        assert!(
+            analysis.total_composition_edge < -0.02,
+            "5-Melee 0-Disable lineup must incur a negative composition edge vs balanced lineup: {}",
+            analysis.total_composition_edge
+        );
+        assert!(
+            analysis.total_meta_edge > 0.01,
+            "Positive 7-day trend_delta (+1.5%) must increase total_meta_edge: {}",
+            analysis.total_meta_edge
+        );
+        assert_eq!(analysis.ally_synergy_norm, 0.0);
+        assert_eq!(analysis.enemy_synergy_norm, 0.0);
     }
 }

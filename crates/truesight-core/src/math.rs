@@ -224,6 +224,9 @@ pub struct DraftAnalysis5v5 {
     pub total_meta_edge: f32,
     pub total_counter_edge: f32,
     pub total_synergy_edge: f32,
+    pub ally_synergy_norm: f32,
+    pub enemy_synergy_norm: f32,
+    pub total_composition_edge: f32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -391,12 +394,16 @@ pub fn evaluate_draft_5v5(
         0.0
     };
     let total_synergy_edge = ally_syn_norm - enemy_syn_norm;
+    let ally_comp = evaluate_team_composition(&draft.allies, matrix);
+    let enemy_comp = evaluate_team_composition(&draft.enemies, matrix);
+    let total_composition_edge = ally_comp - enemy_comp;
 
     // Combine normalized edges in logit space (scale factor 3.2 maps realistic draft edges into [32%, 68%])
     let combined_logit = 3.2
         * (weights.meta_weight * total_meta_edge
             + weights.counter_weight * total_counter_edge
-            + weights.synergy_weight * total_synergy_edge);
+            + weights.synergy_weight * total_synergy_edge
+            + 0.85 * total_composition_edge);
 
     let ally_win_probability = sigmoid(combined_logit);
 
@@ -411,7 +418,64 @@ pub fn evaluate_draft_5v5(
         total_meta_edge,
         total_counter_edge,
         total_synergy_edge,
+        ally_synergy_norm: ally_syn_norm,
+        enemy_synergy_norm: enemy_syn_norm,
+        total_composition_edge,
     }
+}
+
+fn evaluate_team_composition(
+    picks: &[Option<DraftPick>; TEAM_SIZE],
+    matrix: &MatchupMatrix,
+) -> f32 {
+    use crate::domain::AttackType;
+
+    let mut picked = 0_u32;
+    let mut melee = 0_u32;
+    let mut ranged = 0_u32;
+    let mut disables = 0_u32;
+    let mut initiators = 0_u32;
+
+    for pick in picks.iter().flatten() {
+        if let Some(h) = matrix.hero(pick.hero_id) {
+            picked += 1;
+            match h.attack_type {
+                AttackType::Melee => melee += 1,
+                AttackType::Ranged => ranged += 1,
+            }
+            if h.has_disable {
+                disables += 1;
+            }
+            if h.has_initiation {
+                initiators += 1;
+            }
+        }
+    }
+
+    if picked < 3 {
+        return 0.0;
+    }
+
+    let mut score = 0.0_f32;
+    if melee == 5 {
+        score -= 0.018;
+    } else if melee == 4 && picked >= 4 {
+        score -= 0.007;
+    } else if ranged == 5 {
+        score -= 0.008;
+    }
+
+    if picked >= 4 && disables == 0 {
+        score -= 0.015;
+    } else if picked == 5 && disables == 1 {
+        score -= 0.005;
+    }
+
+    if picked >= 4 && (1..=3).contains(&melee) && disables >= 2 && initiators >= 1 {
+        score += 0.005;
+    }
+
+    score
 }
 
 /// Evaluates all available heroes for the target slot (`draft.target_role.index()`)
@@ -476,7 +540,8 @@ pub fn recommend_heroes(
                 0.50,
                 25.0,
             );
-            (personal_wr - 0.50).clamp(-0.06, 0.06)
+            let decay = profile.comfort_decay.clamp(0.25, 1.0);
+            ((personal_wr - 0.50) * decay).clamp(-0.06, 0.06)
         } else {
             0.0
         };

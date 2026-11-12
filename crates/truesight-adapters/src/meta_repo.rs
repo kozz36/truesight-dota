@@ -73,6 +73,11 @@ impl StatsRepository for SeededMetaRepository {
                 role_winrates,
                 personal_matches: row.personal_matches,
                 personal_wins: row.personal_wins,
+                attack_type: row.attack_type,
+                has_disable: row.has_disable,
+                has_initiation: row.has_initiation,
+                trend_delta: row.trend_delta,
+                comfort_decay: row.comfort_decay,
             })
             .map_err(|e| PortError(e.to_string()))?;
         }
