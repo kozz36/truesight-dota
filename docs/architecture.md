@@ -99,4 +99,4 @@ $$\text{Logit}(P_{\text{win}}) = 3.2 \cdot \left( w_{\text{meta}} E_{\text{meta}
 | `selected_toolchain` | `rustc 1.99.1 (58cf8f9c3 2026-10-13)` | Pinned via `rust-toolchain.toml` on CachyOS Linux (`x86_64-unknown-linux-gnu`) |
 | `TRUESIGHT_GSI_ADDR` | `127.0.0.1:4001` (default) | Local bind address for Dota 2 Game State Integration HTTP POST payloads |
 
-See [`docs/roadmap-and-tasks.md`](roadmap-and-tasks.md) for the complete `T1`–`T15` task log and verification checklist.
+See [`docs/roadmap-and-tasks.md`](roadmap-and-tasks.md) for the complete `T1`–`T16` Phase 1 task log and the planned `T17`–`T20` Phase 2 roadmap.

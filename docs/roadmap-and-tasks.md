@@ -39,7 +39,13 @@ This document tracks the formal engineering work units (`T1`–`T16`), statistic
 2. **GUI One-Click Refresh**: Clicking **`[Sync DB]`** in the top-right header forces an immediate fetch of `heroStats` and player comfort history and reloads the active `MatchupMatrix`.
 3. **Headless CLI Sync**: Running `truesight-dota --sync` (or typing `sync` inside `truesight-dota --cli`) refreshes the cache from terminal or cron/systemd timers.
 
-## 4. Phase 2 Roadmap (Next Milestones)
+## 4. Phase 2 Roadmap (Planned — Not Started)
 
-1. **STRATZ GraphQL Empirical `with` Synergy Adapter**: Optionally query `heroVsHeroMatchup.advantage.with` when a `STRATZ_API_TOKEN` is configured in the environment.
-2. **PipeWire / X11 Top-Bar Vision Adapter (`VisionCaptureAdapter`)**: Automatically detect all 10 picked heroes during Ranked All Pick by hashing the top-bar hero portraits at 1 Hz whenever GSI reports `DOTA_GAMERULES_STATE_HERO_SELECTION`.
+All Phase 2 tasks below are formally planned for future implementation and intentionally left **unexecuted** while Phase 1 (`T1`–`T16`) ships cleanly as a complete release.
+
+| Task ID | Scope & Deliverable | Planned Verification Gate | Status |
+|---------|---------------------|---------------------------|--------|
+| **T17** | **GSI Faction Event (`Radiant` / `Dire` Detection)**: Parse `"player": { "team_name": "radiant" \| "dire" }` in `BoundedGsiListener`, emit faction assignment events via `DraftEventSource`, and preserve the strict `50-50` faction-neutral draft prior (`P(A,B) + P(B,A) = 1.0`). | Unit tests for Radiant/Dire GSI payloads & team-swap neutrality | Planned (Not Started) |
+| **T18** | **PipeWire / X11 Top-Bar Vision Adapter (`VisionCaptureAdapter`)**: Capture the 10 top-bar hero portraits at 1 Hz during `DOTA_GAMERULES_STATE_HERO_SELECTION`, match perceptual hashes against the 127-hero icon atlas, and map Radiant slots (`0..4`) vs Dire slots (`5..9`) to `Side::Allies` / `Side::Enemies` using GSI `team_name`. | Fixture image suite for 1080p/1440p top-bar hero crops | Planned (Not Started) |
+| **T19** | **STRATZ Empirical `with` Synergy & Configurable Steam32 Account ID**: Optional `STRATZ_API_TOKEN` GraphQL client for native empirical `with` synergy matrices + runtime UI/CLI configuration for custom Steam32 Account IDs. | Integration contract tests with mock GraphQL payload | Planned (Not Started) |
+| **T20** | **Public Open-Source Readiness (`Apache-2.0`)**: Scrub/externalize personal Steam32 match snapshots from tracked defaults into optional user cache (`~/.local/share/truesight-dota/cache/`) before toggling repository visibility from private to public. | Clean repo audit + dual-feature test matrix | Planned (Not Started) |
