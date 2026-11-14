@@ -1,4 +1,4 @@
-use std::io::Read;
+use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,6 +10,8 @@ use truesight_core::ports::{DraftEvent, DraftEventSource, PortError};
 
 /// Maximum accepted GSI HTTP payload size (64 KiB) to enforce memory bounds.
 pub const MAX_GSI_PAYLOAD_BYTES: usize = 64 * 1024;
+/// Maximum accepted GSI HTTP header section size (8 KiB).
+const MAX_GSI_HEADER_BYTES: usize = 8 * 1024;
 /// Maximum JSON nesting depth accepted from GSI payloads.
 const MAX_JSON_DEPTH: usize = 16;
 /// Bounded channel capacity for backpressure (`rust-architect` admission control).
@@ -17,15 +19,16 @@ pub const GSI_QUEUE_CAPACITY: usize = 16;
 
 /// Parses structural Dota 2 GSI JSON payloads and custom draft commands without regex/substring scans.
 pub fn parse_gsi_json_events(payload: &str) -> Vec<DraftEvent> {
-    let mut events = Vec::new();
-    let Some(root) = parse_json_root(payload) else {
-        return events;
-    };
-    if !matches!(root, JsonVal::Obj(_)) {
-        return events;
-    }
+    parse_json_root(payload)
+        .filter(|root| matches!(root, JsonVal::Obj(_)))
+        .map(|root| parse_gsi_events_from_root(&root))
+        .unwrap_or_default()
+}
 
-    let map_node = root.get("map").unwrap_or(&root);
+fn parse_gsi_events_from_root(root: &JsonVal) -> Vec<DraftEvent> {
+    let mut events = Vec::new();
+
+    let map_node = root.get("map").unwrap_or(root);
     if let Some(state) = map_node.get("game_state").and_then(JsonVal::as_str) {
         let clock = map_node.get("clock_time").and_then(JsonVal::as_i32).unwrap_or(0);
         if matches!(
@@ -45,7 +48,7 @@ pub fn parse_gsi_json_events(payload: &str) -> Vec<DraftEvent> {
         }
     }
 
-    let player_node = root.get("player").unwrap_or(&root);
+    let player_node = root.get("player").unwrap_or(root);
     let hero_node_opt = root.get("hero");
     let is_replay = (0..10_usize).any(|idx| find_slot(player_node, &format!("player{idx}")).is_some());
     if is_replay {
@@ -425,21 +428,48 @@ fn handle_gsi_connection(mut stream: TcpStream, tx: &SyncSender<DraftEvent>) {
     let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
     let _ = stream.set_write_timeout(Some(Duration::from_millis(250)));
 
-    let mut buf = vec![0_u8; MAX_GSI_PAYLOAD_BYTES];
-    let mut total_read = 0_usize;
+    let mut raw_buf = Vec::with_capacity(4096);
+    let mut chunk = [0_u8; 4096];
+    let mut header_end: Option<usize> = None;
+    let mut expected_total: Option<usize> = None;
 
     loop {
-        if total_read >= MAX_GSI_PAYLOAD_BYTES {
+        let cap = expected_total.unwrap_or(MAX_GSI_HEADER_BYTES + MAX_GSI_PAYLOAD_BYTES);
+        if raw_buf.len() >= cap {
             break;
         }
-        match stream.read(&mut buf[total_read..]) {
+        let max_read = (cap - raw_buf.len()).min(chunk.len());
+        match stream.read(&mut chunk[..max_read]) {
             Ok(0) => break,
             Ok(n) => {
-                total_read += n;
-                if let Some(header_end) = find_double_crlf(&buf[..total_read]) {
-                    let headers = String::from_utf8_lossy(&buf[..header_end]);
-                    let content_len = parse_content_length(&headers).unwrap_or(0);
-                    if header_end + content_len <= total_read {
+                raw_buf.extend_from_slice(&chunk[..n]);
+                if header_end.is_none() {
+                    if let Some(end) = find_double_crlf(&raw_buf) {
+                        if end > MAX_GSI_HEADER_BYTES {
+                            write_http_response(&mut stream, 400, "Bad Request");
+                            return;
+                        }
+                        match validate_http_headers(&raw_buf[..end]) {
+                            Ok(content_len) => {
+                                header_end = Some(end);
+                                expected_total = end.checked_add(content_len);
+                                if expected_total.is_none() {
+                                    write_http_response(&mut stream, 413, "Payload Too Large");
+                                    return;
+                                }
+                            }
+                            Err((status, reason)) => {
+                                write_http_response(&mut stream, status, reason);
+                                return;
+                            }
+                        }
+                    } else if raw_buf.len() > MAX_GSI_HEADER_BYTES {
+                        write_http_response(&mut stream, 400, "Bad Request");
+                        return;
+                    }
+                }
+                if let Some(need) = expected_total {
+                    if raw_buf.len() >= need {
                         break;
                     }
                 }
@@ -448,21 +478,84 @@ fn handle_gsi_connection(mut stream: TcpStream, tx: &SyncSender<DraftEvent>) {
         }
     }
 
-    if total_read > 0 {
-        let raw = String::from_utf8_lossy(&buf[..total_read]);
-        let body = raw.split("\r\n\r\n").nth(1).unwrap_or(&raw);
-        for ev in parse_gsi_json_events(body) {
-            match tx.try_send(ev) {
-                Ok(()) | Err(TrySendError::Full(_)) => {}
-                Err(TrySendError::Disconnected(_)) => return,
-            }
+    let Some(end) = header_end else {
+        if !raw_buf.is_empty() {
+            write_http_response(&mut stream, 400, "Bad Request");
         }
+        return;
+    };
+    let need = expected_total.unwrap_or(end);
+    if raw_buf.len() < need {
+        write_http_response(&mut stream, 400, "Bad Request");
+        return;
     }
 
-    let _ = std::io::Write::write_all(
-        &mut stream,
-        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK",
+    let Ok(body) = std::str::from_utf8(&raw_buf[end..need]) else {
+        write_http_response(&mut stream, 400, "Bad Request");
+        return;
+    };
+    let Some(root) = parse_json_root(body).filter(|r| matches!(r, JsonVal::Obj(_))) else {
+        write_http_response(&mut stream, 400, "Bad Request");
+        return;
+    };
+
+    for ev in parse_gsi_events_from_root(&root) {
+        match tx.try_send(ev) {
+            Ok(()) | Err(TrySendError::Full(_)) => {}
+            Err(TrySendError::Disconnected(_)) => return,
+        }
+    }
+    write_http_response(&mut stream, 200, "OK");
+}
+
+fn validate_http_headers(header_bytes: &[u8]) -> Result<usize, (u16, &'static str)> {
+    let headers = std::str::from_utf8(header_bytes).map_err(|_| (400, "Bad Request"))?;
+    let mut lines = headers.split("\r\n");
+    let req_line = lines.next().ok_or((400, "Bad Request"))?;
+    let mut parts = req_line.split_whitespace();
+    let method = parts.next().ok_or((400, "Bad Request"))?;
+    let target = parts.next().ok_or((400, "Bad Request"))?;
+    let version = parts.next().ok_or((400, "Bad Request"))?;
+    if parts.next().is_some()
+        || target.is_empty()
+        || !matches!(version, "HTTP/1.0" | "HTTP/1.1")
+    {
+        return Err((400, "Bad Request"));
+    }
+    if method != "POST" {
+        return Err((405, "Method Not Allowed"));
+    }
+
+    let mut content_len: Option<usize> = None;
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        let (name, val) = line.split_once(':').ok_or((400, "Bad Request"))?;
+        let lower = name.trim().to_ascii_lowercase();
+        if lower == "transfer-encoding" {
+            return Err((400, "Bad Request"));
+        }
+        if lower == "content-length" {
+            let parsed = val.trim().parse::<usize>().map_err(|_| (400, "Bad Request"))?;
+            if parsed > MAX_GSI_PAYLOAD_BYTES {
+                return Err((413, "Payload Too Large"));
+            }
+            if content_len.is_some_and(|prev| prev != parsed) {
+                return Err((400, "Bad Request"));
+            }
+            content_len = Some(parsed);
+        }
+    }
+    content_len.ok_or((411, "Length Required"))
+}
+
+fn write_http_response(stream: &mut TcpStream, status: u16, reason: &str) {
+    let resp = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reason}",
+        reason.len()
     );
+    let _ = stream.write_all(resp.as_bytes());
 }
 
 fn find_double_crlf(bytes: &[u8]) -> Option<usize> {
@@ -470,14 +563,4 @@ fn find_double_crlf(bytes: &[u8]) -> Option<usize> {
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
         .map(|pos| pos + 4)
-}
-
-fn parse_content_length(headers: &str) -> Option<usize> {
-    for line in headers.lines() {
-        let lower = line.to_ascii_lowercase();
-        if let Some(rest) = lower.strip_prefix("content-length:") {
-            return rest.trim().parse::<usize>().ok();
-        }
-    }
-    None
 }

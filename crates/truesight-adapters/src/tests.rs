@@ -1499,3 +1499,60 @@ fn gsi_structural_json_parser_handles_escapes_duplicates_and_truncation() {
         "Trailing non-whitespace garbage after root JSON object must be rejected"
     );
 }
+
+#[test]
+fn gsi_http_framing_rejects_bad_method_missing_length_truncation_and_oversized_body() {
+    use std::io::Read;
+    use std::net::Shutdown;
+
+    let mut listener = BoundedGsiListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr();
+
+    let send_raw = |raw: &[u8]| -> String {
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+        stream.write_all(raw).unwrap();
+        stream.flush().unwrap();
+        let _ = stream.shutdown(Shutdown::Write);
+        let mut resp = String::new();
+        let _ = stream.read_to_string(&mut resp);
+        resp
+    };
+
+    let resp_405 = send_raw(b"GET / HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}");
+    assert!(resp_405.starts_with("HTTP/1.1 405"), "Expected 405 for GET, got: {resp_405}");
+
+    let body_ok = r#"{"map":{"game_state":"DOTA_GAMERULES_STATE_HERO_SELECTION","clock_time":1}}"#;
+    let resp_411 =
+        send_raw(format!("POST / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n{body_ok}").as_bytes());
+    assert!(
+        resp_411.starts_with("HTTP/1.1 411"),
+        "Expected 411 without Content-Length, got: {resp_411}"
+    );
+
+    let resp_400_trunc = send_raw(
+        format!("POST / HTTP/1.1\r\nContent-Length: 200\r\n\r\n{body_ok}").as_bytes(),
+    );
+    assert!(
+        resp_400_trunc.starts_with("HTTP/1.1 400"),
+        "Expected 400 for truncated body < Content-Length, got: {resp_400_trunc}"
+    );
+
+    let resp_400_json = send_raw(b"POST / HTTP/1.1\r\nContent-Length: 10\r\n\r\n{\"map\":bad");
+    assert!(
+        resp_400_json.starts_with("HTTP/1.1 400"),
+        "Expected 400 for malformed JSON body, got: {resp_400_json}"
+    );
+
+    let resp_413 = send_raw(b"POST / HTTP/1.1\r\nContent-Length: 70000\r\n\r\n");
+    assert!(
+        resp_413.starts_with("HTTP/1.1 413"),
+        "Expected 413 for oversized Content-Length > 64 KiB, got: {resp_413}"
+    );
+
+    thread::sleep(Duration::from_millis(60));
+    assert!(
+        listener.poll_events().unwrap().is_empty(),
+        "Rejected HTTP requests must never enqueue events"
+    );
+}
