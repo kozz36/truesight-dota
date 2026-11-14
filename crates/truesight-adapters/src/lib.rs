@@ -623,4 +623,128 @@ mod tests {
             role: Some(Role::Carry),
         }));
     }
+
+    #[test]
+    fn steam32_resolver_supports_explicit_override_gsi_steam64_and_loginusers_vdf() {
+        use crate::sync::{
+            LocalCacheManager, normalize_steam32_id, parse_loginusers_vdf,
+            resolve_steam32_account_id,
+        };
+
+        let sample_vdf = r#"
+        "users"
+        {
+            "76561198000000001"
+            {
+                "AccountName" "alt_account"
+                "MostRecent" "0"
+            }
+            "76561198061460213"
+            {
+                "AccountName" "primary_player"
+                "MostRecent" "1"
+            }
+        }
+        "#;
+
+        assert_eq!(normalize_steam32_id(76_561_198_061_460_213), Some(101_194_485));
+        assert_eq!(normalize_steam32_id(101_194_485), Some(101_194_485));
+        assert_eq!(parse_loginusers_vdf(sample_vdf), Some(101_194_485));
+
+        // Tier 1 (Explicit override) > Tier 2 (GSI Steam64) > Tier 3 (Steam loginusers.vdf)
+        assert_eq!(
+            resolve_steam32_account_id(Some(222_333_444), Some(111_222_333), Some(sample_vdf)),
+            Some(222_333_444)
+        );
+        assert_eq!(
+            resolve_steam32_account_id(None, Some(76_561_198_071_488_061), Some(sample_vdf)),
+            Some(111_222_333)
+        );
+        assert_eq!(
+            resolve_steam32_account_id(None, None, Some(sample_vdf)),
+            Some(101_194_485)
+        );
+        assert_eq!(resolve_steam32_account_id(None, None, None), None);
+
+        // GSI payload with player.steamid emits PlayerSteamIdDetected
+        let gsi_payload = r#"{
+            "player": {
+                "steamid": "76561198071488061",
+                "team_name": "radiant"
+            }
+        }"#;
+        let events = parse_gsi_json_events(gsi_payload);
+        assert!(
+            events.contains(&DraftEvent::PlayerSteamIdDetected {
+                steam32: 111_222_333
+            }),
+            "GSI parser must emit PlayerSteamIdDetected with converted Steam32: {events:?}"
+        );
+
+        // Per-account cache isolation under cache_dir/players/{account_id}/
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "truesight_account_isolation_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+
+        let mgr_a = LocalCacheManager::with_dir(tmp_dir.clone(), 100_000_001);
+        let mgr_b = LocalCacheManager::with_dir(tmp_dir.clone(), 100_000_002);
+        let now = 1_794_500_000_u64;
+        mgr_a
+            .write_cached_files(
+                None,
+                Some(r#"[{"hero_id": 1, "last_played": 1794499000, "games": 20, "win": 16}]"#),
+                now,
+            )
+            .unwrap();
+        mgr_b
+            .write_cached_files(
+                None,
+                Some(r#"[{"hero_id": 1, "last_played": 1794499000, "games": 20, "win": 4}]"#),
+                now,
+            )
+            .unwrap();
+
+        let mat_a = mgr_a.build_repository().load_matrix(Bracket::Legend).unwrap();
+        let mat_b = mgr_b.build_repository().load_matrix(Bracket::Legend).unwrap();
+        assert!(
+            mat_a.hero(HeroId(1)).unwrap().comfort_delta()
+                > mat_b.hero(HeroId(1)).unwrap().comfort_delta(),
+            "Per-account cache directories must isolate player comfort pools"
+        );
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn stratz_synergy_override_updates_matchup_matrix_while_preserving_symmetry() {
+        use crate::sync::parse_stratz_with_synergy_json;
+
+        let stratz_json = r#"[
+            {"heroId1": 1, "heroId2": 97, "synergy": 0.042, "matchCount": 12500}
+        ]"#;
+        let parsed = parse_stratz_with_synergy_json(stratz_json);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].0, HeroId(1));
+        assert_eq!(parsed[0].1, HeroId(97));
+
+        let mut repo = SeededMetaRepository::new();
+        repo.custom_pair_synergy = parsed;
+
+        let mat = repo.load_matrix(Bracket::Immortal).unwrap();
+        let ab = mat.cell(HeroId(1), HeroId(97));
+        let ba = mat.cell(HeroId(97), HeroId(1));
+        assert!(
+            ab.synergy_delta > 0.035 && ab.with_matches == 12500,
+            "STRATZ empirical synergy override must update pair synergy & with_matches: {ab:?}"
+        );
+        assert!(
+            (ab.synergy_delta - ba.synergy_delta).abs() < 1e-6,
+            "STRATZ synergy override must preserve strict synergy symmetry"
+        );
+        assert!(
+            (ab.counter_delta + ba.counter_delta).abs() < 1e-6,
+            "STRATZ synergy override must preserve strict counter antisymmetry"
+        );
+    }
 }

@@ -5,6 +5,7 @@ use eframe::egui::{
 };
 use std::collections::HashMap;
 use truesight_adapters::gsi::BoundedGsiListener;
+use truesight_adapters::sync::{AccountLinkConfig, normalize_steam32_id, save_account_config};
 use truesight_adapters::vision::parse_hero_atlas;
 use truesight_core::domain::{
     AttackType, Bracket, DraftPick, Faction, HeroId, Role, Side, TEAM_SIZE,
@@ -703,10 +704,17 @@ pub struct TrueSightGuiApp {
     focus_picker_input: bool,
     suggest_filter: String,
     status_banner: String,
+    account_editor_open: bool,
+    account_input: String,
 }
 
 impl TrueSightGuiApp {
     pub fn new(session: AppSession, gsi_listener: Option<BoundedGsiListener>) -> Self {
+        let account_input = session
+            .cache_mgr
+            .player_account_id
+            .map(|id| id.to_string())
+            .unwrap_or_default();
         Self {
             session,
             gsi_listener,
@@ -720,6 +728,8 @@ impl TrueSightGuiApp {
             status_banner:
                 "Click any Ally (P1..P5) or Enemy (P1..P5) slot card, type hero name, and press Enter."
                     .into(),
+            account_editor_open: false,
+            account_input,
         }
     }
 
@@ -821,18 +831,27 @@ impl TrueSightGuiApp {
                     self.session.draft.ally_faction = self.session.draft.ally_faction.opposite();
                 }
 
-                // OpenDota DB status pill
-                egui::Frame::NONE
-                    .fill(P_INDIGO_2)
-                    .stroke(Stroke::new(1.0_f32, P_LINE))
-                    .inner_margin(Margin::symmetric(8, 4))
-                    .show(ui, |ui| {
-                        ui.label(
-                            RichText::new(&self.session.db_status)
-                                .size(10.5)
-                                .color(P_MUTED),
-                        );
-                    });
+                // OpenDota DB & Steam32 Account Link Pill (click to edit Steam32 / Auto / Unlinked)
+                let db_btn = egui::Button::new(
+                    RichText::new(&self.session.db_status)
+                        .size(10.5)
+                        .color(P_MUTED),
+                )
+                .fill(P_INDIGO_2)
+                .stroke(Stroke::new(1.0_f32, P_LINE));
+                if ui
+                    .add(db_btn)
+                    .on_hover_text("Click to configure Steam32 / Steam64 account link")
+                    .clicked()
+                {
+                    self.account_editor_open = !self.account_editor_open;
+                    self.account_input = self
+                        .session
+                        .cache_mgr
+                        .player_account_id
+                        .map(|id| id.to_string())
+                        .unwrap_or_default();
+                }
 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
@@ -2779,6 +2798,65 @@ impl TrueSightGuiApp {
                     );
                 });
             });
+
+        if self.account_editor_open {
+            let mut close_modal = false;
+            egui::Window::new("STEAM ACCOUNT LINK")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(Align2::CENTER_TOP, vec2(0.0, 62.0))
+                .show(ctx, |ui| {
+                    ui.label(
+                        RichText::new("Enter Steam32 or Steam64 ID (leave Auto for GSI + Steam VDF):")
+                            .size(11.0)
+                            .color(P_SILVER),
+                    );
+                    ui.add_space(4.0);
+                    let enter_pressed = ui
+                        .add(
+                            egui::TextEdit::singleline(&mut self.account_input)
+                                .desired_width(240.0)
+                                .hint_text("e.g. Steam32 or 7656119..."),
+                        )
+                        .lost_focus()
+                        && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("APPLY").clicked() || enter_pressed {
+                            if let Ok(raw) = self.account_input.trim().parse::<u64>() {
+                                if let Some(s32) = normalize_steam32_id(raw) {
+                                    self.session.set_account_id(Some(s32), true);
+                                    let _ = save_account_config(AccountLinkConfig::Explicit(s32));
+                                    self.status_banner = format!("Linked Steam32 account #{s32}.");
+                                    close_modal = true;
+                                } else {
+                                    self.status_banner = "Invalid Steam32/Steam64 account ID.".into();
+                                }
+                            } else {
+                                self.status_banner = "Enter a numeric Steam32 or Steam64 ID.".into();
+                            }
+                        }
+                        if ui.button("AUTO (VDF)").clicked() {
+                            self.session.set_account_auto();
+                            let _ = save_account_config(AccountLinkConfig::Auto);
+                            self.status_banner = format!("Auto account mode: {}.", self.session.db_status);
+                            close_modal = true;
+                        }
+                        if ui.button("UNLINK").clicked() {
+                            self.session.set_account_id(None, true);
+                            let _ = save_account_config(AccountLinkConfig::Unlinked);
+                            self.status_banner = "Account unlinked (neutral 0.0% comfort).".into();
+                            close_modal = true;
+                        }
+                        if ui.button("CLOSE").clicked() {
+                            close_modal = true;
+                        }
+                    });
+                });
+            if close_modal {
+                self.account_editor_open = false;
+            }
+        }
 
         rects
     }

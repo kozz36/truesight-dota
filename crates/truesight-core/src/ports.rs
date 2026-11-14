@@ -20,6 +20,9 @@ pub enum DraftEvent {
     FactionDetected {
         faction: Faction,
     },
+    PlayerSteamIdDetected {
+        steam32: u64,
+    },
     LocalPlayerHeroDetected {
         hero_slug: String,
     },

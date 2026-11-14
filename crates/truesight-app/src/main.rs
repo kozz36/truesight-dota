@@ -3,7 +3,7 @@ mod gui;
 
 use std::io::{self, BufRead, Write};
 use truesight_adapters::gsi::BoundedGsiListener;
-use truesight_adapters::sync::LocalCacheManager;
+use truesight_adapters::sync::{LocalCacheManager, normalize_steam32_id};
 use truesight_core::domain::{Bracket, DraftPick, DraftState, Faction, HeroId, Role, Side, TEAM_SIZE};
 use truesight_core::math::{
     DraftAnalysis5v5, HeroRecommendation, MatchupMatrix, ModelWeights, evaluate_draft_5v5,
@@ -30,7 +30,7 @@ pub struct AppSession {
 
 impl AppSession {
     pub fn new() -> Result<Self, String> {
-        let cache_mgr = LocalCacheManager::default();
+        let cache_mgr = LocalCacheManager::auto_detected();
         let repo = cache_mgr.build_repository();
         let matrix = repo
             .load_matrix(Bracket::Legend)
@@ -51,6 +51,27 @@ impl AppSession {
         if let Ok(m) = self.cache_mgr.build_repository().load_matrix(bracket) {
             self.matrix = m;
         }
+    }
+
+    pub fn reload_repository(&mut self) {
+        if let Ok(m) = self
+            .cache_mgr
+            .build_repository()
+            .load_matrix(self.draft.bracket)
+        {
+            self.matrix = m;
+        }
+        self.db_status = self.cache_mgr.freshness_badge(LocalCacheManager::now_unix());
+    }
+
+    pub fn set_account_id(&mut self, account_id: Option<u64>, explicit: bool) {
+        self.cache_mgr.set_account_id(account_id, explicit);
+        self.reload_repository();
+    }
+
+    pub fn set_account_auto(&mut self) {
+        self.cache_mgr.set_auto_account();
+        self.reload_repository();
     }
 
     pub fn sync_db(&mut self, force: bool) -> Result<String, String> {
@@ -154,6 +175,13 @@ impl AppSession {
             }
             DraftEvent::FactionDetected { faction } => {
                 self.draft.ally_faction = faction;
+            }
+            DraftEvent::PlayerSteamIdDetected { steam32 } => {
+                if !self.cache_mgr.explicit_override
+                    && self.cache_mgr.player_account_id != Some(steam32)
+                {
+                    self.set_account_id(Some(steam32), false);
+                }
             }
             DraftEvent::LocalPlayerHeroDetected { hero_slug } => {
                 if let Some(id) = self.find_hero(&hero_slug) {
@@ -431,6 +459,24 @@ pub fn execute_command(session: &mut AppSession, line: &str) -> Result<bool, Str
                 _ => return Err("Faction must be radiant or dire".into()),
             };
         }
+        "account" | "steam" => {
+            let Some(&a_str) = parts.get(1) else {
+                return Err("Usage: account <steam32|steam64|auto|none>".into());
+            };
+            let lower = a_str.to_ascii_lowercase();
+            if lower == "auto" {
+                session.set_account_auto();
+            } else if lower == "none" || lower == "unlink" || lower == "unlinked" {
+                session.set_account_id(None, true);
+            } else {
+                let raw = a_str
+                    .parse::<u64>()
+                    .map_err(|_| "Account ID must be a numeric Steam32/Steam64, 'auto', or 'none'".to_string())?;
+                let s32 = normalize_steam32_id(raw)
+                    .ok_or_else(|| "Invalid Steam32/Steam64 account ID".to_string())?;
+                session.set_account_id(Some(s32), true);
+            }
+        }
         "ally" | "a" => {
             if parts.len() < 3 {
                 return Err("Usage: ally <1..5> <hero_name>".into());
@@ -510,12 +556,45 @@ pub fn execute_command(session: &mut AppSession, line: &str) -> Result<bool, Str
         }
         _ => {
             return Err(
-                "Commands: ally <1..5> <hero> | enemy <1..5> <hero> | ban <hero> | role <1..5> | bracket <medal> | faction <radiant|dire> | sync | reset | quit"
+                "Commands: ally <1..5> <hero> | enemy <1..5> <hero> | ban <hero> | role <1..5> | bracket <medal> | faction <radiant|dire> | account <id|auto|none> | sync | reset | quit"
                     .into(),
             );
         }
     }
     Ok(true)
+}
+
+fn parse_account_id_arg(args: &[String]) -> Result<Option<Option<u64>>, String> {
+    let mut i = 1_usize;
+    while i < args.len() {
+        let val = if args[i] == "--account-id" {
+            args.get(i + 1).map(String::as_str)
+        } else if let Some(rest) = args[i].strip_prefix("--account-id=") {
+            Some(rest)
+        } else {
+            None
+        };
+        if let Some(raw_str) = val {
+            let trimmed = raw_str.trim();
+            if trimmed.eq_ignore_ascii_case("none") || trimmed.eq_ignore_ascii_case("unlinked") {
+                return Ok(Some(None));
+            }
+            if trimmed.eq_ignore_ascii_case("auto") {
+                return Ok(None);
+            }
+            let raw = trimmed
+                .parse::<u64>()
+                .map_err(|_| format!("Invalid --account-id value: '{trimmed}'"))?;
+            let s32 = normalize_steam32_id(raw)
+                .ok_or_else(|| format!("Out-of-range Steam ID: '{trimmed}'"))?;
+            return Ok(Some(Some(s32)));
+        }
+        if args[i] == "--account-id" {
+            return Err("Missing value after --account-id".into());
+        }
+        i += 1;
+    }
+    Ok(None)
 }
 
 fn main() {
@@ -527,6 +606,14 @@ fn main() {
             std::process::exit(1);
         }
     };
+    match parse_account_id_arg(&args) {
+        Ok(Some(opt_id)) => session.set_account_id(opt_id, true),
+        Ok(None) => {}
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "{e}");
+            std::process::exit(1);
+        }
+    }
 
     if args.iter().any(|a| a == "--sync") {
         match session.sync_db(true) {
@@ -647,6 +734,27 @@ mod tests {
             faction: truesight_core::domain::Faction::Radiant,
         });
         assert_eq!(session.draft.ally_faction, truesight_core::domain::Faction::Radiant);
+
+        assert!(execute_command(&mut session, "account none").unwrap());
+        assert_eq!(session.cache_mgr.player_account_id, None);
+        assert!(session.db_status.contains("Player: unlinked"));
+
+        assert!(execute_command(&mut session, "account 76561198061460213").unwrap());
+        assert_eq!(session.cache_mgr.player_account_id, Some(101_194_485));
+        assert!(session.db_status.contains("Player #101194485"));
+
+        // Explicit account override must not be overwritten by GSI SteamID
+        session.apply_event(truesight_core::ports::DraftEvent::PlayerSteamIdDetected {
+            steam32: 222_333_444,
+        });
+        assert_eq!(session.cache_mgr.player_account_id, Some(101_194_485));
+
+        // In Auto mode, GSI SteamID updates active player account
+        assert!(execute_command(&mut session, "account auto").unwrap());
+        session.apply_event(truesight_core::ports::DraftEvent::PlayerSteamIdDetected {
+            steam32: 222_333_444,
+        });
+        assert_eq!(session.cache_mgr.player_account_id, Some(222_333_444));
     }
 
     #[test]

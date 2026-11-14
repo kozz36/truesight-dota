@@ -10,6 +10,7 @@ use truesight_core::ports::{PortError, StatsRepository};
 pub struct SeededMetaRepository {
     pub custom_personal_pool: Vec<(HeroId, u32, u32, f32)>,
     pub custom_hero_meta: Vec<(HeroId, [f32; 8], f32)>,
+    pub custom_pair_synergy: Vec<(HeroId, HeroId, f32, u32)>,
     pub use_demo_comfort_defaults: bool,
 }
 
@@ -18,6 +19,7 @@ impl SeededMetaRepository {
         Self {
             custom_personal_pool: Vec::new(),
             custom_hero_meta: Vec::new(),
+            custom_pair_synergy: Vec::new(),
             use_demo_comfort_defaults: false,
         }
     }
@@ -26,6 +28,7 @@ impl SeededMetaRepository {
         Self {
             custom_personal_pool: Vec::new(),
             custom_hero_meta: Vec::new(),
+            custom_pair_synergy: Vec::new(),
             use_demo_comfort_defaults: true,
         }
     }
@@ -140,6 +143,48 @@ impl StatsRepository for SeededMetaRepository {
                     synergy_delta,
                     vs_matches: vs_m,
                     with_matches: 400,
+                },
+            )
+            .map_err(|e| PortError(e.to_string()))?;
+        }
+
+        // 4. Apply optional STRATZ empirical `with` synergy overrides symmetrically
+        for &(a, b, syn_raw, with_matches) in &self.custom_pair_synergy {
+            if a == b {
+                continue;
+            }
+            let a_idx = a.as_index();
+            let b_idx = b.as_index();
+            if a_idx >= truesight_core::domain::MAX_HEROES
+                || b_idx >= truesight_core::domain::MAX_HEROES
+            {
+                continue;
+            }
+            let da = hero_bracket_shift[a_idx] - mean_bracket_shift;
+            let db = hero_bracket_shift[b_idx] - mean_bracket_shift;
+            let s_adj = tau * syn_raw + 0.15 * 0.5 * (da + db);
+
+            let ab_existing = m.cell(a, b);
+            let ba_existing = m.cell(b, a);
+            m.set_calibrated_cell(
+                a,
+                b,
+                MatchupCell {
+                    counter_delta: ab_existing.counter_delta,
+                    synergy_delta: s_adj,
+                    vs_matches: ab_existing.vs_matches,
+                    with_matches,
+                },
+            )
+            .map_err(|e| PortError(e.to_string()))?;
+            m.set_calibrated_cell(
+                b,
+                a,
+                MatchupCell {
+                    counter_delta: ba_existing.counter_delta,
+                    synergy_delta: s_adj,
+                    vs_matches: ba_existing.vs_matches,
+                    with_matches,
                 },
             )
             .map_err(|e| PortError(e.to_string()))?;

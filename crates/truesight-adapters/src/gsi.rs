@@ -30,8 +30,13 @@ pub fn parse_gsi_json_events(payload: &str) -> Vec<DraftEvent> {
         }
     }
 
-    // Extract local player faction (`"player": { ... "team_name": "radiant" | "dire" }`)
+    // Extract local player faction (`"player": { ... "team_name": "radiant" | "dire" }`) and Steam32 ID
     let player_slice = extract_json_object_slice(payload, "player").unwrap_or(payload);
+    if let Some(raw_steamid) = extract_json_u64(player_slice, "steamid") {
+        if let Some(steam32) = crate::sync::normalize_steam32_id(raw_steamid) {
+            events.push(DraftEvent::PlayerSteamIdDetected { steam32 });
+        }
+    }
     if let Some(team_name) = extract_json_string(player_slice, "team_name") {
         let faction = match team_name.trim().to_ascii_lowercase().as_str() {
             "radiant" | "team2" | "goodguys" => Some(Faction::Radiant),
@@ -136,6 +141,22 @@ fn extract_json_int(input: &str, key: &str) -> Option<i32> {
         return None;
     }
     rest[..token_len].parse::<i32>().ok()
+}
+
+fn extract_json_u64(input: &str, key: &str) -> Option<u64> {
+    let pattern = format!("\"{key}\"");
+    let start = input.find(&pattern)? + pattern.len();
+    let rest = input[start..].trim_start();
+    let after_colon = rest.strip_prefix(':')?.trim_start();
+    let digits: String = after_colon
+        .chars()
+        .skip_while(|c| *c == '"')
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse::<u64>().ok()
 }
 
 /// Bounded local HTTP listener for Dota 2 Game State Integration (`127.0.0.1:<port>`).
