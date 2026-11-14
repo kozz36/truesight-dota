@@ -1,5 +1,5 @@
 use std::io::Read;
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
@@ -200,6 +200,25 @@ fn extract_json_u64(input: &str, key: &str) -> Option<u64> {
     digits.parse::<u64>().ok()
 }
 
+/// Validates that a configured GSI bind address resolves strictly to loopback (`127.0.0.0/8` or `::1`).
+pub fn validate_gsi_bind_addr(addr: &str) -> Result<SocketAddr, PortError> {
+    let addrs: Vec<SocketAddr> = addr
+        .to_socket_addrs()
+        .map_err(|e| PortError(format!("Invalid GSI bind address '{addr}': {e}")))?
+        .collect();
+    if addrs.is_empty() {
+        return Err(PortError(format!(
+            "Invalid GSI bind address '{addr}': resolved to no addresses"
+        )));
+    }
+    if addrs.iter().any(|sa| !sa.ip().is_loopback()) {
+        return Err(PortError(format!(
+            "Refusing non-loopback GSI bind address '{addr}'; only 127.0.0.1 / ::1 loopback is permitted"
+        )));
+    }
+    Ok(addrs[0])
+}
+
 /// Bounded local HTTP listener for Dota 2 Game State Integration (`127.0.0.1:<port>`).
 pub struct BoundedGsiListener {
     rx: Receiver<DraftEvent>,
@@ -210,7 +229,8 @@ pub struct BoundedGsiListener {
 
 impl BoundedGsiListener {
     pub fn bind(addr: &str) -> Result<Self, PortError> {
-        let listener = TcpListener::bind(addr).map_err(|e| PortError(e.to_string()))?;
+        let sock_addr = validate_gsi_bind_addr(addr)?;
+        let listener = TcpListener::bind(sock_addr).map_err(|e| PortError(e.to_string()))?;
         listener
             .set_nonblocking(true)
             .map_err(|e| PortError(e.to_string()))?;

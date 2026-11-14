@@ -1416,3 +1416,31 @@ fn vision_reset_clears_detector_state_drains_stale_queue_and_repopulates_station
         "worker must re-emit stationary 10-hero picks after reset()"
     );
 }
+
+#[test]
+fn gsi_listener_enforces_loopback_bind_and_rejects_non_loopback_addresses() {
+    use crate::gsi::validate_gsi_bind_addr;
+
+    for bad in ["0.0.0.0:0", "[::]:0", "192.168.1.50:4001"] {
+        let err = match BoundedGsiListener::bind(bad) {
+            Ok(_) => panic!("expected bind failure for non-loopback address {bad}"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().to_ascii_lowercase().contains("loopback"),
+            "error for {bad} must explain loopback policy: {err}"
+        );
+    }
+
+    let listener = BoundedGsiListener::bind("127.0.0.1:0").expect("IPv4 loopback must bind");
+    assert!(listener.local_addr().ip().is_loopback());
+
+    let parsed_v6 = validate_gsi_bind_addr("[::1]:4001").expect("IPv6 loopback must validate");
+    assert!(parsed_v6.ip().is_loopback());
+    if let Err(err) = BoundedGsiListener::bind("[::1]:0") {
+        assert!(
+            !err.to_string().to_ascii_lowercase().contains("loopback"),
+            "IPv6 loopback [::1] must not be blocked by loopback guard: {err}"
+        );
+    }
+}

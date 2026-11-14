@@ -11,7 +11,7 @@
 
 ## Network & Local Input Boundaries
 
-- **Game State Integration (GSI) Listener**: Binds strictly to loopback (`127.0.0.1`) and rejects payloads exceeding `MAX_GSI_PAYLOAD_BYTES` (64 KiB), buffering events through a bounded `sync_channel(16)`.
+- **Game State Integration (GSI) Listener**: `validate_gsi_bind_addr` strictly enforces IPv4 (`127.0.0.0/8`) and IPv6 (`::1`) loopback addresses on `TRUESIGHT_GSI_ADDR`, rejecting wildcard (`0.0.0.0`, `::`) and non-loopback interfaces before socket bind; rejects payloads exceeding `MAX_GSI_PAYLOAD_BYTES` (64 KiB), buffering events through a bounded queue.
 - **External APIs**: Only queries public HTTPS endpoints when syncing (`api.opendota.com`) or optionally reading public GraphQL matchup synergy (`api.stratz.com` when `STRATZ_API_TOKEN` is configured).
 - **Steam Account Detection**: Reads local `loginusers.vdf` in read-only mode to infer the `MostRecent` Steam32 ID locally; no Steam credentials or auth tokens are read or transmitted.
 - **Per-Account Cache Isolation**: Player caches live exclusively in local user XDG data storage (`~/.local/share/truesight-dota/cache/players/{account_id}/`).

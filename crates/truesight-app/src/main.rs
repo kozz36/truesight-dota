@@ -68,10 +68,17 @@ fn main() {
     }
 
     let gsi_addr = std::env::var("TRUESIGHT_GSI_ADDR").unwrap_or_else(|_| "127.0.0.1:4001".into());
-    let mut gsi_listener = BoundedGsiListener::bind(&gsi_addr).ok();
-    if let Some(ref l) = gsi_listener {
-        session.last_gsi_state = format!("LISTENING on http://{}", l.local_addr());
-    }
+    let mut gsi_listener = match BoundedGsiListener::bind(&gsi_addr) {
+        Ok(l) => {
+            session.last_gsi_state = format!("LISTENING on http://{}", l.local_addr());
+            Some(l)
+        }
+        Err(e) => {
+            session.last_gsi_state = format!("GSI DISABLED ({e})");
+            let _ = writeln!(io::stderr(), "Warning: GSI listener disabled: {e}");
+            None
+        }
+    };
     let mut vision_worker = BoundedVisionWorker::spawn();
 
     #[cfg(feature = "gui")]
