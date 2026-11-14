@@ -1444,3 +1444,58 @@ fn gsi_listener_enforces_loopback_bind_and_rejects_non_loopback_addresses() {
         );
     }
 }
+
+#[test]
+fn gsi_structural_json_parser_handles_escapes_duplicates_and_truncation() {
+    // 1. Escaped quotes & decoy keys inside unrelated string values must be ignored
+    let decoy_payload = r#"{
+        "provider": {
+            "name": "fake \"game_state\": \"DOTA_GAMERULES_STATE_POST_GAME\" \"hero_id\": 99"
+        },
+        "hero": {
+            "alias": "quoted \"npc_dota_hero_pudge\"}",
+            "name": "npc_dota_hero_antimage"
+        },
+        "map": {
+            "clock_time": 15,
+            "game_state": "DOTA_GAMERULES_STATE_HERO_SELECTION"
+        }
+    }"#;
+    let decoy_events = parse_gsi_json_events(decoy_payload);
+    assert_eq!(
+        decoy_events,
+        vec![
+            DraftEvent::GameRulesStateChanged {
+                state_name: "DOTA_GAMERULES_STATE_HERO_SELECTION".into(),
+                game_time_secs: 15,
+            },
+            DraftEvent::LocalPlayerHeroDetected {
+                hero_slug: "npc_dota_hero_antimage".into(),
+            },
+        ]
+    );
+
+    // 2. Reordered and duplicate keys: last key wins
+    let dup_payload = r#"{"truesight_pick":{"hero_id":1,"slot":4,"slot":2,"side":"enemy"}}"#;
+    assert_eq!(
+        parse_gsi_json_events(dup_payload),
+        vec![DraftEvent::PickDetected {
+            side: Side::Enemies,
+            slot: 2,
+            hero_id: HeroId(1),
+            role: Some(Role::Offlane),
+        }]
+    );
+
+    // 3. Truncated / trailing-garbage JSON must emit zero events without panicking
+    assert!(
+        parse_gsi_json_events(r#"{"map":{"game_state":"DOTA_GAMERULES_STATE_HERO_SELECTION""#)
+            .is_empty(),
+        "Truncated JSON without closing braces must be rejected"
+    );
+    assert!(
+        parse_gsi_json_events(r#"{"map":{"game_state":"DOTA_GAMERULES_STATE_HERO_SELECTION"}} trailing"#)
+            .is_empty(),
+        "Trailing non-whitespace garbage after root JSON object must be rejected"
+    );
+}

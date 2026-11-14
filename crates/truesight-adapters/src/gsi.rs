@@ -10,17 +10,26 @@ use truesight_core::ports::{DraftEvent, DraftEventSource, PortError};
 
 /// Maximum accepted GSI HTTP payload size (64 KiB) to enforce memory bounds.
 pub const MAX_GSI_PAYLOAD_BYTES: usize = 64 * 1024;
+/// Maximum JSON nesting depth accepted from GSI payloads.
+const MAX_JSON_DEPTH: usize = 16;
 /// Bounded channel capacity for backpressure (`rust-architect` admission control).
 pub const GSI_QUEUE_CAPACITY: usize = 16;
 
-/// Minimal zero-dependency parser for Dota 2 GSI JSON payloads and custom draft commands.
+/// Parses structural Dota 2 GSI JSON payloads and custom draft commands without regex/substring scans.
 pub fn parse_gsi_json_events(payload: &str) -> Vec<DraftEvent> {
     let mut events = Vec::new();
+    let Some(root) = parse_json_root(payload) else {
+        return events;
+    };
+    if !matches!(root, JsonVal::Obj(_)) {
+        return events;
+    }
 
-    if let Some(state) = extract_json_string(payload, "game_state") {
-        let clock = extract_json_int(payload, "clock_time").unwrap_or(0);
+    let map_node = root.get("map").unwrap_or(&root);
+    if let Some(state) = map_node.get("game_state").and_then(JsonVal::as_str) {
+        let clock = map_node.get("clock_time").and_then(JsonVal::as_i32).unwrap_or(0);
         if matches!(
-            state.as_str(),
+            state,
             "DOTA_GAMERULES_STATE_WAIT_FOR_PLAYERS_TO_LOAD"
                 | "DOTA_GAMERULES_STATE_HERO_SELECTION"
                 | "DOTA_GAMERULES_STATE_STRATEGY_TIME"
@@ -30,38 +39,39 @@ pub fn parse_gsi_json_events(payload: &str) -> Vec<DraftEvent> {
                 | "DOTA_GAMERULES_STATE_DISCONNECT"
         ) {
             events.push(DraftEvent::GameRulesStateChanged {
-                state_name: state,
+                state_name: state.to_string(),
                 game_time_secs: clock,
             });
         }
     }
 
-    // Extract player(s) and hero assignment across live mode vs spectator/replay mode (`player0..player9`).
-    let player_slice = extract_json_object_slice(payload, "player").unwrap_or(payload);
-    let hero_slice_opt = extract_json_object_slice(payload, "hero");
-    if extract_json_object_slice(player_slice, "player0").is_some() {
+    let player_node = root.get("player").unwrap_or(&root);
+    let hero_node_opt = root.get("hero");
+    let is_replay = (0..10_usize).any(|idx| find_slot(player_node, &format!("player{idx}")).is_some());
+    if is_replay {
         for idx in 0..10_usize {
             let key = format!("player{idx}");
-            let Some(p_sub) = extract_json_object_slice(player_slice, &key) else {
+            let Some(p_sub) = find_slot(player_node, &key) else {
                 continue;
             };
-            let Some(steam32) =
-                extract_json_u64(p_sub, "steamid").and_then(crate::sync::normalize_steam32_id)
+            let Some(steam32) = p_sub
+                .get("steamid")
+                .and_then(JsonVal::as_u64)
+                .and_then(crate::sync::normalize_steam32_id)
             else {
                 continue;
             };
-            let faction = extract_json_string(p_sub, "team_name")
-                .as_deref()
+            let faction = p_sub
+                .get("team_name")
+                .and_then(JsonVal::as_str)
                 .and_then(parse_faction_name)
-                .unwrap_or(if idx < 5 {
-                    Faction::Radiant
-                } else {
-                    Faction::Dire
-                });
-            let hero_slug = hero_slice_opt
-                .and_then(|hs| extract_json_object_slice(hs, &key))
-                .and_then(|hs| extract_json_string(hs, "name"))
-                .unwrap_or_default();
+                .unwrap_or(if idx < 5 { Faction::Radiant } else { Faction::Dire });
+            let hero_slug = hero_node_opt
+                .and_then(|hn| find_slot(hn, &key))
+                .and_then(|hs| hs.get("name"))
+                .and_then(JsonVal::as_str)
+                .unwrap_or("")
+                .to_string();
             events.push(DraftEvent::PlayerHeroMapped {
                 steam32,
                 faction,
@@ -69,36 +79,39 @@ pub fn parse_gsi_json_events(payload: &str) -> Vec<DraftEvent> {
             });
         }
     } else {
-        if let Some(raw_steamid) = extract_json_u64(player_slice, "steamid") {
-            if let Some(steam32) = crate::sync::normalize_steam32_id(raw_steamid) {
-                events.push(DraftEvent::PlayerSteamIdDetected { steam32 });
-            }
+        if let Some(steam32) = player_node
+            .get("steamid")
+            .and_then(JsonVal::as_u64)
+            .and_then(crate::sync::normalize_steam32_id)
+        {
+            events.push(DraftEvent::PlayerSteamIdDetected { steam32 });
         }
-        if let Some(team_name) = extract_json_string(player_slice, "team_name") {
-            if let Some(f) = parse_faction_name(&team_name) {
-                events.push(DraftEvent::FactionDetected { faction: f });
-            }
+        if let Some(f) = player_node
+            .get("team_name")
+            .and_then(JsonVal::as_str)
+            .and_then(parse_faction_name)
+        {
+            events.push(DraftEvent::FactionDetected { faction: f });
         }
-
-        // Extract hero name from `"hero": { ... "name": "npc_dota_hero_..." }`
-        if let Some(hero_slice) = hero_slice_opt {
-            if let Some(hero_slug) = extract_json_string(hero_slice, "name") {
-                if hero_slug.starts_with("npc_dota_hero_") {
-                    events.push(DraftEvent::LocalPlayerHeroDetected { hero_slug });
-                }
-            }
+        if let Some(slug) = hero_node_opt
+            .and_then(|hs| hs.get("name"))
+            .and_then(JsonVal::as_str)
+            .filter(|s| s.starts_with("npc_dota_hero_"))
+        {
+            events.push(DraftEvent::LocalPlayerHeroDetected {
+                hero_slug: slug.to_string(),
+            });
         }
     }
 
-    // Support spectator/custom draft pick injection: `{"truesight_pick":{"side":"ally","slot":0,"hero_id":1}}`
-    if let Some(slice) = extract_json_object_slice(payload, "truesight_pick") {
-        let side = match extract_json_string(slice, "side").as_deref() {
+    if let Some(pick) = root.get("truesight_pick") {
+        let side = match pick.get("side").and_then(JsonVal::as_str) {
             Some("enemy") | Some("enemies") | Some("dire") => Side::Enemies,
             _ => Side::Allies,
         };
         if let (Some(slot), Some(hero_id)) = (
-            extract_json_int(slice, "slot"),
-            extract_json_int(slice, "hero_id"),
+            pick.get("slot").and_then(JsonVal::as_i32),
+            pick.get("hero_id").and_then(JsonVal::as_i32),
         ) {
             if (0..5).contains(&slot) && (1..160).contains(&hero_id) {
                 events.push(DraftEvent::PickDetected {
@@ -114,6 +127,12 @@ pub fn parse_gsi_json_events(payload: &str) -> Vec<DraftEvent> {
     events
 }
 
+fn find_slot<'a>(node: &'a JsonVal, key: &str) -> Option<&'a JsonVal> {
+    node.get(key)
+        .or_else(|| node.get("team2").and_then(|t| t.get(key)))
+        .or_else(|| node.get("team3").and_then(|t| t.get(key)))
+}
+
 fn parse_faction_name(raw: &str) -> Option<Faction> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "radiant" | "team2" | "goodguys" => Some(Faction::Radiant),
@@ -122,82 +141,185 @@ fn parse_faction_name(raw: &str) -> Option<Faction> {
     }
 }
 
-fn extract_json_object_slice<'a>(input: &'a str, key: &str) -> Option<&'a str> {
-    let pattern = format!("\"{key}\"");
-    let start = input.find(&pattern)? + pattern.len();
-    let rest = input[start..].trim_start();
-    let after_colon = rest.strip_prefix(':')?.trim_start();
-    if !after_colon.starts_with('{') {
-        return None;
+enum JsonVal {
+    Obj(Vec<(String, JsonVal)>),
+    Str(String),
+    Num(String),
+    Other,
+}
+
+impl JsonVal {
+    fn get(&self, key: &str) -> Option<&JsonVal> {
+        let JsonVal::Obj(entries) = self else { return None };
+        entries.iter().rev().find(|(k, _)| k == key).map(|(_, v)| v)
     }
-    let mut depth = 0_usize;
-    let mut in_string = false;
-    let mut escaped = false;
-    for (idx, ch) in after_colon.char_indices() {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                in_string = false;
-            }
-            continue;
+
+    fn as_str(&self) -> Option<&str> {
+        if let JsonVal::Str(s) = self { Some(s.as_str()) } else { None }
+    }
+
+    fn as_i32(&self) -> Option<i32> {
+        if let JsonVal::Num(s) | JsonVal::Str(s) = self { s.trim().parse().ok() } else { None }
+    }
+
+    fn as_u64(&self) -> Option<u64> {
+        if let JsonVal::Num(s) | JsonVal::Str(s) = self { s.trim().parse().ok() } else { None }
+    }
+}
+
+struct JsonParser<'a> {
+    src: &'a str,
+    pos: usize,
+}
+
+impl<'a> JsonParser<'a> {
+    fn peek(&self) -> Option<u8> {
+        self.src.as_bytes().get(self.pos).copied()
+    }
+
+    fn skip_ws(&mut self) {
+        while matches!(self.peek(), Some(b' ' | b'\t' | b'\r' | b'\n')) {
+            self.pos += 1;
         }
-        match ch {
-            '"' => in_string = true,
-            '{' => depth += 1,
-            '}' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    return Some(&after_colon[..=idx]);
+    }
+
+    fn take_digits(&mut self) -> bool {
+        let start = self.pos;
+        while self.peek().is_some_and(|b| b.is_ascii_digit()) {
+            self.pos += 1;
+        }
+        self.pos > start
+    }
+
+    fn parse_value(&mut self, depth: usize) -> Option<JsonVal> {
+        if depth > MAX_JSON_DEPTH {
+            return None;
+        }
+        self.skip_ws();
+        match self.peek()? {
+            b'{' => self.parse_object(depth + 1),
+            b'[' => self.parse_array(depth + 1),
+            b'"' => self.parse_string().map(JsonVal::Str),
+            b't' | b'f' | b'n' => ["true", "false", "null"].iter().find_map(|kw| {
+                self.src[self.pos..]
+                    .starts_with(kw)
+                    .then(|| { self.pos += kw.len(); JsonVal::Other })
+            }),
+            b'-' | b'0'..=b'9' => self.parse_number(),
+            _ => None,
+        }
+    }
+
+    fn parse_object(&mut self, depth: usize) -> Option<JsonVal> {
+        self.pos += 1;
+        self.skip_ws();
+        let mut entries = Vec::new();
+        if self.peek() == Some(b'}') {
+            self.pos += 1;
+            return Some(JsonVal::Obj(entries));
+        }
+        loop {
+            self.skip_ws();
+            if self.peek() != Some(b'"') { return None; }
+            let key = self.parse_string()?;
+            self.skip_ws();
+            if self.peek() != Some(b':') { return None; }
+            self.pos += 1;
+            entries.push((key, self.parse_value(depth)?));
+            self.skip_ws();
+            match self.peek()? {
+                b',' => self.pos += 1,
+                b'}' => { self.pos += 1; return Some(JsonVal::Obj(entries)); }
+                _ => return None,
+            }
+        }
+    }
+
+    fn parse_array(&mut self, depth: usize) -> Option<JsonVal> {
+        self.pos += 1;
+        self.skip_ws();
+        if self.peek() == Some(b']') {
+            self.pos += 1;
+            return Some(JsonVal::Other);
+        }
+        loop {
+            self.parse_value(depth)?;
+            self.skip_ws();
+            match self.peek()? {
+                b',' => self.pos += 1,
+                b']' => { self.pos += 1; return Some(JsonVal::Other); }
+                _ => return None,
+            }
+        }
+    }
+
+    fn parse_string(&mut self) -> Option<String> {
+        self.pos += 1;
+        let mut out = String::new();
+        while self.pos < self.src.len() {
+            let b = self.src.as_bytes()[self.pos];
+            match b {
+                b'"' => { self.pos += 1; return Some(out); }
+                b'\\' => {
+                    self.pos += 1;
+                    let esc = self.peek()?;
+                    self.pos += 1;
+                    match esc {
+                        b'"' => out.push('"'),
+                        b'\\' => out.push('\\'),
+                        b'/' => out.push('/'),
+                        b'b' => out.push('\x08'),
+                        b'f' => out.push('\x0c'),
+                        b'n' => out.push('\n'),
+                        b'r' => out.push('\r'),
+                        b't' => out.push('\t'),
+                        b'u' => {
+                            let hex = self.src.get(self.pos..self.pos + 4)?;
+                            let cp = u32::from_str_radix(hex, 16).ok()?;
+                            out.push(char::from_u32(cp)?);
+                            self.pos += 4;
+                        }
+                        _ => return None,
+                    }
+                }
+                0x00..=0x1F => return None,
+                0x20..=0x7F => { out.push(b as char); self.pos += 1; }
+                _ => {
+                    let ch = self.src[self.pos..].chars().next()?;
+                    out.push(ch);
+                    self.pos += ch.len_utf8();
                 }
             }
-            _ => {}
         }
+        None
     }
-    Some(after_colon)
+
+    fn parse_number(&mut self) -> Option<JsonVal> {
+        let start = self.pos;
+        if self.peek() == Some(b'-') { self.pos += 1; }
+        match self.peek()? {
+            b'0' => self.pos += 1,
+            b'1'..=b'9' => { self.take_digits(); }
+            _ => return None,
+        }
+        if self.peek() == Some(b'.') {
+            self.pos += 1;
+            if !self.take_digits() { return None; }
+        }
+        if matches!(self.peek(), Some(b'e' | b'E')) {
+            self.pos += 1;
+            if matches!(self.peek(), Some(b'+' | b'-')) { self.pos += 1; }
+            if !self.take_digits() { return None; }
+        }
+        Some(JsonVal::Num(self.src[start..self.pos].to_string()))
+    }
 }
 
-fn extract_json_string(input: &str, key: &str) -> Option<String> {
-    let pattern = format!("\"{key}\"");
-    let start = input.find(&pattern)? + pattern.len();
-    let rest = input[start..].trim_start();
-    let rest = rest.strip_prefix(':')?.trim_start();
-    let rest = rest.strip_prefix('"')?;
-    let end = rest.find('"')?;
-    Some(rest[..end].to_string())
-}
-
-fn extract_json_int(input: &str, key: &str) -> Option<i32> {
-    let pattern = format!("\"{key}\"");
-    let start = input.find(&pattern)? + pattern.len();
-    let rest = input[start..].trim_start();
-    let rest = rest.strip_prefix(':')?.trim_start();
-    let token_len = rest
-        .chars()
-        .take_while(|c| c.is_ascii_digit() || *c == '-')
-        .count();
-    if token_len == 0 {
-        return None;
-    }
-    rest[..token_len].parse::<i32>().ok()
-}
-
-fn extract_json_u64(input: &str, key: &str) -> Option<u64> {
-    let pattern = format!("\"{key}\"");
-    let start = input.find(&pattern)? + pattern.len();
-    let rest = input[start..].trim_start();
-    let after_colon = rest.strip_prefix(':')?.trim_start();
-    let digits: String = after_colon
-        .chars()
-        .skip_while(|c| *c == '"')
-        .take_while(|c| c.is_ascii_digit())
-        .collect();
-    if digits.is_empty() {
-        return None;
-    }
-    digits.parse::<u64>().ok()
+fn parse_json_root(input: &str) -> Option<JsonVal> {
+    let mut parser = JsonParser { src: input, pos: 0 };
+    let val = parser.parse_value(0)?;
+    parser.skip_ws();
+    (parser.pos == input.len()).then_some(val)
 }
 
 /// Validates that a configured GSI bind address resolves strictly to loopback (`127.0.0.0/8` or `::1`).
