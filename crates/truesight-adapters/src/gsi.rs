@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
-use truesight_core::domain::{HeroId, Role, Side};
+use truesight_core::domain::{Faction, HeroId, Role, Side};
 use truesight_core::ports::{DraftEvent, DraftEventSource, PortError};
 
 /// Maximum accepted GSI HTTP payload size (64 KiB) to enforce memory bounds.
@@ -30,9 +30,21 @@ pub fn parse_gsi_json_events(payload: &str) -> Vec<DraftEvent> {
         }
     }
 
+    // Extract local player faction (`"player": { ... "team_name": "radiant" | "dire" }`)
+    let player_slice = extract_json_object_slice(payload, "player").unwrap_or(payload);
+    if let Some(team_name) = extract_json_string(player_slice, "team_name") {
+        let faction = match team_name.trim().to_ascii_lowercase().as_str() {
+            "radiant" | "team2" | "goodguys" => Some(Faction::Radiant),
+            "dire" | "team3" | "badguys" => Some(Faction::Dire),
+            _ => None,
+        };
+        if let Some(f) = faction {
+            events.push(DraftEvent::FactionDetected { faction: f });
+        }
+    }
+
     // Extract hero name from `"hero": { ... "name": "npc_dota_hero_..." }`
-    if let Some(hero_idx) = payload.find("\"hero\"") {
-        let hero_slice = &payload[hero_idx..];
+    if let Some(hero_slice) = extract_json_object_slice(payload, "hero") {
         if let Some(hero_slug) = extract_json_string(hero_slice, "name") {
             if hero_slug.starts_with("npc_dota_hero_") {
                 events.push(DraftEvent::LocalPlayerHeroDetected { hero_slug });
@@ -41,8 +53,7 @@ pub fn parse_gsi_json_events(payload: &str) -> Vec<DraftEvent> {
     }
 
     // Support spectator/custom draft pick injection: `{"truesight_pick":{"side":"ally","slot":0,"hero_id":1}}`
-    if let Some(pick_idx) = payload.find("\"truesight_pick\"") {
-        let slice = &payload[pick_idx..];
+    if let Some(slice) = extract_json_object_slice(payload, "truesight_pick") {
         let side = match extract_json_string(slice, "side").as_deref() {
             Some("enemy") | Some("enemies") | Some("dire") => Side::Enemies,
             _ => Side::Allies,
@@ -63,6 +74,43 @@ pub fn parse_gsi_json_events(payload: &str) -> Vec<DraftEvent> {
     }
 
     events
+}
+
+fn extract_json_object_slice<'a>(input: &'a str, key: &str) -> Option<&'a str> {
+    let pattern = format!("\"{key}\"");
+    let start = input.find(&pattern)? + pattern.len();
+    let rest = input[start..].trim_start();
+    let after_colon = rest.strip_prefix(':')?.trim_start();
+    if !after_colon.starts_with('{') {
+        return None;
+    }
+    let mut depth = 0_usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (idx, ch) in after_colon.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(&after_colon[..=idx]);
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(after_colon)
 }
 
 fn extract_json_string(input: &str, key: &str) -> Option<String> {

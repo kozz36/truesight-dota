@@ -1,4 +1,4 @@
-use crate::domain::{Bracket, HeroId, Role, Side};
+use crate::domain::{Bracket, Faction, HeroId, Role, Side};
 use crate::math::MatchupMatrix;
 use core::fmt;
 
@@ -16,6 +16,9 @@ pub enum DraftEvent {
     GameRulesStateChanged {
         state_name: String,
         game_time_secs: i32,
+    },
+    FactionDetected {
+        faction: Faction,
     },
     LocalPlayerHeroDetected {
         hero_slug: String,

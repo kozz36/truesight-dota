@@ -4,7 +4,7 @@ mod gui;
 use std::io::{self, BufRead, Write};
 use truesight_adapters::gsi::BoundedGsiListener;
 use truesight_adapters::sync::LocalCacheManager;
-use truesight_core::domain::{Bracket, DraftPick, DraftState, HeroId, Role, Side, TEAM_SIZE};
+use truesight_core::domain::{Bracket, DraftPick, DraftState, Faction, HeroId, Role, Side, TEAM_SIZE};
 use truesight_core::math::{
     DraftAnalysis5v5, HeroRecommendation, MatchupMatrix, ModelWeights, evaluate_draft_5v5,
     recommend_heroes,
@@ -152,6 +152,9 @@ impl AppSession {
             } => {
                 self.last_gsi_state = format!("{state_name} (t={game_time_secs}s)");
             }
+            DraftEvent::FactionDetected { faction } => {
+                self.draft.ally_faction = faction;
+            }
             DraftEvent::LocalPlayerHeroDetected { hero_slug } => {
                 if let Some(id) = self.find_hero(&hero_slug) {
                     let _ = self.draft.set_ally(
@@ -213,9 +216,10 @@ pub fn render_dashboard_string(session: &AppSession, color: bool) -> String {
         "{b}========================================================================================{r}\n"
     ));
     out.push_str(&format!(
-        "{b} TRUESIGHT-DOTA · 5v5 LIVE DRAFT ORACLE{r}   | Bracket: {c}{}{r} | Target: {y}{}{r}\n",
+        "{b} TRUESIGHT-DOTA · 5v5 LIVE DRAFT ORACLE{r}   | Bracket: {c}{}{r} | Target: {y}{}{r} | Side: {d}{}{r}\n",
         session.draft.bracket.label(),
-        session.draft.target_role.label()
+        session.draft.target_role.label(),
+        session.draft.ally_faction.label()
     ));
     out.push_str(&format!(
         " GSI State: {d}{}{r}   |   {d}{}{r}\n",
@@ -417,6 +421,16 @@ pub fn execute_command(session: &mut AppSession, line: &str) -> Result<bool, Str
             };
             session.set_bracket(bracket);
         }
+        "faction" => {
+            let Some(&f_str) = parts.get(1) else {
+                return Err("Usage: faction <radiant|dire>".into());
+            };
+            session.draft.ally_faction = match f_str.to_ascii_lowercase().as_str() {
+                "radiant" | "r" => Faction::Radiant,
+                "dire" | "d" => Faction::Dire,
+                _ => return Err("Faction must be radiant or dire".into()),
+            };
+        }
         "ally" | "a" => {
             if parts.len() < 3 {
                 return Err("Usage: ally <1..5> <hero_name>".into());
@@ -496,7 +510,7 @@ pub fn execute_command(session: &mut AppSession, line: &str) -> Result<bool, Str
         }
         _ => {
             return Err(
-                "Commands: ally <1..5> <hero> | enemy <1..5> <hero> | ban <hero> | role <1..5> | bracket <medal> | sync | reset | quit"
+                "Commands: ally <1..5> <hero> | enemy <1..5> <hero> | ban <hero> | role <1..5> | bracket <medal> | faction <radiant|dire> | sync | reset | quit"
                     .into(),
             );
         }
@@ -626,6 +640,13 @@ mod tests {
         assert!(rendered.contains("Medusa"));
         assert!(rendered.contains("Storm Spi"));
         assert!(rendered.contains("1. Anti-Mage"));
+
+        assert!(execute_command(&mut session, "faction dire").unwrap());
+        assert_eq!(session.draft.ally_faction, truesight_core::domain::Faction::Dire);
+        session.apply_event(truesight_core::ports::DraftEvent::FactionDetected {
+            faction: truesight_core::domain::Faction::Radiant,
+        });
+        assert_eq!(session.draft.ally_faction, truesight_core::domain::Faction::Radiant);
     }
 
     #[test]

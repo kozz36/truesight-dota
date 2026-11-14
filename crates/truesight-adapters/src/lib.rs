@@ -387,4 +387,79 @@ mod tests {
             "Juggernaut (2W-5L in 2026 recent matches) must not have positive comfort: {juggernaut}"
         );
     }
+
+    #[test]
+    fn gsi_parser_extracts_radiant_and_dire_faction_and_preserves_50_50_neutrality() {
+        use truesight_core::domain::Faction;
+        use truesight_core::math::{ModelWeights, evaluate_draft_5v5};
+
+        let radiant_payload = r#"{
+            "player": {
+                "steamid": "76561198087521469",
+                "team_name": "radiant"
+            },
+            "map": {
+                "game_state": "DOTA_GAMERULES_STATE_HERO_SELECTION",
+                "clock_time": -20
+            }
+        }"#;
+        let dire_payload = r#"{
+            "player": {
+                "team_name": "dire"
+            }
+        }"#;
+
+        let rad_events = parse_gsi_json_events(radiant_payload);
+        assert!(
+            rad_events.contains(&DraftEvent::FactionDetected {
+                faction: Faction::Radiant
+            }),
+            "GSI parser must emit FactionDetected::Radiant for player.team_name=radiant: {rad_events:?}"
+        );
+
+        let dire_events = parse_gsi_json_events(dire_payload);
+        assert!(
+            dire_events.contains(&DraftEvent::FactionDetected {
+                faction: Faction::Dire
+            }),
+            "GSI parser must emit FactionDetected::Dire for player.team_name=dire: {dire_events:?}"
+        );
+
+        let repo = SeededMetaRepository::new();
+        let matrix = repo.load_matrix(Bracket::Legend).unwrap();
+        let weights = ModelWeights::default();
+
+        let mut draft_rad = DraftState {
+            ally_faction: Faction::Radiant,
+            ..DraftState::default()
+        };
+        draft_rad
+            .set_ally(
+                0,
+                Some(DraftPick {
+                    hero_id: HeroId(1),
+                    role: Some(Role::Carry),
+                }),
+            )
+            .unwrap();
+        draft_rad
+            .set_enemy(
+                0,
+                Some(DraftPick {
+                    hero_id: HeroId(94),
+                    role: Some(Role::Carry),
+                }),
+            )
+            .unwrap();
+
+        let mut draft_dire = draft_rad;
+        draft_dire.ally_faction = Faction::Dire;
+
+        let eval_rad = evaluate_draft_5v5(&draft_rad, &matrix, &weights);
+        let eval_dire = evaluate_draft_5v5(&draft_dire, &matrix, &weights);
+        assert!(
+            (eval_rad.ally_win_probability - eval_dire.ally_win_probability).abs() < 1e-6,
+            "Changing ally_faction must preserve strict 50-50 faction-neutral win probability"
+        );
+    }
 }

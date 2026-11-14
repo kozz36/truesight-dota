@@ -115,6 +115,30 @@ pub enum Side {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Faction {
+    Radiant,
+    Dire,
+}
+
+impl Faction {
+    #[inline]
+    pub const fn opposite(self) -> Self {
+        match self {
+            Self::Radiant => Self::Dire,
+            Self::Dire => Self::Radiant,
+        }
+    }
+
+    #[inline]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Radiant => "RADIANT",
+            Self::Dire => "DIRE",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AttackType {
     Melee,
     Ranged,
@@ -134,6 +158,7 @@ pub struct DraftState {
     pub bans: [Option<HeroId>; 16],
     pub bracket: Bracket,
     pub target_role: Role,
+    pub ally_faction: Faction,
 }
 
 impl Default for DraftState {
@@ -144,6 +169,7 @@ impl Default for DraftState {
             bans: [None; 16],
             bracket: Bracket::Legend,
             target_role: Role::Carry,
+            ally_faction: Faction::Radiant,
         }
     }
 }

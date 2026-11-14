@@ -5,7 +5,9 @@ use eframe::egui::{
 };
 use std::collections::HashMap;
 use truesight_adapters::gsi::BoundedGsiListener;
-use truesight_core::domain::{AttackType, Bracket, DraftPick, HeroId, Role, Side, TEAM_SIZE};
+use truesight_core::domain::{
+    AttackType, Bracket, DraftPick, Faction, HeroId, Role, Side, TEAM_SIZE,
+};
 use truesight_core::math::{DraftAnalysis5v5, MatchupMatrix};
 use truesight_core::ports::DraftEventSource;
 
@@ -88,30 +90,6 @@ pub enum MatrixTab {
     Counter,
     Synergy,
     Comp,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Faction {
-    Radiant,
-    Dire,
-}
-
-impl Faction {
-    #[inline]
-    pub fn opposite(self) -> Self {
-        match self {
-            Self::Radiant => Self::Dire,
-            Self::Dire => Self::Radiant,
-        }
-    }
-
-    #[inline]
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Radiant => "RADIANT",
-            Self::Dire => "DIRE",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -775,7 +753,6 @@ pub struct TrueSightGuiApp {
     gsi_listener: Option<BoundedGsiListener>,
     textures: GuiTextureCache,
     style_configured: bool,
-    ally_faction: Faction,
     matrix_tab: MatrixTab,
     picker_target: Option<PickerTarget>,
     picker_search: String,
@@ -791,7 +768,6 @@ impl TrueSightGuiApp {
             gsi_listener,
             textures: GuiTextureCache::default(),
             style_configured: false,
-            ally_faction: Faction::Radiant,
             matrix_tab: MatrixTab::Counter,
             picker_target: None,
             picker_search: String::new(),
@@ -885,12 +861,12 @@ impl TrueSightGuiApp {
                     });
 
                 // Interactive Faction Toggle Pill (YOU: RADIANT <-> / YOU: DIRE <->)
-                let fac_col = match self.ally_faction {
+                let fac_col = match self.session.draft.ally_faction {
                     Faction::Radiant => P_GEM,
                     Faction::Dire => P_DIRE,
                 };
                 let fac_btn = egui::Button::new(
-                    RichText::new(format!("YOU: {} <->", self.ally_faction.label()))
+                    RichText::new(format!("YOU: {} <->", self.session.draft.ally_faction.label()))
                         .size(10.5)
                         .strong()
                         .color(fac_col),
@@ -898,7 +874,7 @@ impl TrueSightGuiApp {
                 .fill(P_INDIGO_2)
                 .stroke(Stroke::new(1.0_f32, P_GEM_DEEP));
                 if ui.add(fac_btn).clicked() {
-                    self.ally_faction = self.ally_faction.opposite();
+                    self.session.draft.ally_faction = self.session.draft.ally_faction.opposite();
                 }
 
                 // OpenDota DB status pill
@@ -1005,9 +981,9 @@ impl TrueSightGuiApp {
         let accent = if is_ally { P_GEM } else { P_DIRE };
         let title = if is_ally { "ALLIES" } else { "ENEMIES" };
         let faction = if is_ally {
-            self.ally_faction
+            self.session.draft.ally_faction
         } else {
-            self.ally_faction.opposite()
+            self.session.draft.ally_faction.opposite()
         };
         let picks = match side {
             Side::Allies => &self.session.draft.allies,
