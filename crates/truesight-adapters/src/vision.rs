@@ -281,6 +281,19 @@ fn outer_column_stats(desc: &[u8; DESC_LEN]) -> (f32, f32) {
     (var_sum / (n * 3.0), sat_sum / n)
 }
 
+fn mean_descriptor_saturation(desc: &[u8; DESC_LEN]) -> f32 {
+    let mut sat_sum = 0_f32;
+    let total_cells = DESC_COLS * DESC_ROWS;
+    for cell in 0..total_cells {
+        let idx = cell * 3;
+        let r = f32::from(desc[idx]);
+        let g = f32::from(desc[idx + 1]);
+        let b = f32::from(desc[idx + 2]);
+        sat_sum += r.max(g).max(b) - r.min(g).min(b);
+    }
+    sat_sum / (total_cells as f32)
+}
+
 fn match_descriptor(
     entries: &[(HeroId, [u8; DESC_LEN])],
     query_desc: &[u8; DESC_LEN],
@@ -393,7 +406,7 @@ impl HeroVisionCatalog {
         frame_h: usize,
         rect: TopBarSlotRect,
         layout: TopBarLayout,
-    ) -> Option<(HeroId, f32)> {
+    ) -> Option<(HeroId, f32, f32)> {
         let (query_desc, mean_intensity) = compute_descriptor_8x4(frame_rgb, frame_w, frame_h, rect)?;
         if mean_intensity < DARK_INTENSITY_THRESHOLD {
             return None;
@@ -422,7 +435,7 @@ impl HeroVisionCatalog {
 
         let (best_hero, best_diff) = match_descriptor(entries, &query_desc)?;
         if best_diff < threshold {
-            Some((best_hero, best_diff))
+            Some((best_hero, best_diff, mean_descriptor_saturation(&query_desc)))
         } else {
             None
         }
@@ -506,7 +519,18 @@ pub trait ScreenFrameSource {
     fn capture_frame(&mut self) -> Result<Option<RgbFrame>, PortError>;
 }
 
-/// Live X11/XWayland top-bar frame source capturing the `"Dota 2"` window strip via `xprop` + `import`.
+/// Validates `xprop` output so only visible Dota 2 (`WM_CLASS = "dota2"`) windows qualify.
+pub fn is_dota2_xprop_output(props_str: &str) -> bool {
+    if props_str.contains("_NET_WM_STATE_HIDDEN") {
+        return false;
+    }
+    props_str.lines().any(|line| {
+        let trimmed = line.trim_start();
+        trimmed.starts_with("WM_CLASS") && trimmed.contains("\"dota2\"")
+    })
+}
+
+/// Live X11/XWayland top-bar frame source capturing the `"dota2"` window strip via `xprop` + `import`.
 #[derive(Debug, Default)]
 pub struct X11TopBarFrameSource {
     cached_window: Option<String>,
@@ -532,16 +556,14 @@ impl X11TopBarFrameSource {
                 continue;
             }
             let props = Command::new("xprop")
-                .args(["-id", wid, "WM_CLASS", "WM_NAME", "_NET_WM_STATE"])
+                .args(["-id", wid, "WM_CLASS", "_NET_WM_STATE"])
                 .output()
                 .ok();
             let Some(props) = props else {
                 continue;
             };
             let props_str = String::from_utf8_lossy(&props.stdout);
-            if (!props_str.contains("\"dota2\"") && !props_str.contains("\"Dota 2\""))
-                || props_str.contains("_NET_WM_STATE_HIDDEN")
-            {
+            if !is_dota2_xprop_output(&props_str) {
                 continue;
             }
             return Some(wid.to_string());
@@ -583,6 +605,75 @@ impl ScreenFrameSource for X11TopBarFrameSource {
     }
 }
 
+const MIN_DETECTED_SLOTS_QUORUM: usize = 2;
+const MIN_OVERWRITE_SATURATION: f32 = 12.0;
+const MAX_OVERWRITE_L1_DIFF: f32 = 26.0;
+const OVERWRITE_CONFIRM_FRAMES: u8 = 2;
+
+type SlotCandidate = Option<(HeroId, f32, f32)>;
+
+fn push_pick_event(events: &mut Vec<DraftEvent>, side: Side, slot: usize, hero_id: HeroId) {
+    events.push(DraftEvent::PickDetected {
+        side,
+        slot,
+        hero_id,
+        role: Role::ALL.get(slot).copied(),
+    });
+}
+
+/// Applies per-slot hysteresis and dead-portrait saturation checks before mutating locked picks.
+fn resolve_slot_transition(
+    side: Side,
+    slot: usize,
+    faction_changed: bool,
+    candidate: SlotCandidate,
+    last_slot: &mut Option<HeroId>,
+    pending_slot: &mut Option<(HeroId, u8)>,
+    events: &mut Vec<DraftEvent>,
+) {
+    match *last_slot {
+        None => {
+            *pending_slot = None;
+            if let Some((hero_id, _, _)) = candidate {
+                *last_slot = Some(hero_id);
+                push_pick_event(events, side, slot, hero_id);
+            }
+        }
+        Some(prev_id) => match candidate {
+            Some((cand_id, diff, sat)) if cand_id != prev_id => {
+                // Ignore desaturated dead/respawn overlays or weak matches on already-locked slots.
+                if sat < MIN_OVERWRITE_SATURATION || diff > MAX_OVERWRITE_L1_DIFF {
+                    *pending_slot = None;
+                    if faction_changed {
+                        push_pick_event(events, side, slot, prev_id);
+                    }
+                    return;
+                }
+                let next_count = match *pending_slot {
+                    Some((pending_id, count)) if pending_id == cand_id => count.saturating_add(1),
+                    _ => 1,
+                };
+                if next_count >= OVERWRITE_CONFIRM_FRAMES {
+                    *last_slot = Some(cand_id);
+                    *pending_slot = None;
+                    push_pick_event(events, side, slot, cand_id);
+                } else {
+                    *pending_slot = Some((cand_id, next_count));
+                    if faction_changed {
+                        push_pick_event(events, side, slot, prev_id);
+                    }
+                }
+            }
+            _ => {
+                *pending_slot = None;
+                if faction_changed {
+                    push_pick_event(events, side, slot, prev_id);
+                }
+            }
+        },
+    }
+}
+
 /// Driving adapter matching the 10 Dota 2 top-bar hero portrait slots into `DraftEvent::PickDetected`.
 pub struct VisionCaptureAdapter<S: ScreenFrameSource> {
     source: S,
@@ -591,6 +682,8 @@ pub struct VisionCaptureAdapter<S: ScreenFrameSource> {
     last_ally_faction: Option<Faction>,
     last_radiant: [Option<HeroId>; 5],
     last_dire: [Option<HeroId>; 5],
+    pending_radiant: [Option<(HeroId, u8)>; 5],
+    pending_dire: [Option<(HeroId, u8)>; 5],
 }
 
 impl<S: ScreenFrameSource> VisionCaptureAdapter<S> {
@@ -602,6 +695,8 @@ impl<S: ScreenFrameSource> VisionCaptureAdapter<S> {
             last_ally_faction: None,
             last_radiant: [None; 5],
             last_dire: [None; 5],
+            pending_radiant: [None; 5],
+            pending_dire: [None; 5],
         }
     }
 
@@ -609,54 +704,49 @@ impl<S: ScreenFrameSource> VisionCaptureAdapter<S> {
         self.ally_faction = faction;
     }
 
+    fn evaluate_side_slots(
+        &self,
+        frame: &RgbFrame,
+        rects: &[TopBarSlotRect; 5],
+        layout: TopBarLayout,
+        seen: &mut Vec<HeroId>,
+        score: &mut f32,
+    ) -> [SlotCandidate; 5] {
+        let mut candidates = [None; 5];
+        for (slot, rect) in rects.iter().enumerate() {
+            if let Some((hid, diff, sat)) =
+                self.catalog
+                    .match_slot_with_layout(&frame.rgb, frame.width, frame.height, *rect, layout)
+            {
+                candidates[slot] = Some((hid, diff, sat));
+                if !seen.contains(&hid) {
+                    seen.push(hid);
+                    *score += 35.5 - diff;
+                    if layout == TopBarLayout::SyntheticExact && diff < 8.0 {
+                        *score += 16.0;
+                    }
+                }
+            }
+        }
+        candidates
+    }
+
     fn evaluate_layout(
         &self,
         frame: &RgbFrame,
         virtual_h: usize,
         layout: TopBarLayout,
-    ) -> (f32, [Option<HeroId>; 5], [Option<HeroId>; 5]) {
+    ) -> (f32, [SlotCandidate; 5], [SlotCandidate; 5]) {
         let (rad_rects, dire_rects) = match layout {
             TopBarLayout::SyntheticExact => compute_topbar_slot_rects(frame.width, virtual_h),
             TopBarLayout::PickPhase => compute_pickphase_topbar_slot_rects(frame.width, virtual_h),
             TopBarLayout::InGame => compute_ingame_topbar_slot_rects(frame.width, virtual_h),
         };
 
-        let mut rad = [None; 5];
-        let mut dire = [None; 5];
         let mut seen = Vec::with_capacity(10);
         let mut score = 0.0_f32;
-
-        for (slot, rect) in rad_rects.iter().enumerate() {
-            if let Some((hid, diff)) =
-                self.catalog
-                    .match_slot_with_layout(&frame.rgb, frame.width, frame.height, *rect, layout)
-            {
-                rad[slot] = Some(hid);
-                if !seen.contains(&hid) {
-                    seen.push(hid);
-                    score += 35.5 - diff;
-                    if layout == TopBarLayout::SyntheticExact && diff < 8.0 {
-                        score += 16.0;
-                    }
-                }
-            }
-        }
-
-        for (slot, rect) in dire_rects.iter().enumerate() {
-            if let Some((hid, diff)) =
-                self.catalog
-                    .match_slot_with_layout(&frame.rgb, frame.width, frame.height, *rect, layout)
-            {
-                dire[slot] = Some(hid);
-                if !seen.contains(&hid) {
-                    seen.push(hid);
-                    score += 35.5 - diff;
-                    if layout == TopBarLayout::SyntheticExact && diff < 8.0 {
-                        score += 16.0;
-                    }
-                }
-            }
-        }
+        let rad = self.evaluate_side_slots(frame, &rad_rects, layout, &mut seen, &mut score);
+        let dire = self.evaluate_side_slots(frame, &dire_rects, layout, &mut seen, &mut score);
 
         (score, rad, dire)
     }
@@ -694,7 +784,7 @@ impl<S: ScreenFrameSource> DraftEventSource for VisionCaptureAdapter<S> {
         }
 
         let detected_count = best_rad.iter().flatten().count() + best_dire.iter().flatten().count();
-        if detected_count == 0 {
+        if detected_count < MIN_DETECTED_SLOTS_QUORUM {
             return Ok(Vec::new());
         }
 
@@ -706,31 +796,24 @@ impl<S: ScreenFrameSource> DraftEventSource for VisionCaptureAdapter<S> {
 
         let mut events = Vec::new();
         for slot in 0..5 {
-            if let Some(hero_id) = best_rad[slot] {
-                if faction_changed || self.last_radiant[slot] != Some(hero_id) {
-                    events.push(DraftEvent::PickDetected {
-                        side: rad_side,
-                        slot,
-                        hero_id,
-                        role: Role::ALL.get(slot).copied(),
-                    });
-                }
-            }
-            self.last_radiant[slot] = best_rad[slot];
-        }
-
-        for slot in 0..5 {
-            if let Some(hero_id) = best_dire[slot] {
-                if faction_changed || self.last_dire[slot] != Some(hero_id) {
-                    events.push(DraftEvent::PickDetected {
-                        side: dire_side,
-                        slot,
-                        hero_id,
-                        role: Role::ALL.get(slot).copied(),
-                    });
-                }
-            }
-            self.last_dire[slot] = best_dire[slot];
+            resolve_slot_transition(
+                rad_side,
+                slot,
+                faction_changed,
+                best_rad[slot],
+                &mut self.last_radiant[slot],
+                &mut self.pending_radiant[slot],
+                &mut events,
+            );
+            resolve_slot_transition(
+                dire_side,
+                slot,
+                faction_changed,
+                best_dire[slot],
+                &mut self.last_dire[slot],
+                &mut self.pending_dire[slot],
+                &mut events,
+            );
         }
 
         self.last_ally_faction = Some(self.ally_faction);

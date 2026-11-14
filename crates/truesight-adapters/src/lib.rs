@@ -939,4 +939,146 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn vision_guard_rejects_non_dota_wm_class_single_slot_noise_and_dead_hero_overwrites() {
+        use crate::vision::{
+            HeroVisionCatalog, RgbFrame, ScreenFrameSource, VisionCaptureAdapter,
+            compute_ingame_topbar_slot_rects, is_dota2_xprop_output, parse_hero_atlas,
+        };
+        use std::collections::VecDeque;
+
+        // 1. Strict WM_CLASS window validation (rejects browser/terminal titled "Dota 2" and hidden windows)
+        assert!(!is_dota2_xprop_output(
+            "WM_CLASS(STRING) = \"navigator\", \"Firefox\"\nWM_NAME(STRING) = \"Dota 2\"\n_NET_WM_STATE(ATOM) = _NET_WM_STATE_FOCUSED\n"
+        ));
+        assert!(!is_dota2_xprop_output(
+            "WM_CLASS(STRING) = \"dota2\", \"dota2\"\n_NET_WM_STATE(ATOM) = _NET_WM_STATE_HIDDEN\n"
+        ));
+        assert!(is_dota2_xprop_output(
+            "WM_CLASS(STRING) = \"dota2\", \"dota2\"\n_NET_WM_STATE(ATOM) = _NET_WM_STATE_FULLSCREEN\n"
+        ));
+
+        struct QueueSource(VecDeque<RgbFrame>);
+        impl ScreenFrameSource for QueueSource {
+            fn capture_frame(
+                &mut self,
+            ) -> Result<Option<RgbFrame>, truesight_core::ports::PortError> {
+                Ok(self.0.pop_front())
+            }
+        }
+
+        let atlas = parse_hero_atlas().expect("embedded hero atlas must load");
+        let catalog = HeroVisionCatalog::from_embedded().expect("vision catalog must load");
+        let frame_w = 2560_usize;
+        let frame_h = 96_usize;
+        let virtual_h = 1440_usize;
+        let (rad_game, _) = compute_ingame_topbar_slot_rects(frame_w, virtual_h);
+
+        let paint_ingame = |buf: &mut [u8],
+                            rect: crate::vision::TopBarSlotRect,
+                            hid: u16,
+                            chroma_scale: f32| {
+            let hero_rgb = &atlas.heroes[&HeroId(hid)];
+            let src_x0 = 4_usize;
+            let src_w = atlas.hero_width - 8;
+            let src_y0 = 2_usize;
+            let src_h = atlas.hero_height - 4;
+            for dy in 0..rect.height {
+                let sy = src_y0 + (dy * src_h) / rect.height;
+                for dx in 0..rect.width {
+                    let sx = src_x0 + (dx * src_w) / rect.width;
+                    let src_idx = (sy * atlas.hero_width + sx) * 3;
+                    let r = f32::from(hero_rgb[src_idx]);
+                    let g = f32::from(hero_rgb[src_idx + 1]);
+                    let b = f32::from(hero_rgb[src_idx + 2]);
+                    let luma = (r + g + b) / 3.0;
+                    let dst_idx = ((rect.y + dy) * frame_w + (rect.x + dx)) * 3;
+                    buf[dst_idx] = (luma + (r - luma) * chroma_scale).clamp(0.0, 255.0) as u8;
+                    buf[dst_idx + 1] = (luma + (g - luma) * chroma_scale).clamp(0.0, 255.0) as u8;
+                    buf[dst_idx + 2] = (luma + (b - luma) * chroma_scale).clamp(0.0, 255.0) as u8;
+                }
+            }
+        };
+
+        // 2. Single-slot noise frame (menu banner / partial splash) must be ignored (< 2 slots quorum)
+        let mut single_slot_rgb = vec![14_u8; frame_w * frame_h * 3];
+        paint_ingame(&mut single_slot_rgb, rad_game[0], 67, 1.0);
+
+        // 3. Valid multi-slot frame locks Spectre (67) in slot 0 and Snapfire (128) in slot 4
+        let mut valid_rgb = vec![14_u8; frame_w * frame_h * 3];
+        paint_ingame(&mut valid_rgb, rad_game[0], 67, 1.0);
+        paint_ingame(&mut valid_rgb, rad_game[4], 128, 1.0);
+
+        // 4. Dead-hero grayscale/desaturated overwrite attempt in slot 4 (Silencer=75 at low chroma)
+        let mut dead_overwrite_rgb = valid_rgb.clone();
+        paint_ingame(&mut dead_overwrite_rgb, rad_game[4], 75, 0.15);
+
+        // 5 & 6. Genuine full-color swap in already-filled slot 4 (75 at full color) requires 2 consecutive frames
+        let mut swap_rgb = valid_rgb.clone();
+        paint_ingame(&mut swap_rgb, rad_game[4], 75, 1.0);
+
+        let source = QueueSource(VecDeque::from([
+            RgbFrame {
+                width: frame_w,
+                height: frame_h,
+                rgb: single_slot_rgb,
+            },
+            RgbFrame {
+                width: frame_w,
+                height: frame_h,
+                rgb: valid_rgb,
+            },
+            RgbFrame {
+                width: frame_w,
+                height: frame_h,
+                rgb: dead_overwrite_rgb,
+            },
+            RgbFrame {
+                width: frame_w,
+                height: frame_h,
+                rgb: swap_rgb.clone(),
+            },
+            RgbFrame {
+                width: frame_w,
+                height: frame_h,
+                rgb: swap_rgb,
+            },
+        ]));
+
+        let mut adapter = VisionCaptureAdapter::new(source, catalog);
+
+        let ev_single = adapter.poll_events().unwrap();
+        assert!(
+            ev_single.is_empty(),
+            "Single matched slot (< 2 quorum) must emit 0 events, got {ev_single:?}"
+        );
+
+        let ev_valid = adapter.poll_events().unwrap();
+        assert_eq!(ev_valid.len(), 2, "Valid 2-slot frame must emit both heroes: {ev_valid:?}");
+
+        let ev_dead = adapter.poll_events().unwrap();
+        assert!(
+            ev_dead.is_empty(),
+            "Desaturated/dead portrait must not overwrite locked Snapfire(128): {ev_dead:?}"
+        );
+
+        let ev_swap_1 = adapter.poll_events().unwrap();
+        assert!(
+            ev_swap_1.is_empty(),
+            "First frame of full-color overwrite must require 2-frame confirmation: {ev_swap_1:?}"
+        );
+
+        let ev_swap_2 = adapter.poll_events().unwrap();
+        assert_eq!(
+            ev_swap_2,
+            vec![DraftEvent::PickDetected {
+                side: Side::Allies,
+                slot: 4,
+                hero_id: HeroId(75),
+                role: Some(Role::HardSupport),
+            }],
+            "Second consecutive full-color frame must confirm slot overwrite to HeroId(75)"
+        );
+    }
 }
