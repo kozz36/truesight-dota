@@ -322,7 +322,7 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&tmp_dir);
-        let mgr = LocalCacheManager::with_dir(tmp_dir.clone(), 127_255_741);
+        let mgr = LocalCacheManager::with_dir(tmp_dir.clone(), 100_000_001);
 
         let now = 1_794_500_000_u64;
         assert!(mgr.is_meta_stale(now));
@@ -360,8 +360,88 @@ mod tests {
     }
 
     #[test]
-    fn comfort_v3_snapshot_demotes_inactive_antimage_and_juggernaut_below_active_pool() {
+    fn default_seeded_repository_has_zero_personal_comfort_for_open_source_neutrality() {
         let repo = SeededMetaRepository::new();
+        let mat = repo.load_matrix(Bracket::Legend).unwrap();
+        assert_eq!(mat.heroes().count(), 127);
+        for hero in mat.heroes() {
+            assert_eq!(
+                hero.personal_matches, 0,
+                "Public snapshot hero {} must have 0 personal_matches",
+                hero.display_name
+            );
+            assert_eq!(
+                hero.personal_wins, 0,
+                "Public snapshot hero {} must have 0 personal_wins",
+                hero.display_name
+            );
+            assert_eq!(
+                hero.comfort_delta(),
+                0.0,
+                "Public snapshot hero {} must have 0.0 comfort_delta",
+                hero.display_name
+            );
+        }
+    }
+
+    #[test]
+    fn comfort_v3_snapshot_demotes_inactive_antimage_and_juggernaut_below_active_pool() {
+        use crate::sync::parse_player_comfort_with_matches_json;
+
+        // Synthetic Comfort v3 fixture: Tiny & Hoodwink actively played & winning;
+        // Dawnbreaker & Lifestealer moderately practiced & winning;
+        // Anti-Mage unplayed for ~302 days; Juggernaut 2W-5L in recent matches.
+        let now_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let stale_ts = now_ts - 302 * 86_400;
+        let recent_ts = now_ts - 3 * 86_400;
+
+        let heroes_json = format!(
+            r#"[
+                {{"hero_id": 19, "last_played": {recent_ts}, "games": 70, "win": 44}},
+                {{"hero_id": 123, "last_played": {recent_ts}, "games": 65, "win": 41}},
+                {{"hero_id": 135, "last_played": {recent_ts}, "games": 20, "win": 13}},
+                {{"hero_id": 54, "last_played": {recent_ts}, "games": 20, "win": 13}},
+                {{"hero_id": 1, "last_played": {stale_ts}, "games": 8, "win": 6}},
+                {{"hero_id": 8, "last_played": {recent_ts}, "games": 18, "win": 8}}
+            ]"#
+        );
+
+        let mut match_objs = Vec::new();
+        for k in 0..45_u64 {
+            let st = now_ts - k * 2 * 86_400;
+            let rad_win = if k < 32 { "true" } else { "false" };
+            match_objs.push(format!(
+                r#"{{"hero_id": 19, "start_time": {st}, "player_slot": 0, "radiant_win": {rad_win}}}"#
+            ));
+            match_objs.push(format!(
+                r#"{{"hero_id": 123, "start_time": {st}, "player_slot": 0, "radiant_win": {rad_win}}}"#
+            ));
+        }
+        for k in 0..16_u64 {
+            let st = now_ts - k * 3 * 86_400;
+            let rad_win = if k < 12 { "true" } else { "false" };
+            match_objs.push(format!(
+                r#"{{"hero_id": 135, "start_time": {st}, "player_slot": 0, "radiant_win": {rad_win}}}"#
+            ));
+            match_objs.push(format!(
+                r#"{{"hero_id": 54, "start_time": {st}, "player_slot": 0, "radiant_win": {rad_win}}}"#
+            ));
+        }
+        for k in 0..7_u64 {
+            let st = now_ts - k * 4 * 86_400;
+            let rad_win = if k < 2 { "true" } else { "false" };
+            match_objs.push(format!(
+                r#"{{"hero_id": 8, "start_time": {st}, "player_slot": 0, "radiant_win": {rad_win}}}"#
+            ));
+        }
+        let matches_json = format!("[{}]", match_objs.join(","));
+
+        let mut repo = SeededMetaRepository::new();
+        repo.custom_personal_pool =
+            parse_player_comfort_with_matches_json(&heroes_json, Some(&matches_json));
         let mat = repo.load_matrix(Bracket::Legend).unwrap();
 
         let tiny = mat.hero(HeroId(19)).unwrap().comfort_delta();
@@ -385,7 +465,7 @@ mod tests {
         );
         assert!(
             juggernaut <= 0.0,
-            "Juggernaut (2W-5L in 2026 recent matches) must not have positive comfort: {juggernaut}"
+            "Juggernaut (2W-5L in recent matches) must not have positive comfort: {juggernaut}"
         );
     }
 

@@ -13,8 +13,6 @@ pub const PLAYER_TTL_SECS: u64 = 3_600;
 /// Steam64 base offset (`Steam64 = Steam32 + 76561197960265728`).
 pub const STEAM64_OFFSET: u64 = 76_561_197_960_265_728;
 
-pub const DEFAULT_PLAYER_ACCOUNT_ID: u64 = 127_255_741;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccountLinkConfig {
     Auto,
@@ -262,7 +260,7 @@ pub struct LocalCacheManager {
 
 impl Default for LocalCacheManager {
     fn default() -> Self {
-        Self::new(DEFAULT_PLAYER_ACCOUNT_ID)
+        Self::auto_detected()
     }
 }
 

@@ -5,7 +5,7 @@ use truesight_core::math::{MatchupCell, MatchupMatrix};
 use truesight_core::ports::{PortError, StatsRepository};
 
 /// Full 127-hero repository backed by the OpenDota / STRATZ meta snapshot and
-/// player `127255741` personal comfort history.
+/// neutral default personal comfort history (populated dynamically per linked account).
 #[derive(Debug, Clone, Default)]
 pub struct SeededMetaRepository {
     pub custom_personal_pool: Vec<(HeroId, u32, u32, f32)>,

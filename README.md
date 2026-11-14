@@ -8,7 +8,7 @@ High-performance, native Rust 5v5 live draft analyzer and probabilistic hero rec
    ```bash
    truesight-dota
    ```
-2. **Force an immediate database sync from OpenDota** (`heroStats` 24h TTL + Player `127255741` 1h TTL):
+2. **Force an immediate database sync from OpenDota** (`heroStats` 24h TTL + linked Steam32 account 1h TTL):
    ```bash
    truesight-dota --sync
    ```

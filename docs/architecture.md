@@ -78,7 +78,7 @@ $$\text{Logit}(P_{\text{win}}) = 3.2 \cdot \left( w_{\text{meta}} E_{\text{meta}
 `recommend_heroes` evaluates the exact simulated 5v5 draft with each candidate placed in `target_role.index()`, ensuring `Projected Win%` is **100% identical** to the header `ALLIES WIN PROBABILITY` upon picking.
 
 **Personal Comfort Engine v3 (`HeroProfile::comfort_delta`)**:
-- Rather than relying on a single `last_played` timestamp over career totals (which allows one recent match to revive years-old matches), `LocalCacheManager` and `OPENDOTA_HERO_SNAPSHOT` compute per-match exponentially time-decayed effective games $G_{\text{eff}} = \sum_k e^{-\Delta t_k / 75\text{d}}$ and blended effective wins $W_{\text{eff}}$ across `/api/players/127255741/matches` (`player_matches.json`) and `/heroes` (`player_heroes.json`).
+- Rather than relying on a single `last_played` timestamp over career totals (which allows one recent match to revive years-old matches), `LocalCacheManager` and `OPENDOTA_HERO_SNAPSHOT` compute per-match exponentially time-decayed effective games $G_{\text{eff}} = \sum_k e^{-\Delta t_k / 75\text{d}}$ and blended effective wins $W_{\text{eff}}$ across `/api/players/{account_id}/matches` (`player_matches.json`) and `/heroes` (`player_heroes.json`).
 - Heroes with $G_{\text{eff}} < 0.15$ (e.g., unplayed for ~10 months) decay cleanly to `0.00%`.
 - Active heroes combine empirical-Bayes performance ($m = 16$ at $50\%$) with an active practice volume mastery bonus:
   $$\Delta_{\text{comfort}} = \text{clamp}\!\left(\frac{W_{\text{eff}} + 8.0}{G_{\text{eff}} + 16.0} - 0.50 + \mathbb{I}(\widehat{WR}_{\text{eff}} \ge 0.50 \land G_{\text{eff}} \ge 0.50) \cdot 0.0065 \ln(1 + G_{\text{eff}}),\; -0.05,\; +0.05\right)$$
@@ -87,7 +87,7 @@ $$\text{Logit}(P_{\text{win}}) = 3.2 \cdot \left( w_{\text{meta}} E_{\text{meta}
 
 `LocalCacheManager` (`crates/truesight-adapters/src/sync.rs`) manages `~/.local/share/truesight-dota/cache/`:
 - **Meta Snapshot (`opendota_hero_stats.json`)**: **24-hour TTL (`86,400 s`)**, matching OpenDota's daily rolling aggregation window.
-- **Player Comfort & Match History (`player_heroes.json` + `player_matches.json`)**: **1-hour TTL (`3,600 s`)**, capturing both lifetime totals and the latest 500 matches played by account `127255741`.
+- **Player Comfort & Match History (`players/{account_id}/player_heroes.json` + `player_matches.json`)**: **1-hour TTL (`3,600 s`)**, capturing both lifetime totals and the latest 500 matches played by the linked Steam32 account.
 - **Non-blocking Startup & Manual Sync**: Stale caches trigger a background refresh thread at startup without delaying GUI startup; users can also force an immediate refresh via the **`[Sync DB]`** button in the GUI or `truesight-dota --sync` in the terminal.
 
 ## 5. Toolchain & Validation Matrix
