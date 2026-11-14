@@ -168,6 +168,9 @@ impl TrueSightGuiApp {
 
         self.session
             .poll_live_sources(self.gsi_listener.as_mut(), self.vision_worker.as_mut());
+        if let Some(notice) = self.session.last_sync_notice.take() {
+            self.status_banner = notice;
+        }
 
         let (analysis, _) = self.session.evaluate();
         let mut rects = LayoutRects {

@@ -1,3 +1,4 @@
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use truesight_adapters::gsi::BoundedGsiListener;
 use truesight_adapters::sync::LocalCacheManager;
 use truesight_adapters::vision::BoundedVisionWorker;
@@ -7,6 +8,12 @@ use truesight_core::math::{
     recommend_heroes,
 };
 use truesight_core::ports::{DraftEvent, DraftEventSource, StatsRepository};
+
+pub(crate) struct SyncCompletion {
+    generation: u64,
+    account_id: Option<u64>,
+    result: Result<String, String>,
+}
 
 pub struct AppSession {
     pub draft: DraftState,
@@ -19,6 +26,10 @@ pub struct AppSession {
     pub enemy_locked_slots: [bool; TEAM_SIZE],
     pub manually_dismissed: Vec<HeroId>,
     pub local_player_hero: Option<HeroId>,
+    pub sync_in_flight: bool,
+    pub last_sync_notice: Option<String>,
+    sync_generation: u64,
+    sync_rx: Option<Receiver<SyncCompletion>>,
 }
 
 fn hero_role_affinity(matrix: &MatchupMatrix, hero_id: HeroId, role: Role) -> f32 {
@@ -93,6 +104,10 @@ impl AppSession {
             enemy_locked_slots: [false; TEAM_SIZE],
             manually_dismissed: Vec::new(),
             local_player_hero: None,
+            sync_in_flight: false,
+            last_sync_notice: None,
+            sync_generation: 0,
+            sync_rx: None,
         })
     }
 
@@ -115,13 +130,116 @@ impl AppSession {
     }
 
     pub fn set_account_id(&mut self, account_id: Option<u64>, explicit: bool) {
+        self.sync_generation = self.sync_generation.saturating_add(1);
+        self.sync_in_flight = false;
+        self.sync_rx = None;
         self.cache_mgr.set_account_id(account_id, explicit);
         self.reload_repository();
     }
 
     pub fn set_account_auto(&mut self) {
+        self.sync_generation = self.sync_generation.saturating_add(1);
+        self.sync_in_flight = false;
+        self.sync_rx = None;
         self.cache_mgr.set_auto_account();
         self.reload_repository();
+    }
+
+    pub fn start_background_sync_with<F>(&mut self, force: bool, task: F) -> bool
+    where
+        F: FnOnce(LocalCacheManager, bool) -> Result<String, String> + Send + 'static,
+    {
+        if self.sync_in_flight {
+            return false;
+        }
+        let generation = self.sync_generation;
+        let account_id = self.cache_mgr.player_account_id;
+        let bg_mgr = self.cache_mgr.clone();
+        let (tx, rx) = mpsc::sync_channel(1);
+        let spawned = std::thread::Builder::new()
+            .name("truesight-sync-worker".into())
+            .spawn(move || {
+                let result = task(bg_mgr, force);
+                let _ = tx.send(SyncCompletion {
+                    generation,
+                    account_id,
+                    result,
+                });
+            })
+            .is_ok();
+        if spawned {
+            self.sync_in_flight = true;
+            self.sync_rx = Some(rx);
+            self.db_status = "DB [SYNCING...]".into();
+        }
+        spawned
+    }
+
+    pub fn start_background_sync(&mut self, force: bool) -> bool {
+        self.start_background_sync_with(force, |mgr, force| {
+            mgr.sync_from_opendota(force).map_err(|e| e.to_string())
+        })
+    }
+
+    pub fn poll_sync_completion(&mut self) {
+        let outcome = match self.sync_rx.as_ref().map(|rx| rx.try_recv()) {
+            Some(Ok(done)) => Some(Ok(done)),
+            Some(Err(TryRecvError::Disconnected)) => Some(Err(())),
+            Some(Err(TryRecvError::Empty)) | None => None,
+        };
+        let Some(outcome) = outcome else {
+            return;
+        };
+
+        self.sync_in_flight = false;
+        self.sync_rx = None;
+
+        let Ok(done) = outcome else {
+            self.db_status = format!(
+                "{} · sync failed",
+                self.cache_mgr.freshness_badge(LocalCacheManager::now_unix())
+            );
+            return;
+        };
+
+        if done.generation != self.sync_generation
+            || done.account_id != self.cache_mgr.player_account_id
+        {
+            return;
+        }
+
+        match done.result {
+            Ok(msg) => {
+                let loaded = self
+                    .cache_mgr
+                    .build_repository()
+                    .load_matrix(self.draft.bracket);
+                match loaded {
+                    Ok(m) if m.heroes().count() > 0 => {
+                        self.matrix = m;
+                        self.db_status = self.cache_mgr.freshness_badge(LocalCacheManager::now_unix());
+                        self.last_sync_notice = Some(msg);
+                    }
+                    _ => {
+                        self.db_status = format!(
+                            "{} · reload failed",
+                            self.cache_mgr.freshness_badge(LocalCacheManager::now_unix())
+                        );
+                        self.last_sync_notice = Some(
+                            "Sync notice: refreshed cache failed validation (using last valid model)"
+                                .into(),
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                self.db_status = format!(
+                    "{} · sync failed",
+                    self.cache_mgr.freshness_badge(LocalCacheManager::now_unix())
+                );
+                self.last_sync_notice = Some(format!("Sync notice: {e} (using last valid model)"));
+            }
+        }
     }
 
     pub fn sync_db(&mut self, force: bool) -> Result<String, String> {
@@ -502,6 +620,7 @@ impl AppSession {
         gsi_listener: Option<&mut BoundedGsiListener>,
         vision_worker: Option<&mut BoundedVisionWorker>,
     ) {
+        self.poll_sync_completion();
         if let Some(listener) = gsi_listener {
             if let Ok(events) = listener.poll_events() {
                 for ev in events {

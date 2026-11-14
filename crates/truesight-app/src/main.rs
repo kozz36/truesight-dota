@@ -63,10 +63,7 @@ fn main() {
     {
         let now = LocalCacheManager::now_unix();
         if session.cache_mgr.is_meta_stale(now) || session.cache_mgr.is_player_stale(now) {
-            let bg_mgr = session.cache_mgr.clone();
-            std::thread::spawn(move || {
-                let _ = bg_mgr.sync_from_opendota(false);
-            });
+            let _ = session.start_background_sync(false);
         }
     }
 

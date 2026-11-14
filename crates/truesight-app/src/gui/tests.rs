@@ -405,4 +405,16 @@ fn v4_inline_picker_and_matrix_tabs_update_session_and_preserve_geometry() {
             r.matrix
         );
     }
+
+    assert!(app.session.start_background_sync_with(false, |_, _| {
+        Ok("Async background refresh ready.".into())
+    }));
+    for _ in 0..100 {
+        let _ = render_at_viewport(&mut app, &ctx, vec2(1468.0, 960.0));
+        if app.status_banner == "Async background refresh ready." {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(app.status_banner, "Async background refresh ready.");
 }

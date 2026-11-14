@@ -110,21 +110,25 @@ impl TrueSightGuiApp {
                         self.drag_slot = None;
                         self.status_banner = "Draft cleared.".into();
                     }
+                    let sync_label = if self.session.sync_in_flight {
+                        "SYNCING..."
+                    } else {
+                        "SYNC DB"
+                    };
                     if ui
-                        .add(
+                        .add_enabled(
+                            !self.session.sync_in_flight,
                             egui::Button::new(
-                                RichText::new("SYNC DB").size(10.5).strong().color(P_GLINT),
+                                RichText::new(sync_label).size(10.5).strong().color(P_GLINT),
                             )
                             .fill(P_INDIGO_2),
                         )
                         .clicked()
                     {
-                        match self.session.sync_db(true) {
-                            Ok(msg) => self.status_banner = msg,
-                            Err(e) => {
-                                self.status_banner =
-                                    format!("Sync notice: {e} (using embedded snapshot)")
-                            }
+                        if self.session.start_background_sync(true) {
+                            self.status_banner = "Syncing OpenDota in background...".into();
+                        } else {
+                            self.status_banner = "Sync already in progress...".into();
                         }
                     }
                     if ui

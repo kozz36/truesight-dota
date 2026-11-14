@@ -227,3 +227,89 @@ fn cli_argument_and_command_parsers_validate_swap_ban_clear_and_invalid_inputs()
     assert!(execute_command(&mut session, "unknown_cmd").is_err());
     assert!(!execute_command(&mut session, "quit").unwrap());
 }
+
+#[test]
+fn background_sync_reloads_active_matrix_preserves_model_on_error_and_guards_account_switch() {
+    use std::time::Duration;
+    use truesight_adapters::sync::LocalCacheManager;
+    use truesight_core::domain::{Bracket, HeroId};
+
+    let tmp_dir = std::env::temp_dir().join("truesight_test_async_sync");
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    let mut session = AppSession::new().unwrap();
+    session.cache_mgr = LocalCacheManager::with_dir(tmp_dir.clone(), 111_222_333);
+    session.reload_repository();
+
+    let (gate_tx, gate_rx) = std::sync::mpsc::sync_channel::<()>(0);
+    let started = session.start_background_sync_with(false, move |mgr, _force| {
+        let _ = gate_rx.recv();
+        let meta = r#"[{"id": 1, "1_pick": 1000, "1_win": 650, "2_pick": 1000, "2_win": 650, "3_pick": 1000, "3_win": 650, "4_pick": 1000, "4_win": 650, "5_pick": 1000, "5_win": 650, "6_pick": 1000, "6_win": 650, "7_pick": 1000, "7_win": 650}]"#;
+        mgr.write_cached_files(Some(meta), None, LocalCacheManager::now_unix())
+            .map_err(|e| e.0)?;
+        Ok("Synced OpenDota: heroStats (24h TTL).".into())
+    });
+    assert!(started);
+    assert!(session.sync_in_flight);
+    assert!(!session.start_background_sync_with(false, |_, _| Ok("duplicate".into())));
+
+    session.set_bracket(Bracket::Divine);
+    gate_tx.send(()).unwrap();
+
+    for _ in 0..100 {
+        session.poll_live_sources(None, None);
+        if !session.sync_in_flight {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!session.sync_in_flight);
+    assert_eq!(session.draft.bracket, Bracket::Divine);
+    assert!(
+        session.matrix.hero(HeroId(1)).unwrap().role_winrates[0] > 0.62,
+        "matrix must reload refreshed cached meta"
+    );
+    assert_eq!(
+        session.last_sync_notice.take().as_deref(),
+        Some("Synced OpenDota: heroStats (24h TTL).")
+    );
+
+    // Failed refresh must preserve last valid model and report status clearly
+    assert!(session.start_background_sync_with(true, |_, _| Err("network timeout".into())));
+    for _ in 0..100 {
+        session.poll_live_sources(None, None);
+        if !session.sync_in_flight {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!session.sync_in_flight);
+    assert!(session.matrix.hero(HeroId(1)).unwrap().role_winrates[0] > 0.62);
+    assert!(
+        session
+            .last_sync_notice
+            .take()
+            .as_deref()
+            .unwrap_or_default()
+            .contains("network timeout")
+    );
+    assert!(session.db_status.contains("sync failed"));
+
+    // Account switch while a sync is in flight must discard stale completion from the old generation
+    let (gate2_tx, gate2_rx) = std::sync::mpsc::sync_channel::<()>(0);
+    let (done_tx, done_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    assert!(session.start_background_sync_with(true, move |_mgr, _| {
+        let _ = gate2_rx.recv();
+        let _ = done_tx.send(());
+        Ok("Stale account completion".into())
+    }));
+    session.set_account_id(Some(222_333_444), true);
+    gate2_tx.send(()).unwrap();
+    let _ = done_rx.recv_timeout(Duration::from_millis(500));
+    std::thread::sleep(Duration::from_millis(10));
+    session.poll_live_sources(None, None);
+    assert_eq!(session.cache_mgr.player_account_id, Some(222_333_444));
+    assert_eq!(session.last_sync_notice, None);
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
