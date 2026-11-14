@@ -19,11 +19,16 @@ pub fn parse_gsi_json_events(payload: &str) -> Vec<DraftEvent> {
 
     if let Some(state) = extract_json_string(payload, "game_state") {
         let clock = extract_json_int(payload, "clock_time").unwrap_or(0);
-        if state == "DOTA_GAMERULES_STATE_HERO_SELECTION"
-            || state == "DOTA_GAMERULES_STATE_STRATEGY_TIME"
-            || state == "DOTA_GAMERULES_STATE_PRE_GAME"
-            || state == "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS"
-        {
+        if matches!(
+            state.as_str(),
+            "DOTA_GAMERULES_STATE_WAIT_FOR_PLAYERS_TO_LOAD"
+                | "DOTA_GAMERULES_STATE_HERO_SELECTION"
+                | "DOTA_GAMERULES_STATE_STRATEGY_TIME"
+                | "DOTA_GAMERULES_STATE_PRE_GAME"
+                | "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS"
+                | "DOTA_GAMERULES_STATE_POST_GAME"
+                | "DOTA_GAMERULES_STATE_DISCONNECT"
+        ) {
             events.push(DraftEvent::GameRulesStateChanged {
                 state_name: state,
                 game_time_secs: clock,

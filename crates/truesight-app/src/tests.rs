@@ -313,3 +313,118 @@ fn background_sync_reloads_active_matrix_preserves_model_on_error_and_guards_acc
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+#[test]
+fn draft_reset_and_new_match_transition_reset_vision_worker_without_mid_draft_wipes() {
+    use std::time::Duration;
+    use truesight_adapters::vision::{
+        BoundedVisionWorker, RgbFrame, ScreenFrameSource, TopBarSlotRect,
+        compute_topbar_slot_rects, parse_hero_atlas,
+    };
+    use truesight_core::domain::{HeroId, Side};
+    use truesight_core::ports::DraftEvent;
+
+    struct StationarySource(RgbFrame);
+    impl ScreenFrameSource for StationarySource {
+        fn capture_frame(&mut self) -> Result<Option<RgbFrame>, truesight_core::ports::PortError> {
+            Ok(Some(self.0.clone()))
+        }
+    }
+
+    fn paint_slot(
+        frame: &mut [u8],
+        frame_w: usize,
+        rect: TopBarSlotRect,
+        hero_rgb: &[u8],
+        src_w: usize,
+        src_h: usize,
+    ) {
+        for dy in 0..rect.height {
+            let sy = (dy * src_h) / rect.height;
+            for dx in 0..rect.width {
+                let sx = (dx * src_w) / rect.width;
+                let src_idx = (sy * src_w + sx) * 3;
+                let dst_idx = ((rect.y + dy) * frame_w + (rect.x + dx)) * 3;
+                frame[dst_idx..dst_idx + 3].copy_from_slice(&hero_rgb[src_idx..src_idx + 3]);
+            }
+        }
+    }
+
+    let atlas = parse_hero_atlas().unwrap();
+    let (w, h) = (1920usize, 1080usize);
+    let mut rgb = vec![0u8; w * h * 3];
+    let (rad_r, dire_r) = compute_topbar_slot_rects(w, h);
+    let rad_heroes = [1_u16, 13, 97, 79, 5];
+    let dire_heroes = [94_u16, 17, 2, 100, 30];
+    for (slot, hid) in rad_heroes.iter().enumerate() {
+        paint_slot(&mut rgb, w, rad_r[slot], &atlas.heroes[&HeroId(*hid)], atlas.hero_width, atlas.hero_height);
+    }
+    for (slot, hid) in dire_heroes.iter().enumerate() {
+        paint_slot(&mut rgb, w, dire_r[slot], &atlas.heroes[&HeroId(*hid)], atlas.hero_width, atlas.hero_height);
+    }
+    let mut worker = BoundedVisionWorker::spawn_with_source(StationarySource(RgbFrame {
+        width: w,
+        height: h,
+        rgb,
+    }))
+    .unwrap();
+
+    let mut session = AppSession::new().unwrap();
+    for _ in 0..40 {
+        session.poll_live_sources(None, Some(&mut worker));
+        if session.draft.allies.iter().flatten().count() == 5
+            && session.draft.enemies.iter().flatten().count() == 5
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(session.draft.allies.iter().flatten().count(), 5);
+    assert_eq!(session.draft.enemies.iter().flatten().count(), 5);
+
+    // Mid-draft and in-game GSI heartbeats must NOT wipe active draft picks or manual locks
+    let locked_id = HeroId(67);
+    session.set_slot_manual(Side::Allies, 0, locked_id);
+    for state in [
+        "DOTA_GAMERULES_STATE_HERO_SELECTION",
+        "DOTA_GAMERULES_STATE_HERO_SELECTION",
+        "DOTA_GAMERULES_STATE_STRATEGY_TIME",
+        "DOTA_GAMERULES_STATE_PRE_GAME",
+        "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS",
+    ] {
+        session.apply_event(DraftEvent::GameRulesStateChanged {
+            state_name: state.into(),
+            game_time_secs: 10,
+        });
+    }
+    assert_eq!(session.draft.allies[0].map(|p| p.hero_id), Some(locked_id));
+    assert!(session.ally_locked_slots[0]);
+
+    // Manual RESET followed by stationary portraits repopulates all 10 slots via vision worker
+    session.reset_draft();
+    assert_eq!(session.draft.allies.iter().flatten().count(), 0);
+    for _ in 0..40 {
+        session.poll_live_sources(None, Some(&mut worker));
+        if session.draft.allies.iter().flatten().count() == 5
+            && session.draft.enemies.iter().flatten().count() == 5
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(session.draft.allies.iter().flatten().count(), 5);
+    assert_eq!(session.draft.enemies.iter().flatten().count(), 5);
+
+    // Transition from previous match IN_PROGRESS -> new match HERO_SELECTION resets prior-match picks
+    session.set_slot_manual(Side::Allies, 0, locked_id);
+    session.apply_event(DraftEvent::GameRulesStateChanged {
+        state_name: "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS".into(),
+        game_time_secs: 1200,
+    });
+    session.apply_event(DraftEvent::GameRulesStateChanged {
+        state_name: "DOTA_GAMERULES_STATE_HERO_SELECTION".into(),
+        game_time_secs: -60,
+    });
+    assert_eq!(session.draft.allies.iter().flatten().count(), 0);
+    assert!(!session.ally_locked_slots[0]);
+}

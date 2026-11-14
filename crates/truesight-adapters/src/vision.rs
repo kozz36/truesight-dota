@@ -704,6 +704,15 @@ impl<S: ScreenFrameSource> VisionCaptureAdapter<S> {
         self.ally_faction = faction;
     }
 
+    /// Clears cached per-slot state so stationary portraits re-emit on the next poll.
+    pub fn reset_state(&mut self) {
+        self.last_ally_faction = None;
+        self.last_radiant = [None; 5];
+        self.last_dire = [None; 5];
+        self.pending_radiant = [None; 5];
+        self.pending_dire = [None; 5];
+    }
+
     fn evaluate_side_slots(
         &self,
         frame: &RgbFrame,
@@ -821,43 +830,58 @@ impl<S: ScreenFrameSource> DraftEventSource for VisionCaptureAdapter<S> {
     }
 }
 
-/// Bounded background worker polling X11/XWayland Dota 2 top-bar frames at ~1 Hz.
+/// Bounded background worker polling Dota 2 top-bar frames at ~1 Hz.
 pub struct BoundedVisionWorker {
     rx: Receiver<DraftEvent>,
     ally_faction_code: Arc<AtomicU8>,
+    reset_state: Arc<(AtomicBool, std::sync::Mutex<u64>)>,
     shutdown: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
 }
 
 impl BoundedVisionWorker {
     pub fn spawn() -> Option<Self> {
+        Self::spawn_with_source(X11TopBarFrameSource::new())
+    }
+
+    /// Spawns a bounded background vision worker backed by a custom frame source.
+    pub fn spawn_with_source<S: ScreenFrameSource + Send + 'static>(source: S) -> Option<Self> {
         let catalog = HeroVisionCatalog::from_embedded()?;
         let (tx, rx) = mpsc::sync_channel(32);
         let ally_faction_code = Arc::new(AtomicU8::new(0));
+        let reset_state = Arc::new((AtomicBool::new(false), std::sync::Mutex::new(0)));
         let shutdown = Arc::new(AtomicBool::new(false));
-
         let faction_ref = Arc::clone(&ally_faction_code);
+        let reset_ref = Arc::clone(&reset_state);
         let shutdown_ref = Arc::clone(&shutdown);
 
         let worker = thread::Builder::new()
             .name("truesight-vision-worker".into())
-            .spawn(move || run_vision_loop(catalog, tx, faction_ref, shutdown_ref))
+            .spawn(move || {
+                run_vision_loop(source, catalog, tx, faction_ref, reset_ref, shutdown_ref)
+            })
             .ok()?;
 
         Some(Self {
             rx,
             ally_faction_code,
+            reset_state,
             shutdown,
             worker: Some(worker),
         })
     }
 
     pub fn set_ally_faction(&self, faction: Faction) {
-        let code = match faction {
-            Faction::Radiant => 0,
-            Faction::Dire => 1,
-        };
+        let code = if faction == Faction::Dire { 1 } else { 0 };
         self.ally_faction_code.store(code, Ordering::Relaxed);
+    }
+
+    /// Invalidates in-flight pre-reset polls, drains queued events, and resets detector state.
+    pub fn reset(&mut self) {
+        let mut seq = self.reset_state.1.lock().unwrap_or_else(|e| e.into_inner());
+        *seq = seq.wrapping_add(1);
+        self.reset_state.0.store(true, Ordering::Release);
+        while self.rx.try_recv().is_ok() {}
     }
 }
 
@@ -882,35 +906,42 @@ impl Drop for BoundedVisionWorker {
     }
 }
 
-fn run_vision_loop(
+fn run_vision_loop<S: ScreenFrameSource>(
+    source: S,
     catalog: HeroVisionCatalog,
     tx: SyncSender<DraftEvent>,
     ally_faction_code: Arc<AtomicU8>,
+    reset_state: Arc<(AtomicBool, std::sync::Mutex<u64>)>,
     shutdown: Arc<AtomicBool>,
 ) {
-    let mut adapter = VisionCaptureAdapter::new(X11TopBarFrameSource::new(), catalog);
+    let mut adapter = VisionCaptureAdapter::new(source, catalog);
     while !shutdown.load(Ordering::Acquire) {
-        let faction = if ally_faction_code.load(Ordering::Relaxed) == 1 {
-            Faction::Dire
-        } else {
-            Faction::Radiant
+        let poll_seq = {
+            let seq = *reset_state.1.lock().unwrap_or_else(|e| e.into_inner());
+            if reset_state.0.swap(false, Ordering::AcqRel) {
+                adapter.reset_state();
+            }
+            seq
         };
-        adapter.set_ally_faction(faction);
+        let dire = ally_faction_code.load(Ordering::Relaxed) == 1;
+        adapter.set_ally_faction(if dire { Faction::Dire } else { Faction::Radiant });
 
         if let Ok(events) = adapter.poll_events() {
-            for ev in events {
-                match tx.try_send(ev) {
-                    Ok(()) | Err(TrySendError::Full(_)) => {}
-                    Err(TrySendError::Disconnected(_)) => return,
+            let seq = reset_state.1.lock().unwrap_or_else(|e| e.into_inner());
+            if *seq == poll_seq {
+                for ev in events {
+                    if matches!(tx.try_send(ev), Err(TrySendError::Disconnected(_))) {
+                        return;
+                    }
                 }
             }
         }
 
-        for _ in 0..12 {
-            if shutdown.load(Ordering::Acquire) {
-                return;
+        for _ in 0..24 {
+            if shutdown.load(Ordering::Acquire) || reset_state.0.load(Ordering::Acquire) {
+                break;
             }
-            thread::sleep(Duration::from_millis(100));
+            thread::sleep(Duration::from_millis(50));
         }
     }
 }

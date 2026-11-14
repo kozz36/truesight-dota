@@ -30,6 +30,8 @@ pub struct AppSession {
     pub last_sync_notice: Option<String>,
     sync_generation: u64,
     sync_rx: Option<Receiver<SyncCompletion>>,
+    last_rules_state: Option<String>,
+    vision_reset_pending: bool,
 }
 
 fn hero_role_affinity(matrix: &MatchupMatrix, hero_id: HeroId, role: Role) -> f32 {
@@ -108,6 +110,8 @@ impl AppSession {
             last_sync_notice: None,
             sync_generation: 0,
             sync_rx: None,
+            last_rules_state: None,
+            vision_reset_pending: false,
         })
     }
 
@@ -344,6 +348,7 @@ impl AppSession {
         self.enemy_locked_slots = [false; TEAM_SIZE];
         self.manually_dismissed.clear();
         self.local_player_hero = None;
+        self.vision_reset_pending = true;
     }
 
     fn side_picks(&self, side: Side) -> &[Option<DraftPick>; TEAM_SIZE] {
@@ -530,6 +535,24 @@ impl AppSession {
                 game_time_secs,
             } => {
                 self.last_gsi_state = format!("{state_name} (t={game_time_secs}s)");
+                let entered_wait_for_players = state_name
+                    == "DOTA_GAMERULES_STATE_WAIT_FOR_PLAYERS_TO_LOAD"
+                    && self.last_rules_state.as_deref() != Some(state_name.as_str());
+                let entered_new_hero_selection = state_name
+                    == "DOTA_GAMERULES_STATE_HERO_SELECTION"
+                    && matches!(
+                        self.last_rules_state.as_deref(),
+                        Some(prev)
+                            if !matches!(
+                                prev,
+                                "DOTA_GAMERULES_STATE_HERO_SELECTION"
+                                    | "DOTA_GAMERULES_STATE_WAIT_FOR_PLAYERS_TO_LOAD"
+                            )
+                    );
+                if entered_wait_for_players || entered_new_hero_selection {
+                    self.reset_draft();
+                }
+                self.last_rules_state = Some(state_name);
             }
             DraftEvent::FactionDetected { faction } => {
                 self.draft.ally_faction = faction;
@@ -629,6 +652,10 @@ impl AppSession {
             }
         }
         if let Some(worker) = vision_worker {
+            if self.vision_reset_pending {
+                worker.reset();
+                self.vision_reset_pending = false;
+            }
             worker.set_ally_faction(self.draft.ally_faction);
             if let Ok(events) = worker.poll_events() {
                 for ev in events {

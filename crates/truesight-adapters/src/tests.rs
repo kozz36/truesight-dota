@@ -1287,3 +1287,132 @@ fn comfort_v3_decays_against_wall_clock_now_unix_and_handles_edge_timestamps() {
     // Neutrality check when no personal matches/heroes exist
     assert!(parse_player_comfort_with_matches_at_json("[]", Some("[]"), now_unix).is_empty());
 }
+
+#[test]
+fn vision_reset_clears_detector_state_drains_stale_queue_and_repopulates_stationary_draft() {
+    use crate::vision::{
+        BoundedVisionWorker, HeroVisionCatalog, RgbFrame, ScreenFrameSource, TopBarSlotRect,
+        VisionCaptureAdapter, compute_topbar_slot_rects, parse_hero_atlas,
+    };
+    use truesight_core::domain::Faction;
+
+    struct StationaryFrameSource {
+        frame: RgbFrame,
+    }
+    impl ScreenFrameSource for StationaryFrameSource {
+        fn capture_frame(&mut self) -> Result<Option<RgbFrame>, truesight_core::ports::PortError> {
+            Ok(Some(self.frame.clone()))
+        }
+    }
+
+    fn paint_slot(
+        frame: &mut [u8],
+        frame_w: usize,
+        rect: TopBarSlotRect,
+        hero_rgb: &[u8],
+        src_w: usize,
+        src_h: usize,
+    ) {
+        for dy in 0..rect.height {
+            let sy = (dy * src_h) / rect.height;
+            for dx in 0..rect.width {
+                let sx = (dx * src_w) / rect.width;
+                let src_idx = (sy * src_w + sx) * 3;
+                let dst_idx = ((rect.y + dy) * frame_w + (rect.x + dx)) * 3;
+                frame[dst_idx..dst_idx + 3].copy_from_slice(&hero_rgb[src_idx..src_idx + 3]);
+            }
+        }
+    }
+
+    let atlas = parse_hero_atlas().expect("embedded hero atlas must load");
+    let catalog = HeroVisionCatalog::from_embedded().expect("vision catalog must load");
+    let (w, h) = (1920usize, 1080usize);
+    let mut rgb = vec![0u8; w * h * 3];
+    let (rad_r, dire_r) = compute_topbar_slot_rects(w, h);
+    let rad_heroes = [1_u16, 13, 97, 79, 5];
+    let dire_heroes = [94_u16, 17, 2, 100, 30];
+    for (slot, hid) in rad_heroes.iter().enumerate() {
+        paint_slot(
+            &mut rgb,
+            w,
+            rad_r[slot],
+            &atlas.heroes[&HeroId(*hid)],
+            atlas.hero_width,
+            atlas.hero_height,
+        );
+    }
+    for (slot, hid) in dire_heroes.iter().enumerate() {
+        paint_slot(
+            &mut rgb,
+            w,
+            dire_r[slot],
+            &atlas.heroes[&HeroId(*hid)],
+            atlas.hero_width,
+            atlas.hero_height,
+        );
+    }
+    let stationary = RgbFrame {
+        width: w,
+        height: h,
+        rgb,
+    };
+
+    let mut adapter = VisionCaptureAdapter::new(
+        StationaryFrameSource {
+            frame: stationary.clone(),
+        },
+        catalog,
+    );
+    adapter.set_ally_faction(Faction::Radiant);
+    let first = adapter.poll_events().unwrap();
+    assert_eq!(first.len(), 10);
+    assert!(adapter.poll_events().unwrap().is_empty());
+
+    adapter.reset_state();
+    let after_reset = adapter.poll_events().unwrap();
+    assert_eq!(
+        after_reset.len(),
+        10,
+        "reset_state() must re-emit stationary 10-hero picks once"
+    );
+    assert!(
+        adapter.poll_events().unwrap().is_empty(),
+        "stationary frame must not trigger repeated event storms after reset"
+    );
+
+    // Worker-level reset drains queued events and wakes the loop to re-emit stationary picks
+    let mut worker = BoundedVisionWorker::spawn_with_source(StationaryFrameSource {
+        frame: stationary,
+    })
+    .expect("worker must spawn");
+
+    let mut initial_seen = Vec::new();
+    for _ in 0..40 {
+        initial_seen.extend(worker.poll_events().unwrap());
+        if initial_seen.len() >= 10 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(initial_seen.len(), 10);
+
+    worker.reset();
+    assert!(
+        worker.poll_events().unwrap().is_empty(),
+        "worker.reset() must clear any buffered pre-reset events"
+    );
+
+    let mut repopulated = Vec::new();
+    for _ in 0..40 {
+        repopulated.extend(worker.poll_events().unwrap());
+        if repopulated.len() >= 10 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        repopulated.len(),
+        10,
+        "worker must re-emit stationary 10-hero picks after reset()"
+    );
+}
