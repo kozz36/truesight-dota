@@ -379,7 +379,7 @@ fn local_cache_manager_enforces_24h_meta_ttl_1h_player_ttl_and_applies_cached_co
     assert!(!mgr.is_player_stale(now + 1800), "Player cache at +30m must be fresh (<1h)");
     assert!(mgr.is_player_stale(now + 3601), "Player cache at +60m1s must be stale (>1h)");
 
-    let repo = mgr.build_repository();
+    let repo = mgr.build_repository_at(now);
     let mat = repo.load_matrix(Bracket::Legend).unwrap();
     let am = mat.hero(HeroId(1)).unwrap();
     assert_eq!(am.personal_matches, 50);
@@ -1178,4 +1178,112 @@ fn sync_stratz_synergy_parser_and_steam_id_normalizer_handle_edge_cases() {
     assert_eq!(rows[1].0, HeroId(14));
     assert_eq!(rows[1].1, HeroId(27));
     assert!(rows[1].2 > 0.05 && rows[1].2 <= 0.15);
+}
+
+#[test]
+fn comfort_v3_decays_against_wall_clock_now_unix_and_handles_edge_timestamps() {
+    use crate::sync::parse_player_comfort_with_matches_at_json;
+
+    let now_unix = 1_800_000_000_u64;
+    let stale_ts = now_unix - 300 * 86_400;
+
+    // 1 match played 300 days ago (tau = 75d => expected decay = exp(-4) ~= 0.0183156, not 1.0)
+    let one_stale_hero = format!(
+        r#"[{{"hero_id": 1, "last_played": {stale_ts}, "games": 1, "win": 1}}]"#
+    );
+    let one_stale_match = format!(
+        r#"[{{"hero_id": 1, "start_time": {stale_ts}, "player_slot": 0, "radiant_win": true}}]"#
+    );
+
+    let with_matches = parse_player_comfort_with_matches_at_json(
+        &one_stale_hero,
+        Some(&one_stale_match),
+        now_unix,
+    );
+    let without_matches =
+        parse_player_comfort_with_matches_at_json(&one_stale_hero, None, now_unix);
+    let expected_exp_neg4 = (-4.0_f32).exp();
+    assert_eq!(with_matches.len(), 1);
+    assert!(
+        (with_matches[0].3 - expected_exp_neg4).abs() < 1e-4,
+        "1 match 300d ago must decay to exp(-4)={expected_exp_neg4}, got {}",
+        with_matches[0].3
+    );
+    assert!(
+        (without_matches[0].3 - expected_exp_neg4).abs() < 1e-4,
+        "last_played fallback 300d ago must decay to exp(-4)={expected_exp_neg4}, got {}",
+        without_matches[0].3
+    );
+
+    // Frozen history evaluated across advancing wall-clock timestamps strictly decays to 0.0
+    let t0 = 1_750_000_000_u64;
+    let frozen_heroes = format!(
+        r#"[{{"hero_id": 19, "last_played": {t0}, "games": 6, "win": 4}}]"#
+    );
+    let mut frozen_match_objs = Vec::new();
+    for k in 0..5_u64 {
+        let st = t0 - k * 2 * 86_400;
+        let rad_win = if k < 3 { "true" } else { "false" };
+        frozen_match_objs.push(format!(
+            r#"{{"hero_id": 19, "start_time": {st}, "player_slot": 0, "radiant_win": {rad_win}}}"#
+        ));
+    }
+    let frozen_matches = format!("[{}]", frozen_match_objs.join(","));
+
+    let mut deltas = Vec::new();
+    let mut decays = Vec::new();
+    for eval_ts in [t0, t0 + 60 * 86_400, t0 + 300 * 86_400] {
+        let parsed = parse_player_comfort_with_matches_at_json(
+            &frozen_heroes,
+            Some(&frozen_matches),
+            eval_ts,
+        );
+        decays.push(parsed[0].3);
+        let mut repo = SeededMetaRepository::new();
+        repo.custom_personal_pool = parsed;
+        let mat = repo.load_matrix(Bracket::Legend).unwrap();
+        deltas.push(mat.hero(HeroId(19)).unwrap().comfort_delta());
+    }
+    assert!(decays[0] > decays[1] && decays[1] > decays[2], "decays={decays:?}");
+    assert!(deltas[0] > deltas[1] && deltas[1] > deltas[2], "deltas={deltas:?}");
+    assert_eq!(deltas[2], 0.0, "after 300d without matches comfort_delta must decay to 0.0");
+
+    // Edge cases: future timestamp clamped, missing last_played -> 0.0, games == 0 -> 0.0,
+    // and high-volume old career hero with 0 recent matches does not revive g_eff >= 0.15.
+    let future_ts = now_unix + 7 * 86_400;
+    let edge_heroes = format!(
+        r#"[
+            {{"hero_id": 2, "last_played": {future_ts}, "games": 2, "win": 2}},
+            {{"hero_id": 3, "last_played": 0, "games": 20, "win": 15}},
+            {{"hero_id": 4, "last_played": 0, "games": 0, "win": 0}},
+            {{"hero_id": 5, "last_played": {stale_ts}, "games": 80, "win": 60}}
+        ]"#
+    );
+    let edge_matches = format!(
+        r#"[{{"hero_id": 2, "start_time": {future_ts}, "player_slot": 0, "radiant_win": true}}]"#
+    );
+    let edge_parsed = parse_player_comfort_with_matches_at_json(
+        &edge_heroes,
+        Some(&edge_matches),
+        now_unix,
+    );
+    let by_id = |id: u16| {
+        edge_parsed
+            .iter()
+            .find(|r| r.0 == HeroId(id))
+            .copied()
+            .unwrap()
+    };
+
+    assert!((by_id(2).3 - 0.5).abs() < 1e-4, "1 future match out of 2 games clamps age_days to 0.0 => decay 0.5");
+    assert_eq!(by_id(3).3, 0.0, "missing last_played with 0 recent matches must have 0.0 decay");
+    assert_eq!(by_id(4), (HeroId(4), 0, 0, 0.0), "zero games must emit neutral 0.0");
+    assert!(
+        (by_id(5).1 as f32) * by_id(5).3 < 0.15,
+        "stale 80-game hero with 0 recent matches must not revive g_eff >= 0.15 (decay={})",
+        by_id(5).3
+    );
+
+    // Neutrality check when no personal matches/heroes exist
+    assert!(parse_player_comfort_with_matches_at_json("[]", Some("[]"), now_unix).is_empty());
 }

@@ -523,6 +523,10 @@ impl LocalCacheManager {
     }
 
     pub fn build_repository(&self) -> SeededMetaRepository {
+        self.build_repository_at(Self::now_unix())
+    }
+
+    pub fn build_repository_at(&self, now_unix: u64) -> SeededMetaRepository {
         let mut repo = SeededMetaRepository::new();
         if let Ok(m_json) = fs::read_to_string(self.meta_json_path()) {
             repo.custom_hero_meta = parse_hero_stats_json(&m_json);
@@ -532,8 +536,11 @@ impl LocalCacheManager {
                 let matches_json = self
                     .player_matches_json_path()
                     .and_then(|mp| fs::read_to_string(mp).ok());
-                repo.custom_personal_pool =
-                    parse_player_comfort_with_matches_json(&p_json, matches_json.as_deref());
+                repo.custom_personal_pool = parse_player_comfort_with_matches_at_json(
+                    &p_json,
+                    matches_json.as_deref(),
+                    now_unix,
+                );
             }
         }
         if let Ok(s_json) = fs::read_to_string(self.stratz_synergy_json_path()) {
@@ -651,15 +658,29 @@ pub fn parse_player_comfort_json(json: &str) -> Vec<(HeroId, u32, u32, f32)> {
 }
 
 /// Parses OpenDota `/api/players/{id}/heroes` combined with optional `/api/players/{id}/matches`
-/// to compute per-match exponentially time-decayed effective games and wins (`tau = 75d`, floor `0.0`).
+/// using the current wall-clock Unix timestamp as the recency reference (`tau = 75d`).
 pub fn parse_player_comfort_with_matches_json(
     heroes_json: &str,
     matches_json: Option<&str>,
 ) -> Vec<(HeroId, u32, u32, f32)> {
+    parse_player_comfort_with_matches_at_json(
+        heroes_json,
+        matches_json,
+        LocalCacheManager::now_unix(),
+    )
+}
+
+/// Parses OpenDota `/api/players/{id}/heroes` combined with optional `/api/players/{id}/matches`
+/// against an explicit `now_unix` reference clock (`tau = 75d`, floor `0.0`).
+pub fn parse_player_comfort_with_matches_at_json(
+    heroes_json: &str,
+    matches_json: Option<&str>,
+    now_unix: u64,
+) -> Vec<(HeroId, u32, u32, f32)> {
     const TAU_DAYS: f32 = 75.0;
 
     let mut raw_rows: Vec<(u16, u64, u32, u32)> = Vec::new();
-    let mut max_ts = 0_u64;
+    let ref_ts = now_unix;
 
     for obj_chunk in heroes_json.split('{').skip(1) {
         let Some(end) = obj_chunk.find('}') else {
@@ -672,9 +693,6 @@ pub fn parse_player_comfort_with_matches_json(
         let last_played = extract_u64_field(block, "\"last_played\"").unwrap_or(0);
         let games = extract_u64_field(block, "\"games\"").unwrap_or(0) as u32;
         let wins = extract_u64_field(block, "\"win\"").unwrap_or(0) as u32;
-        if games > 0 && last_played > max_ts {
-            max_ts = last_played;
-        }
         raw_rows.push((hid as u16, last_played, games, wins));
     }
 
@@ -683,17 +701,6 @@ pub fn parse_player_comfort_with_matches_json(
     let mut has_matches = false;
 
     if let Some(m_json) = matches_json {
-        for obj_chunk in m_json.split('{').skip(1) {
-            let Some(end) = obj_chunk.find('}') else {
-                continue;
-            };
-            let block = &obj_chunk[..end];
-            if let Some(st) = extract_u64_field(block, "\"start_time\"") {
-                if st > max_ts {
-                    max_ts = st;
-                }
-            }
-        }
         for obj_chunk in m_json.split('{').skip(1) {
             let Some(end) = obj_chunk.find('}') else {
                 continue;
@@ -712,7 +719,7 @@ pub fn parse_player_comfort_with_matches_json(
             let slot = extract_u64_field(block, "\"player_slot\"").unwrap_or(0);
             let rad_win = extract_bool_field(block, "\"radiant_win\"").unwrap_or(false);
             let won = (slot < 128) == rad_win;
-            let age_days = (max_ts.saturating_sub(st)) as f32 / 86_400.0;
+            let age_days = (ref_ts.saturating_sub(st)) as f32 / 86_400.0;
             let w = (-age_days / TAU_DAYS).exp();
             match_acc[idx].0 += w;
             if won {
@@ -740,15 +747,21 @@ pub fn parse_player_comfort_with_matches_json(
                 let decay = (g_eff / (games as f32)).clamp(0.0, 1.0);
                 let career_wr = (wins as f32) / (games as f32);
                 let rec_wr = if g_eff > 0.01 { w_eff / g_eff } else { career_wr };
-                let blended_wr = 0.65 * rec_wr + 0.35 * career_wr;
+                let career_weight = 0.35 * decay;
+                let blended_wr = (1.0 - career_weight) * rec_wr + career_weight * career_wr;
                 let eff_wins = ((games as f32) * blended_wr).round() as u32;
                 (HeroId(hid), games, eff_wins, decay)
             } else {
-                let decay = if last_played > 0 && max_ts > 0 {
-                    let age_days = (max_ts.saturating_sub(last_played)) as f32 / 86_400.0;
+                let raw_decay = if last_played > 0 && ref_ts > 0 {
+                    let age_days = (ref_ts.saturating_sub(last_played)) as f32 / 86_400.0;
                     (-age_days / TAU_DAYS).exp().clamp(0.0, 1.0)
                 } else {
                     0.0
+                };
+                let decay = if matches_json.is_some() {
+                    (raw_decay / (games as f32).max(1.0)).clamp(0.0, 1.0)
+                } else {
+                    raw_decay
                 };
                 (HeroId(hid), games, wins, decay)
             }
