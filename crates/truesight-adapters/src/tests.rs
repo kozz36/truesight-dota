@@ -1556,3 +1556,112 @@ fn gsi_http_framing_rejects_bad_method_missing_length_truncation_and_oversized_b
         "Rejected HTTP requests must never enqueue events"
     );
 }
+
+#[test]
+fn event_queues_coalesce_under_saturation_preserve_resets_and_recover_stationary_vision() {
+    use crate::gsi::{BoundedDraftQueue, GSI_QUEUE_CAPACITY};
+    use crate::vision::{
+        BoundedVisionWorker, RgbFrame, ScreenFrameSource, compute_topbar_slot_rects, parse_hero_atlas,
+    };
+    use truesight_core::domain::Faction;
+
+    // 1. GSI queue saturation: coalesces redundant updates and never drops critical reset/faction/steamid
+    let q = BoundedDraftQueue::new(GSI_QUEUE_CAPACITY);
+    assert!(q.push_for_epoch(0, DraftEvent::GameRulesStateChanged {
+        state_name: "DOTA_GAMERULES_STATE_WAIT_FOR_PLAYERS_TO_LOAD".into(),
+        game_time_secs: -90,
+    }));
+    assert!(q.push_for_epoch(0, DraftEvent::FactionDetected { faction: Faction::Radiant }));
+    assert!(q.push_for_epoch(0, DraftEvent::FactionDetected { faction: Faction::Dire }));
+    assert!(q.push_for_epoch(0, DraftEvent::PlayerSteamIdDetected { steam32: 127_255_741 }));
+    for round in 0..5_u16 {
+        for slot in 0..5_usize {
+            let _ = q.push_for_epoch(0, DraftEvent::PickDetected {
+                side: Side::Allies,
+                slot,
+                hero_id: HeroId(10 + round * 10 + slot as u16),
+                role: Role::ALL.get(slot).copied(),
+            });
+        }
+        let _ = q.push_for_epoch(0, DraftEvent::GameRulesStateChanged {
+            state_name: "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS".into(),
+            game_time_secs: i32::from(round) * 60,
+        });
+    }
+    for k in 0..12_u64 {
+        let _ = q.push_for_epoch(0, DraftEvent::PlayerHeroMapped {
+            steam32: 5000 + k,
+            faction: Faction::Radiant,
+            hero_slug: "npc_dota_hero_axe".into(),
+        });
+    }
+
+    let drained = q.drain();
+    let q_stats = q.stats();
+    assert!(q_stats.enqueued >= 45 && q_stats.coalesced > 0, "Expected coalescing stats: {q_stats:?}");
+    assert!(drained.iter().any(|e| matches!(
+        e, DraftEvent::GameRulesStateChanged { state_name, .. } if state_name == "DOTA_GAMERULES_STATE_WAIT_FOR_PLAYERS_TO_LOAD"
+    )));
+    assert!(drained.contains(&DraftEvent::FactionDetected { faction: Faction::Dire }));
+    assert!(!drained.contains(&DraftEvent::FactionDetected { faction: Faction::Radiant }));
+    assert!(drained.contains(&DraftEvent::PlayerSteamIdDetected { steam32: 127_255_741 }));
+    let (_, should_resync) = q.begin_poll_cycle();
+    assert!(should_resync && q.stats().recovered_resyncs == 1);
+
+    // Listener diagnostics check
+    let mut listener = BoundedGsiListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr();
+    let body = r#"{"truesight_pick":{"side":"ally","slot":0,"hero_id":1}}"#;
+    let mut s = TcpStream::connect(addr).unwrap();
+    s.write_all(format!("POST / HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}", body.len()).as_bytes()).unwrap();
+    thread::sleep(Duration::from_millis(50));
+    let _ = listener.poll_events().unwrap();
+    assert!(listener.queue_stats().enqueued >= 1);
+
+    // 2. Vision saturation triggers overflow coalescing then automatic stationary resync recovery
+    struct StationarySource(RgbFrame);
+    impl ScreenFrameSource for StationarySource {
+        fn capture_frame(&mut self) -> Result<Option<RgbFrame>, truesight_core::ports::PortError> {
+            Ok(Some(self.0.clone()))
+        }
+    }
+    let atlas = parse_hero_atlas().unwrap();
+    let (w, h) = (1920usize, 1080usize);
+    let mut rgb = vec![0u8; w * h * 3];
+    let (rad_r, dire_r) = compute_topbar_slot_rects(w, h);
+    for (rects, heroes) in [(&rad_r, &[1_u16, 13, 97, 79, 5]), (&dire_r, &[94_u16, 17, 2, 100, 30])] {
+        for (slot, hid) in heroes.iter().enumerate() {
+            let (rect, hero_rgb) = (rects[slot], &atlas.heroes[&HeroId(*hid)]);
+            for dy in 0..rect.height {
+                let sy = (dy * atlas.hero_height) / rect.height;
+                for dx in 0..rect.width {
+                    let src_idx = (sy * atlas.hero_width + (dx * atlas.hero_width) / rect.width) * 3;
+                    let dst_idx = ((rect.y + dy) * w + (rect.x + dx)) * 3;
+                    rgb[dst_idx..dst_idx + 3].copy_from_slice(&hero_rgb[src_idx..src_idx + 3]);
+                }
+            }
+        }
+    }
+    let mut worker = BoundedVisionWorker::spawn_with_capacity(
+        StationarySource(RgbFrame { width: w, height: h, rgb }),
+        8,
+    )
+    .unwrap();
+    let mut first_batch = Vec::new();
+    for _ in 0..40 {
+        first_batch.extend(worker.poll_events().unwrap());
+        if first_batch.len() >= 8 { break; }
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(first_batch.len(), 8);
+    assert!(worker.queue_stats().coalesced >= 2);
+
+    let mut resynced = Vec::new();
+    for _ in 0..40 {
+        resynced.extend(worker.poll_events().unwrap());
+        if worker.queue_stats().recovered_resyncs >= 1 && !resynced.is_empty() { break; }
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(worker.queue_stats().recovered_resyncs >= 1, "Expected automatic overflow resync: {:?}", worker.queue_stats());
+    assert!(!resynced.is_empty(), "Expected recovered vision picks after saturation");
+}

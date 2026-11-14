@@ -1,8 +1,8 @@
+use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use truesight_core::domain::{Faction, HeroId, Role, Side};
@@ -344,9 +344,144 @@ pub fn validate_gsi_bind_addr(addr: &str) -> Result<SocketAddr, PortError> {
     Ok(addrs[0])
 }
 
+/// Queue admission, coalescing, and overflow-recovery diagnostics (no payload data).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EventQueueStats {
+    pub enqueued: u64,
+    pub coalesced: u64,
+    pub recovered_resyncs: u64,
+}
+
+#[derive(Default)]
+struct QueueInner {
+    queue: VecDeque<DraftEvent>,
+    capacity: usize,
+    epoch: u64,
+    reset_requested: bool,
+    overflow_resync: bool,
+    closed: bool,
+    stats: EventQueueStats,
+}
+
+/// Bounded thread-safe queue with key coalescing, critical-event preservation, and resync triggers.
+pub struct BoundedDraftQueue {
+    inner: Mutex<QueueInner>,
+}
+
+impl BoundedDraftQueue {
+    pub fn new(capacity: usize) -> Self {
+        let cap = capacity.max(1);
+        Self {
+            inner: Mutex::new(QueueInner {
+                queue: VecDeque::with_capacity(cap),
+                capacity: cap,
+                ..QueueInner::default()
+            }),
+        }
+    }
+
+    fn lock_inner(&self) -> std::sync::MutexGuard<'_, QueueInner> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn close(&self) {
+        self.lock_inner().closed = true;
+    }
+
+    pub fn request_reset(&self) {
+        let mut g = self.lock_inner();
+        g.epoch = g.epoch.wrapping_add(1);
+        g.reset_requested = true;
+        g.overflow_resync = false;
+        g.queue.clear();
+    }
+
+    pub fn needs_reset_or_resync(&self) -> bool {
+        let g = self.lock_inner();
+        g.reset_requested || (g.overflow_resync && g.queue.is_empty())
+    }
+
+    pub fn begin_poll_cycle(&self) -> (u64, bool) {
+        let mut g = self.lock_inner();
+        if g.reset_requested {
+            g.reset_requested = false;
+            return (g.epoch, true);
+        }
+        if g.overflow_resync && g.queue.is_empty() {
+            g.overflow_resync = false;
+            g.stats.recovered_resyncs += 1;
+            return (g.epoch, true);
+        }
+        (g.epoch, false)
+    }
+
+    pub fn push_for_epoch(&self, poll_seq: u64, ev: DraftEvent) -> bool {
+        let mut g = self.lock_inner();
+        if g.closed {
+            return false;
+        }
+        if poll_seq != g.epoch {
+            return true;
+        }
+        g.stats.enqueued += 1;
+        if let Some(pos) = g.queue.iter().position(|old| should_coalesce(old, &ev)) {
+            g.queue[pos] = ev;
+            g.stats.coalesced += 1;
+            return true;
+        }
+        if g.queue.len() < g.capacity {
+            g.queue.push_back(ev);
+        } else {
+            g.overflow_resync = true;
+            g.stats.coalesced += 1;
+            if is_critical_event(&ev) {
+                if let Some(idx) = g.queue.iter().position(|e| !is_critical_event(e)) {
+                    g.queue.remove(idx);
+                    g.queue.push_back(ev);
+                }
+            }
+        }
+        true
+    }
+
+    pub fn drain(&self) -> Vec<DraftEvent> {
+        self.lock_inner().queue.drain(..).collect()
+    }
+
+    pub fn stats(&self) -> EventQueueStats {
+        self.lock_inner().stats
+    }
+}
+
+fn is_reset_state(state: &str) -> bool {
+    matches!(state, "DOTA_GAMERULES_STATE_WAIT_FOR_PLAYERS_TO_LOAD" | "DOTA_GAMERULES_STATE_HERO_SELECTION")
+}
+
+fn is_critical_event(ev: &DraftEvent) -> bool {
+    use DraftEvent::*;
+    matches!(ev, GameRulesStateChanged { .. } | FactionDetected { .. } | PlayerSteamIdDetected { .. })
+}
+
+fn should_coalesce(existing: &DraftEvent, incoming: &DraftEvent) -> bool {
+    use DraftEvent::*;
+    match (existing, incoming) {
+        (FactionDetected { .. }, FactionDetected { .. })
+        | (PlayerSteamIdDetected { .. }, PlayerSteamIdDetected { .. })
+        | (LocalPlayerHeroDetected { .. }, LocalPlayerHeroDetected { .. }) => true,
+        (PickDetected { side: s1, slot: l1, .. }, PickDetected { side: s2, slot: l2, .. }) => {
+            s1 == s2 && l1 == l2
+        }
+        (PlayerHeroMapped { steam32: a, .. }, PlayerHeroMapped { steam32: b, .. }) => a == b,
+        (GameRulesStateChanged { state_name: s1, .. }, GameRulesStateChanged { state_name: s2, .. }) => {
+            !is_reset_state(s1) || s1 == s2
+        }
+        _ => false,
+    }
+}
+
 /// Bounded local HTTP listener for Dota 2 Game State Integration (`127.0.0.1:<port>`).
 pub struct BoundedGsiListener {
-    rx: Receiver<DraftEvent>,
+    queue: Arc<BoundedDraftQueue>,
     shutdown: Arc<AtomicBool>,
     local_addr: SocketAddr,
     worker: Option<JoinHandle<()>>,
@@ -361,17 +496,18 @@ impl BoundedGsiListener {
             .map_err(|e| PortError(e.to_string()))?;
         let local_addr = listener.local_addr().map_err(|e| PortError(e.to_string()))?;
 
-        let (tx, rx) = mpsc::sync_channel(GSI_QUEUE_CAPACITY);
+        let queue = Arc::new(BoundedDraftQueue::new(GSI_QUEUE_CAPACITY));
+        let queue_worker = Arc::clone(&queue);
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_worker = Arc::clone(&shutdown);
 
         let worker = thread::Builder::new()
             .name("truesight-gsi-listener".into())
-            .spawn(move || run_accept_loop(listener, tx, shutdown_worker))
+            .spawn(move || run_accept_loop(listener, queue_worker, shutdown_worker))
             .map_err(|e| PortError(e.to_string()))?;
 
         Ok(Self {
-            rx,
+            queue,
             shutdown,
             local_addr,
             worker: Some(worker),
@@ -381,23 +517,24 @@ impl BoundedGsiListener {
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }
+
+    pub fn queue_stats(&self) -> EventQueueStats {
+        self.queue.stats()
+    }
 }
 
 impl DraftEventSource for BoundedGsiListener {
     type Error = PortError;
 
     fn poll_events(&mut self) -> Result<Vec<DraftEvent>, Self::Error> {
-        let mut batch = Vec::new();
-        while let Ok(ev) = self.rx.try_recv() {
-            batch.push(ev);
-        }
-        Ok(batch)
+        Ok(self.queue.drain())
     }
 }
 
 impl Drop for BoundedGsiListener {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
+        self.queue.close();
         if let Some(handle) = self.worker.take() {
             let _ = handle.join();
         }
@@ -406,13 +543,13 @@ impl Drop for BoundedGsiListener {
 
 fn run_accept_loop(
     listener: TcpListener,
-    tx: SyncSender<DraftEvent>,
+    queue: Arc<BoundedDraftQueue>,
     shutdown: Arc<AtomicBool>,
 ) {
     while !shutdown.load(Ordering::Acquire) {
         match listener.accept() {
             Ok((stream, _peer)) => {
-                handle_gsi_connection(stream, &tx);
+                handle_gsi_connection(stream, &queue);
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(25));
@@ -424,7 +561,7 @@ fn run_accept_loop(
     }
 }
 
-fn handle_gsi_connection(mut stream: TcpStream, tx: &SyncSender<DraftEvent>) {
+fn handle_gsi_connection(mut stream: TcpStream, queue: &BoundedDraftQueue) {
     let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
     let _ = stream.set_write_timeout(Some(Duration::from_millis(250)));
 
@@ -500,9 +637,8 @@ fn handle_gsi_connection(mut stream: TcpStream, tx: &SyncSender<DraftEvent>) {
     };
 
     for ev in parse_gsi_events_from_root(&root) {
-        match tx.try_send(ev) {
-            Ok(()) | Err(TrySendError::Full(_)) => {}
-            Err(TrySendError::Disconnected(_)) => return,
+        if !queue.push_for_epoch(0, ev) {
+            return;
         }
     }
     write_http_response(&mut stream, 200, "OK");

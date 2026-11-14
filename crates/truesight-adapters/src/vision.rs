@@ -1,8 +1,8 @@
+use crate::gsi::{BoundedDraftQueue, EventQueueStats};
 use std::collections::HashMap;
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use truesight_core::domain::{Faction, HeroId, Role, Side};
@@ -830,11 +830,12 @@ impl<S: ScreenFrameSource> DraftEventSource for VisionCaptureAdapter<S> {
     }
 }
 
+const VISION_QUEUE_CAPACITY: usize = 32;
+
 /// Bounded background worker polling Dota 2 top-bar frames at ~1 Hz.
 pub struct BoundedVisionWorker {
-    rx: Receiver<DraftEvent>,
+    queue: Arc<BoundedDraftQueue>,
     ally_faction_code: Arc<AtomicU8>,
-    reset_state: Arc<(AtomicBool, std::sync::Mutex<u64>)>,
     shutdown: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
 }
@@ -846,26 +847,30 @@ impl BoundedVisionWorker {
 
     /// Spawns a bounded background vision worker backed by a custom frame source.
     pub fn spawn_with_source<S: ScreenFrameSource + Send + 'static>(source: S) -> Option<Self> {
+        Self::spawn_with_capacity(source, VISION_QUEUE_CAPACITY)
+    }
+
+    /// Spawns a background vision worker with an explicit bounded queue capacity.
+    pub fn spawn_with_capacity<S: ScreenFrameSource + Send + 'static>(
+        source: S,
+        capacity: usize,
+    ) -> Option<Self> {
         let catalog = HeroVisionCatalog::from_embedded()?;
-        let (tx, rx) = mpsc::sync_channel(32);
+        let queue = Arc::new(BoundedDraftQueue::new(capacity));
+        let queue_ref = Arc::clone(&queue);
         let ally_faction_code = Arc::new(AtomicU8::new(0));
-        let reset_state = Arc::new((AtomicBool::new(false), std::sync::Mutex::new(0)));
         let shutdown = Arc::new(AtomicBool::new(false));
         let faction_ref = Arc::clone(&ally_faction_code);
-        let reset_ref = Arc::clone(&reset_state);
         let shutdown_ref = Arc::clone(&shutdown);
 
         let worker = thread::Builder::new()
             .name("truesight-vision-worker".into())
-            .spawn(move || {
-                run_vision_loop(source, catalog, tx, faction_ref, reset_ref, shutdown_ref)
-            })
+            .spawn(move || run_vision_loop(source, catalog, queue_ref, faction_ref, shutdown_ref))
             .ok()?;
 
         Some(Self {
-            rx,
+            queue,
             ally_faction_code,
-            reset_state,
             shutdown,
             worker: Some(worker),
         })
@@ -878,10 +883,11 @@ impl BoundedVisionWorker {
 
     /// Invalidates in-flight pre-reset polls, drains queued events, and resets detector state.
     pub fn reset(&mut self) {
-        let mut seq = self.reset_state.1.lock().unwrap_or_else(|e| e.into_inner());
-        *seq = seq.wrapping_add(1);
-        self.reset_state.0.store(true, Ordering::Release);
-        while self.rx.try_recv().is_ok() {}
+        self.queue.request_reset();
+    }
+
+    pub fn queue_stats(&self) -> EventQueueStats {
+        self.queue.stats()
     }
 }
 
@@ -889,17 +895,14 @@ impl DraftEventSource for BoundedVisionWorker {
     type Error = PortError;
 
     fn poll_events(&mut self) -> Result<Vec<DraftEvent>, Self::Error> {
-        let mut batch = Vec::new();
-        while let Ok(ev) = self.rx.try_recv() {
-            batch.push(ev);
-        }
-        Ok(batch)
+        Ok(self.queue.drain())
     }
 }
 
 impl Drop for BoundedVisionWorker {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
+        self.queue.close();
         if let Some(handle) = self.worker.take() {
             let _ = handle.join();
         }
@@ -909,36 +912,29 @@ impl Drop for BoundedVisionWorker {
 fn run_vision_loop<S: ScreenFrameSource>(
     source: S,
     catalog: HeroVisionCatalog,
-    tx: SyncSender<DraftEvent>,
+    queue: Arc<BoundedDraftQueue>,
     ally_faction_code: Arc<AtomicU8>,
-    reset_state: Arc<(AtomicBool, std::sync::Mutex<u64>)>,
     shutdown: Arc<AtomicBool>,
 ) {
     let mut adapter = VisionCaptureAdapter::new(source, catalog);
     while !shutdown.load(Ordering::Acquire) {
-        let poll_seq = {
-            let seq = *reset_state.1.lock().unwrap_or_else(|e| e.into_inner());
-            if reset_state.0.swap(false, Ordering::AcqRel) {
-                adapter.reset_state();
-            }
-            seq
-        };
+        let (poll_seq, should_reset) = queue.begin_poll_cycle();
+        if should_reset {
+            adapter.reset_state();
+        }
         let dire = ally_faction_code.load(Ordering::Relaxed) == 1;
         adapter.set_ally_faction(if dire { Faction::Dire } else { Faction::Radiant });
 
         if let Ok(events) = adapter.poll_events() {
-            let seq = reset_state.1.lock().unwrap_or_else(|e| e.into_inner());
-            if *seq == poll_seq {
-                for ev in events {
-                    if matches!(tx.try_send(ev), Err(TrySendError::Disconnected(_))) {
-                        return;
-                    }
+            for ev in events {
+                if !queue.push_for_epoch(poll_seq, ev) {
+                    return;
                 }
             }
         }
 
         for _ in 0..24 {
-            if shutdown.load(Ordering::Acquire) || reset_state.0.load(Ordering::Acquire) {
+            if shutdown.load(Ordering::Acquire) || queue.needs_reset_or_resync() {
                 break;
             }
             thread::sleep(Duration::from_millis(50));
