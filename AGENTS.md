@@ -23,6 +23,7 @@ This file defines the mandatory implementation, architectural, statistical, and 
 | **`crates/truesight-core`** | **100% pure Hexagon Core**: zero I/O, zero filesystem, zero network, zero async, zero external dependencies. Owns `domain`, `math`, and `ports`. |
 | **`crates/truesight-adapters`** | **Driven & Driving Infrastructure**: owns `SeededMetaRepository`, `LocalCacheManager` (`24h`/`1h` TTL), and `BoundedGsiListener` (`MAX_GSI_PAYLOAD_BYTES = 64 KiB`, `sync_channel(16)`). |
 | **`crates/truesight-app`** | **Presentation & Composition Root**: owns `AppSession`, native `eframe`/`egui` desktop GUI (default `gui` feature), and TrueColor CLI/TUI (`--cli`, `--demo`, `--sync`). |
+| **Module Cohesion & Test Separation** | No production source file (excluding generated seed data `snapshot_pairs.rs`) may exceed ~800–900 lines or mix unrelated layers. All unit and regression test suites MUST reside in dedicated `tests.rs` files wired via `#[cfg(test)] mod tests;`, never inline inside `lib.rs`, `main.rs`, or UI panel files. |
 
 ---
 

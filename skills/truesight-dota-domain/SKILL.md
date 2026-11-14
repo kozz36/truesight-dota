@@ -21,15 +21,16 @@ Load this skill whenever modifying or reviewing `truesight-dota` crates (`truesi
   - `Projected Win%` in `recommend_heroes` MUST equal `evaluate_draft_5v5` (`0.00%` drift) when the candidate hero is placed in `draft.target_role.index()`.
 - **Personal Comfort v3**: Never use a single `last_played` timestamp over lifetime totals alone. Compute per-match exponentially time-decayed effective games $G_{\text{eff}} = \sum_k e^{-\Delta t_k / 75\text{d}}$ (`g_eff < 0.15 => 0.0`) plus active volume mastery $0.0065 \ln(1 + G_{\text{eff}})$ only when $\widehat{WR}_{\text{eff}} \ge 0.50$.
 - **Mandatory Red-Green TDD**: Observe a failing test (`RED`) before any production change (`GREEN`), and run both `--all-features` and `--no-default-features` before completion.
+- **Modular File Hygiene & Externalized Unit Tests**: Keep domain, adapter, CLI, session, and GUI panels split into cohesive single-responsibility modules (each production file under ~800–900 lines, excluding static generated seed tables such as `snapshot_pairs.rs`). Place all `#[cfg(test)]` suites in dedicated `tests.rs` submodule files (`src/tests.rs`, `src/gui/tests.rs`) rather than embedding them in production files.
 
 ## Decision Gates
 
 | Change Surface | Required Action |
 |----------------|-----------------|
-| Formula in `truesight-core::math` or `domain` | Add unit test in `crates/truesight-core/src/lib.rs` proving antisymmetry, $\sqrt{N}$ normalization, and `Projected Win%` parity. |
+| Formula in `truesight-core::math` or `domain` | Add unit test in `crates/truesight-core/src/tests.rs` proving antisymmetry, $\sqrt{N}$ normalization, and `Projected Win%` parity. |
 | Bracket scaling or `OPENDOTA_HERO_SNAPSHOT` | Verify all 8 medals (`Herald`..`Immortal`) update Meta/Counter/Synergy and enforce `\|P(Divine) - P(Immortal)\| < 0.03`. |
 | `LocalCacheManager` / OpenDota sync | Preserve `META_TTL_SECS = 86_400` (24h) and `PLAYER_TTL_SECS = 3_600` (1h) with offline fallback to `OPENDOTA_HERO_SNAPSHOT`. |
-| GUI (`gui.rs`) or CLI (`main.rs`) | Mutate state only via `AppSession`; use ASCII `[v]`/`[^]`/`[Enter]` glyphs to avoid font tofu boxes. |
+| GUI (`gui/`) or CLI (`cli.rs`, `session.rs`) | Mutate state only via `AppSession`; use ASCII `[v]`/`[^]`/`[Enter]` glyphs to avoid font tofu boxes. |
 
 ## Execution Steps
 

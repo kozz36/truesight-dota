@@ -432,7 +432,7 @@ pub fn evaluate_draft_5v5(
     }
 }
 
-fn evaluate_team_composition(
+pub fn evaluate_team_composition(
     picks: &[Option<DraftPick>; TEAM_SIZE],
     matrix: &MatchupMatrix,
 ) -> f32 {

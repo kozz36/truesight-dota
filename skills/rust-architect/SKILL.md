@@ -27,6 +27,10 @@ Load only relevant profiles below, combining them when targets overlap.
 - Run only available, authorized checks. Do not install tools, fetch dependencies
   or access the network automatically. Label proposed, executed, failed and
   unavailable verification separately; never invent results.
+- Prevent God Files: split modules by cohesive responsibility before any
+  production source file exceeds ~800–900 lines (excluding generated data tables),
+  and isolate unit/regression tests into dedicated `tests.rs` files
+  (`#[cfg(test)] mod tests;`) rather than inline inside `lib.rs`, `main.rs`, or UI panel files.
 
 ## Decision Gates
 
