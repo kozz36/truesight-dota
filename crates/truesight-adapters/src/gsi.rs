@@ -31,29 +31,56 @@ pub fn parse_gsi_json_events(payload: &str) -> Vec<DraftEvent> {
         }
     }
 
-    // Extract local player faction (`"player": { ... "team_name": "radiant" | "dire" }`) and Steam32 ID
+    // Extract player(s) and hero assignment across live mode vs spectator/replay mode (`player0..player9`).
     let player_slice = extract_json_object_slice(payload, "player").unwrap_or(payload);
-    if let Some(raw_steamid) = extract_json_u64(player_slice, "steamid") {
-        if let Some(steam32) = crate::sync::normalize_steam32_id(raw_steamid) {
-            events.push(DraftEvent::PlayerSteamIdDetected { steam32 });
+    let hero_slice_opt = extract_json_object_slice(payload, "hero");
+    if extract_json_object_slice(player_slice, "player0").is_some() {
+        for idx in 0..10_usize {
+            let key = format!("player{idx}");
+            let Some(p_sub) = extract_json_object_slice(player_slice, &key) else {
+                continue;
+            };
+            let Some(steam32) =
+                extract_json_u64(p_sub, "steamid").and_then(crate::sync::normalize_steam32_id)
+            else {
+                continue;
+            };
+            let faction = extract_json_string(p_sub, "team_name")
+                .as_deref()
+                .and_then(parse_faction_name)
+                .unwrap_or(if idx < 5 {
+                    Faction::Radiant
+                } else {
+                    Faction::Dire
+                });
+            let hero_slug = hero_slice_opt
+                .and_then(|hs| extract_json_object_slice(hs, &key))
+                .and_then(|hs| extract_json_string(hs, "name"))
+                .unwrap_or_default();
+            events.push(DraftEvent::PlayerHeroMapped {
+                steam32,
+                faction,
+                hero_slug,
+            });
         }
-    }
-    if let Some(team_name) = extract_json_string(player_slice, "team_name") {
-        let faction = match team_name.trim().to_ascii_lowercase().as_str() {
-            "radiant" | "team2" | "goodguys" => Some(Faction::Radiant),
-            "dire" | "team3" | "badguys" => Some(Faction::Dire),
-            _ => None,
-        };
-        if let Some(f) = faction {
-            events.push(DraftEvent::FactionDetected { faction: f });
+    } else {
+        if let Some(raw_steamid) = extract_json_u64(player_slice, "steamid") {
+            if let Some(steam32) = crate::sync::normalize_steam32_id(raw_steamid) {
+                events.push(DraftEvent::PlayerSteamIdDetected { steam32 });
+            }
         }
-    }
+        if let Some(team_name) = extract_json_string(player_slice, "team_name") {
+            if let Some(f) = parse_faction_name(&team_name) {
+                events.push(DraftEvent::FactionDetected { faction: f });
+            }
+        }
 
-    // Extract hero name from `"hero": { ... "name": "npc_dota_hero_..." }`
-    if let Some(hero_slice) = extract_json_object_slice(payload, "hero") {
-        if let Some(hero_slug) = extract_json_string(hero_slice, "name") {
-            if hero_slug.starts_with("npc_dota_hero_") {
-                events.push(DraftEvent::LocalPlayerHeroDetected { hero_slug });
+        // Extract hero name from `"hero": { ... "name": "npc_dota_hero_..." }`
+        if let Some(hero_slice) = hero_slice_opt {
+            if let Some(hero_slug) = extract_json_string(hero_slice, "name") {
+                if hero_slug.starts_with("npc_dota_hero_") {
+                    events.push(DraftEvent::LocalPlayerHeroDetected { hero_slug });
+                }
             }
         }
     }
@@ -80,6 +107,14 @@ pub fn parse_gsi_json_events(payload: &str) -> Vec<DraftEvent> {
     }
 
     events
+}
+
+fn parse_faction_name(raw: &str) -> Option<Faction> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "radiant" | "team2" | "goodguys" => Some(Faction::Radiant),
+        "dire" | "team3" | "badguys" => Some(Faction::Dire),
+        _ => None,
+    }
 }
 
 fn extract_json_object_slice<'a>(input: &'a str, key: &str) -> Option<&'a str> {

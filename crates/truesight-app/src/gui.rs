@@ -702,6 +702,7 @@ pub struct TrueSightGuiApp {
     picker_target: Option<PickerTarget>,
     picker_search: String,
     focus_picker_input: bool,
+    drag_slot: Option<(Side, usize)>,
     suggest_filter: String,
     status_banner: String,
     account_editor_open: bool,
@@ -729,6 +730,7 @@ impl TrueSightGuiApp {
             picker_target: None,
             picker_search: String::new(),
             focus_picker_input: false,
+            drag_slot: None,
             suggest_filter: String::new(),
             status_banner:
                 "Click any Ally (P1..P5) or Enemy (P1..P5) slot card, type hero name, and press Enter."
@@ -869,8 +871,9 @@ impl TrueSightGuiApp {
                         )
                         .clicked()
                     {
-                        self.session.draft.clear();
+                        self.session.reset_draft();
                         self.picker_target = None;
+                        self.drag_slot = None;
                         self.status_banner = "Draft cleared.".into();
                     }
                     if ui
@@ -900,7 +903,8 @@ impl TrueSightGuiApp {
                         )
                         .clicked()
                     {
-                        self.session.draft.clear();
+                        self.session.reset_draft();
+                        self.drag_slot = None;
                         let _ = crate::execute_command(&mut self.session, "ally 1 faceless void");
                         let _ = crate::execute_command(&mut self.session, "ally 3 magnus");
                         let _ = crate::execute_command(&mut self.session, "ally 4 shadow demon");
@@ -1000,12 +1004,25 @@ impl TrueSightGuiApp {
                 };
                 let breakdown = compute_slot_breakdown(&self.session, analysis, side, slot);
 
+                let is_dragging_this = self.drag_slot == Some((side, slot));
+                let is_local_you = is_ally
+                    && current_pick.is_some_and(|p| self.session.local_player_hero == Some(p.hero_id));
+                let is_locked = match side {
+                    Side::Allies => self.session.ally_locked_slots[slot],
+                    Side::Enemies => self.session.enemy_locked_slots[slot],
+                };
                 let bg_fill = if is_picking {
                     Color32::from_rgba_unmultiplied(46, 230, 122, 22)
                 } else {
                     P_INDIGO_2
                 };
-                let border_col = if is_picking { P_GEM } else { P_INDIGO_3 };
+                let border_col = if is_dragging_this {
+                    P_NEUTRAL
+                } else if is_picking {
+                    P_GEM
+                } else {
+                    P_INDIGO_3
+                };
 
                 let row_frame = egui::Frame::NONE
                     .fill(bg_fill)
@@ -1013,6 +1030,8 @@ impl TrueSightGuiApp {
                     .inner_margin(Margin::symmetric(8, 3))
                     .show(ui, |ui| {
                         ui.set_min_size(vec2(ui.available_width(), 44.0));
+                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                        ui.spacing_mut().interact_size.y = 13.0;
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 8.0;
 
@@ -1073,12 +1092,21 @@ impl TrueSightGuiApp {
                                     let hero_name = profile
                                         .map(|h| h.display_name.as_str())
                                         .unwrap_or("Unknown");
-                                    ui.label(
-                                        RichText::new(hero_name)
-                                            .size(12.5)
-                                            .strong()
-                                            .color(P_GLINT),
-                                    );
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 4.0;
+                                        ui.label(
+                                            RichText::new(hero_name)
+                                                .size(12.5)
+                                                .strong()
+                                                .color(P_GLINT),
+                                        );
+                                        if is_local_you {
+                                            paint_mini_badge(ui, "YOU", P_GEM, P_GEM);
+                                        }
+                                        if is_locked {
+                                            paint_mini_badge(ui, "LOCK", P_SILVER, P_LINE);
+                                        }
+                                    });
 
                                     if let Some(b) = breakdown {
                                         let m_pct = b.meta * 100.0;
@@ -1136,26 +1164,84 @@ impl TrueSightGuiApp {
                                 }
                             });
 
-                            // 3. Right Net / Threat resultant + clear button
+                            // 3. Right Net / Threat resultant + clear & role-swap buttons
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if current_pick.is_some()
-                                    && ui
+                                if current_pick.is_some() {
+                                    ui.spacing_mut().item_spacing.x = 1.5;
+                                    if ui
                                         .add(
                                             egui::Button::new(
                                                 RichText::new("×").size(11.0).color(P_MUTED),
                                             )
-                                            .frame(false),
+                                            .frame(false)
+                                            .min_size(vec2(11.0, 11.0)),
                                         )
+                                        .on_hover_text("Clear hero slot")
                                         .clicked()
-                                {
-                                    match side {
-                                        Side::Allies => {
-                                            let _ = self.session.draft.set_ally(slot, None);
+                                    {
+                                        self.session.clear_slot_manual(side, slot);
+                                        if self.picker_target
+                                            == Some(PickerTarget::Slot(side, slot))
+                                        {
+                                            self.picker_target = None;
                                         }
-                                        Side::Enemies => {
-                                            let _ = self.session.draft.set_enemy(slot, None);
-                                        }
+                                        self.status_banner = format!(
+                                            "Cleared {} P{}.",
+                                            if is_ally { "Ally" } else { "Enemy" },
+                                            slot + 1
+                                        );
                                     }
+                                    ui.vertical(|ui| {
+                                        ui.spacing_mut().item_spacing.y = 0.0;
+                                        if slot > 0
+                                            && ui
+                                                .add(
+                                                    egui::Button::new(
+                                                        RichText::new("^")
+                                                            .size(9.5)
+                                                            .strong()
+                                                            .color(P_SILVER),
+                                                    )
+                                                    .frame(false)
+                                                    .min_size(vec2(11.0, 11.0)),
+                                                )
+                                                .on_hover_text("Move role up (swap and lock)")
+                                                .clicked()
+                                        {
+                                            self.session.swap_slots(side, slot, slot - 1);
+                                            self.picker_target = None;
+                                            self.status_banner = format!(
+                                                "Swapped {} P{} <-> P{}.",
+                                                if is_ally { "Ally" } else { "Enemy" },
+                                                slot + 1,
+                                                slot
+                                            );
+                                        }
+                                        if slot + 1 < TEAM_SIZE
+                                            && ui
+                                                .add(
+                                                    egui::Button::new(
+                                                        RichText::new("v")
+                                                            .size(9.0)
+                                                            .strong()
+                                                            .color(P_SILVER),
+                                                    )
+                                                    .frame(false)
+                                                    .min_size(vec2(11.0, 11.0)),
+                                                )
+                                                .on_hover_text("Move role down (swap and lock)")
+                                                .clicked()
+                                        {
+                                            self.session.swap_slots(side, slot, slot + 1);
+                                            self.picker_target = None;
+                                            self.status_banner = format!(
+                                                "Swapped {} P{} <-> P{}.",
+                                                if is_ally { "Ally" } else { "Enemy" },
+                                                slot + 1,
+                                                slot + 2
+                                            );
+                                        }
+                                    });
                                 }
                                 ui.vertical(|ui| {
                                     ui.with_layout(Layout::top_down(Align::Max), |ui| {
@@ -1194,16 +1280,64 @@ impl TrueSightGuiApp {
                     accent,
                 );
 
-                // Click anywhere on the slot card to activate picker for that slot
-                let click_resp = ui.interact(
-                    r,
+                // Drag-to-swap target highlight and drop commit
+                if let Some((drag_side, src_slot)) = self.drag_slot
+                    && drag_side == side
+                    && src_slot != slot
+                {
+                    let (pointer_over, released) = ui.input(|i| {
+                        let over = i
+                            .pointer
+                            .interact_pos()
+                            .or_else(|| i.pointer.hover_pos())
+                            .is_some_and(|p| r.contains(p));
+                        (over, i.pointer.any_released())
+                    });
+                    if pointer_over {
+                        ui.painter().rect_stroke(
+                            r,
+                            0.0,
+                            Stroke::new(2.0_f32, accent),
+                            StrokeKind::Inside,
+                        );
+                        if released {
+                            self.session.swap_slots(side, src_slot, slot);
+                            self.drag_slot = None;
+                            self.picker_target = None;
+                            self.status_banner = format!(
+                                "Swapped {} P{} <-> P{}.",
+                                if is_ally { "Ally" } else { "Enemy" },
+                                src_slot + 1,
+                                slot + 1
+                            );
+                        }
+                    }
+                }
+
+                // Restrict hit rect away from right-hand control buttons (×, ^, v)
+                let card_hit_rect = if current_pick.is_some() {
+                    Rect::from_min_max(r.min, pos2((r.max.x - 38.0).max(r.min.x + 40.0), r.max.y))
+                } else {
+                    r
+                };
+                let card_resp = ui.interact(
+                    card_hit_rect,
                     Id::new(("slot_card_click", is_ally, slot)),
-                    Sense::click(),
+                    Sense::click_and_drag(),
                 );
-                if click_resp.clicked() {
+                if card_resp.drag_started() && current_pick.is_some() {
+                    self.drag_slot = Some((side, slot));
+                    self.picker_target = None;
+                }
+                if card_resp.clicked() {
                     if is_ally {
                         self.session.draft.target_role =
                             Role::ALL.get(slot).copied().unwrap_or(Role::Carry);
+                        if self.session.local_player_hero.is_none()
+                            && let Some(pick) = current_pick
+                        {
+                            self.session.local_player_hero = Some(pick.hero_id);
+                        }
                     }
                     let target = PickerTarget::Slot(side, slot);
                     if self.picker_target == Some(target) {
@@ -1745,17 +1879,12 @@ impl TrueSightGuiApp {
     fn apply_picker_choice(&mut self, target: PickerTarget, hid: HeroId, hname: &str) {
         match target {
             PickerTarget::Slot(side, slot) => {
-                let pick = Some(DraftPick {
-                    hero_id: hid,
-                    role: Role::ALL.get(slot).copied(),
-                });
+                self.session.set_slot_manual(side, slot, hid);
                 match side {
                     Side::Allies => {
-                        let _ = self.session.draft.set_ally(slot, pick);
                         self.status_banner = format!("Picked {hname} into Ally P{}.", slot + 1);
                     }
                     Side::Enemies => {
-                        let _ = self.session.draft.set_enemy(slot, pick);
                         self.status_banner = format!("Picked {hname} into Enemy P{}.", slot + 1);
                     }
                 }
@@ -2799,6 +2928,13 @@ impl TrueSightGuiApp {
                 });
             });
 
+        if self.drag_slot.is_some() {
+            ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+            if ctx.input(|i| i.pointer.any_released()) {
+                self.drag_slot = None;
+            }
+        }
+
         if self.account_editor_open {
             let mut close_modal = false;
             egui::Window::new("STEAM ACCOUNT LINK")
@@ -3026,5 +3162,68 @@ mod tests {
             assert!((r.suggested.max.y - r.matrix.max.y).abs() <= 2.0, "tab={tab:?} suggested={:?} matrix={:?}", r.suggested, r.matrix);
             assert!(r.matrix.max.x <= 1468.0 && r.matrix.max.y <= 960.0, "tab={tab:?} bottom overflow: {:?}", r.matrix);
         }
+    }
+
+    #[test]
+    fn v4_manual_locks_swap_and_clear_preserve_card_alignment() {
+        let mut session = AppSession::new().unwrap();
+        assert!(execute_command(&mut session, "ally 1 faceless void").unwrap());
+        assert!(execute_command(&mut session, "ally 2 crystal maiden").unwrap());
+        assert!(execute_command(&mut session, "ally 3 night stalker").unwrap());
+        assert!(execute_command(&mut session, "ally 4 shadow demon").unwrap());
+        assert!(execute_command(&mut session, "ally 5 jakiro").unwrap());
+        assert!(execute_command(&mut session, "enemy 1 medusa").unwrap());
+        assert!(execute_command(&mut session, "enemy 2 storm spirit").unwrap());
+        assert!(execute_command(&mut session, "enemy 3 beastmaster").unwrap());
+        assert!(execute_command(&mut session, "enemy 4 spirit breaker").unwrap());
+        assert!(execute_command(&mut session, "enemy 5 witch doctor").unwrap());
+
+        session.local_player_hero = session.draft.allies[2].map(|p| p.hero_id);
+        session.swap_slots(Side::Allies, 2, 1);
+        assert!(session.ally_locked_slots[1]);
+        assert!(session.ally_locked_slots[2]);
+
+        let mut app = TrueSightGuiApp::new(session, None, None);
+        let ctx = egui::Context::default();
+        let raw_input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1468.0, 960.0))),
+            ..Default::default()
+        };
+
+        let mut layout = None;
+        for _ in 0..2 {
+            let _ = ctx.run(raw_input.clone(), |ctx| {
+                layout = Some(app.render_frame(ctx));
+            });
+        }
+        let r = layout.expect("layout rects captured with 5v5 YOU+LOCK badges");
+        assert!(
+            (r.allies.max.y - r.oracle.max.y).abs() <= 2.0,
+            "allies={:?} oracle={:?}",
+            r.allies,
+            r.oracle
+        );
+        assert!(
+            (r.allies.max.y - r.enemies.max.y).abs() <= 2.0,
+            "allies={:?} enemies={:?}",
+            r.allies,
+            r.enemies
+        );
+
+        app.session.clear_slot_manual(Side::Allies, 1);
+        assert!(app.session.draft.allies[1].is_none());
+        let mut after_clear = None;
+        for _ in 0..2 {
+            let _ = ctx.run(raw_input.clone(), |ctx| {
+                after_clear = Some(app.render_frame(ctx));
+            });
+        }
+        let r2 = after_clear.expect("layout rects captured after manual clear");
+        assert!(
+            (r2.allies.max.y - r2.oracle.max.y).abs() <= 2.0,
+            "after clear: allies={:?} oracle={:?}",
+            r2.allies,
+            r2.oracle
+        );
     }
 }

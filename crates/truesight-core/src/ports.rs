@@ -26,6 +26,11 @@ pub enum DraftEvent {
     LocalPlayerHeroDetected {
         hero_slug: String,
     },
+    PlayerHeroMapped {
+        steam32: u64,
+        faction: Faction,
+        hero_slug: String,
+    },
     PickDetected {
         side: Side,
         slot: usize,

@@ -170,6 +170,51 @@ mod tests {
                 role: Some(Role::Mid),
             }
         );
+
+        // Replay / spectator GSI payload with nested team2/team3 player0..player9 blocks
+        let replay_payload = r#"{
+            "player": {
+                "team2": {
+                    "player0": { "steamid": "76561198000000001", "team_name": "radiant" },
+                    "player1": { "steamid": "76561198071488061", "team_name": "radiant" }
+                },
+                "team3": {
+                    "player5": { "steamid": "76561198000000002", "team_name": "dire" }
+                }
+            },
+            "hero": {
+                "team2": {
+                    "player0": { "name": "npc_dota_hero_spectre" },
+                    "player1": { "name": "npc_dota_hero_night_stalker" }
+                },
+                "team3": {
+                    "player5": { "name": "npc_dota_hero_slark" }
+                }
+            }
+        }"#;
+        let replay_events = parse_gsi_json_events(replay_payload);
+        assert!(
+            !replay_events
+                .iter()
+                .any(|e| matches!(e, DraftEvent::PlayerSteamIdDetected { .. })),
+            "Replay GSI must not overwrite account_id from player0: {replay_events:?}"
+        );
+        assert!(
+            replay_events.contains(&DraftEvent::PlayerHeroMapped {
+                steam32: 111_222_333,
+                faction: truesight_core::domain::Faction::Radiant,
+                hero_slug: "npc_dota_hero_night_stalker".into(),
+            }),
+            "Replay GSI must map player1 Steam32 + faction + hero: {replay_events:?}"
+        );
+        assert!(
+            replay_events.contains(&DraftEvent::PlayerHeroMapped {
+                steam32: 39_734_274,
+                faction: truesight_core::domain::Faction::Dire,
+                hero_slug: "npc_dota_hero_slark".into(),
+            }),
+            "Replay GSI must emit Dire PlayerHeroMapped: {replay_events:?}"
+        );
     }
 
     #[test]

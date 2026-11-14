@@ -27,6 +27,63 @@ pub struct AppSession {
     pub cache_mgr: LocalCacheManager,
     pub db_status: String,
     pub last_gsi_state: String,
+    pub ally_locked_slots: [bool; TEAM_SIZE],
+    pub enemy_locked_slots: [bool; TEAM_SIZE],
+    pub manually_dismissed: Vec<HeroId>,
+    pub local_player_hero: Option<HeroId>,
+}
+
+fn hero_role_affinity(matrix: &MatchupMatrix, hero_id: HeroId, role: Role) -> f32 {
+    if let Some(h) = matrix.hero(hero_id) {
+        let role_bonus = h
+            .primary_roles
+            .iter()
+            .position(|&r| r == role)
+            .map(|pos| 100.0 - (pos as f32) * 8.0)
+            .unwrap_or(0.0);
+        role_bonus + h.meta_winrate(role) * 10.0
+    } else {
+        5.0
+    }
+}
+
+fn search_best_role_assignment(
+    matrix: &MatchupMatrix,
+    heroes: &[HeroId],
+    available_slots: &[usize],
+    hero_idx: usize,
+    used_mask: u8,
+    current_slots: &mut Vec<usize>,
+    current_score: f32,
+    best_score: &mut f32,
+    best_slots: &mut Vec<usize>,
+) {
+    if hero_idx == heroes.len() {
+        if current_score > *best_score {
+            *best_score = current_score;
+            *best_slots = current_slots.clone();
+        }
+        return;
+    }
+    for (pos, &slot) in available_slots.iter().enumerate() {
+        if (used_mask & (1 << pos)) != 0 {
+            continue;
+        }
+        let aff = hero_role_affinity(matrix, heroes[hero_idx], Role::ALL[slot]);
+        current_slots.push(slot);
+        search_best_role_assignment(
+            matrix,
+            heroes,
+            available_slots,
+            hero_idx + 1,
+            used_mask | (1 << pos),
+            current_slots,
+            current_score + aff,
+            best_score,
+            best_slots,
+        );
+        current_slots.pop();
+    }
 }
 
 impl AppSession {
@@ -44,6 +101,10 @@ impl AppSession {
             cache_mgr,
             db_status,
             last_gsi_state: "IDLE (Waiting for Dota 2 GSI)".into(),
+            ally_locked_slots: [false; TEAM_SIZE],
+            enemy_locked_slots: [false; TEAM_SIZE],
+            manually_dismissed: Vec::new(),
+            local_player_hero: None,
         })
     }
 
@@ -100,17 +161,18 @@ impl AppSession {
         query: &str,
     ) -> Vec<(HeroId, String)> {
         let q = query.trim().to_ascii_lowercase();
-        let current_hid = match side {
-            Side::Allies => self.draft.allies.get(slot).and_then(|p| p.map(|d| d.hero_id)),
-            Side::Enemies => self.draft.enemies.get(slot).and_then(|p| p.map(|d| d.hero_id)),
+        let same_side_picks = match side {
+            Side::Allies => &self.draft.allies,
+            Side::Enemies => &self.draft.enemies,
         };
+        let _ = slot;
 
         let mut matches: Vec<(bool, HeroId, String)> = self
             .matrix
             .heroes()
             .filter_map(|h| {
-                let is_cur = current_hid == Some(h.id);
-                if self.draft.is_unavailable(h.id) && !is_cur {
+                let on_same_side = same_side_picks.iter().flatten().any(|p| p.hero_id == h.id);
+                if self.draft.is_unavailable(h.id) && !on_same_side {
                     return None;
                 }
                 if q.is_empty() {
@@ -170,6 +232,191 @@ impl AppSession {
             .map(|h| h.id)
     }
 
+    pub fn reset_draft(&mut self) {
+        self.draft.clear();
+        self.ally_locked_slots = [false; TEAM_SIZE];
+        self.enemy_locked_slots = [false; TEAM_SIZE];
+        self.manually_dismissed.clear();
+        self.local_player_hero = None;
+    }
+
+    fn side_picks(&self, side: Side) -> &[Option<DraftPick>; TEAM_SIZE] {
+        match side {
+            Side::Allies => &self.draft.allies,
+            Side::Enemies => &self.draft.enemies,
+        }
+    }
+
+    fn side_picks_mut(&mut self, side: Side) -> &mut [Option<DraftPick>; TEAM_SIZE] {
+        match side {
+            Side::Allies => &mut self.draft.allies,
+            Side::Enemies => &mut self.draft.enemies,
+        }
+    }
+
+    fn side_locked_mut(&mut self, side: Side) -> &mut [bool; TEAM_SIZE] {
+        match side {
+            Side::Allies => &mut self.ally_locked_slots,
+            Side::Enemies => &mut self.enemy_locked_slots,
+        }
+    }
+
+    fn sync_local_player_target_role(&mut self) {
+        let Some(local_id) = self.local_player_hero else {
+            return;
+        };
+        if let Some(slot) = self
+            .draft
+            .allies
+            .iter()
+            .position(|p| p.map(|d| d.hero_id) == Some(local_id))
+        {
+            if let Some(role) = Role::ALL.get(slot).copied() {
+                self.draft.target_role = role;
+            }
+        }
+    }
+
+    fn rebalance_unlocked_side_roles(&mut self, side: Side) {
+        let locked = match side {
+            Side::Allies => self.ally_locked_slots,
+            Side::Enemies => self.enemy_locked_slots,
+        };
+        let unlocked_slots: Vec<usize> = (0..TEAM_SIZE).filter(|&s| !locked[s]).collect();
+        let unlocked_heroes: Vec<HeroId> = unlocked_slots
+            .iter()
+            .filter_map(|&s| self.side_picks(side)[s].map(|p| p.hero_id))
+            .collect();
+
+        if unlocked_heroes.is_empty() {
+            for &s in &unlocked_slots {
+                self.side_picks_mut(side)[s] = None;
+            }
+            self.sync_local_player_target_role();
+            return;
+        }
+
+        let mut best_score = f32::NEG_INFINITY;
+        let mut best_slots = Vec::with_capacity(unlocked_heroes.len());
+        let mut current = Vec::with_capacity(unlocked_heroes.len());
+        search_best_role_assignment(
+            &self.matrix,
+            &unlocked_heroes,
+            &unlocked_slots,
+            0,
+            0,
+            &mut current,
+            0.0,
+            &mut best_score,
+            &mut best_slots,
+        );
+
+        let picks = self.side_picks_mut(side);
+        for &s in &unlocked_slots {
+            picks[s] = None;
+        }
+        for (idx, &slot) in best_slots.iter().enumerate() {
+            picks[slot] = Some(DraftPick {
+                hero_id: unlocked_heroes[idx],
+                role: Role::ALL.get(slot).copied(),
+            });
+        }
+        self.sync_local_player_target_role();
+    }
+
+    /// Swaps two role slots on `side` and locks any occupied slots against vision re-ordering.
+    pub fn swap_slots(&mut self, side: Side, slot_a: usize, slot_b: usize) {
+        if slot_a >= TEAM_SIZE || slot_b >= TEAM_SIZE || slot_a == slot_b {
+            return;
+        }
+        let (pick_a, pick_b) = {
+            let picks = self.side_picks_mut(side);
+            picks.swap(slot_a, slot_b);
+            (
+                picks[slot_a].map(|p| DraftPick {
+                    hero_id: p.hero_id,
+                    role: Role::ALL.get(slot_a).copied(),
+                }),
+                picks[slot_b].map(|p| DraftPick {
+                    hero_id: p.hero_id,
+                    role: Role::ALL.get(slot_b).copied(),
+                }),
+            )
+        };
+        let picks = self.side_picks_mut(side);
+        picks[slot_a] = pick_a;
+        picks[slot_b] = pick_b;
+        let locked = self.side_locked_mut(side);
+        locked[slot_a] = pick_a.is_some();
+        locked[slot_b] = pick_b.is_some();
+        self.sync_local_player_target_role();
+    }
+
+    fn remove_hero_from_opposite_and_bans(&mut self, side: Side, hero_id: HeroId) {
+        let opposite = match side {
+            Side::Allies => Side::Enemies,
+            Side::Enemies => Side::Allies,
+        };
+        for idx in 0..TEAM_SIZE {
+            if self.side_picks(opposite)[idx].map(|p| p.hero_id) == Some(hero_id) {
+                self.side_picks_mut(opposite)[idx] = None;
+                self.side_locked_mut(opposite)[idx] = false;
+            }
+        }
+        for b in &mut self.draft.bans {
+            if *b == Some(hero_id) {
+                *b = None;
+            }
+        }
+    }
+
+    /// Manually assigns `hero_id` to `(side, slot)` and locks it; swaps if already on the same side.
+    pub fn set_slot_manual(&mut self, side: Side, slot: usize, hero_id: HeroId) {
+        if slot >= TEAM_SIZE {
+            return;
+        }
+        self.manually_dismissed.retain(|&id| id != hero_id);
+        if let Some(existing_slot) = self
+            .side_picks(side)
+            .iter()
+            .position(|p| p.map(|d| d.hero_id) == Some(hero_id))
+        {
+            if existing_slot == slot {
+                self.side_locked_mut(side)[slot] = true;
+            } else {
+                self.swap_slots(side, existing_slot, slot);
+            }
+            return;
+        }
+
+        self.remove_hero_from_opposite_and_bans(side, hero_id);
+
+        let pick = Some(DraftPick {
+            hero_id,
+            role: Role::ALL.get(slot).copied(),
+        });
+        self.side_picks_mut(side)[slot] = pick;
+        self.side_locked_mut(side)[slot] = true;
+        self.sync_local_player_target_role();
+    }
+
+    /// Clears `(side, slot)`, unlocks the slot, and suppresses vision re-adding that hero until reset.
+    pub fn clear_slot_manual(&mut self, side: Side, slot: usize) {
+        if slot >= TEAM_SIZE {
+            return;
+        }
+        let old = self.side_picks_mut(side)[slot].take();
+        self.side_locked_mut(side)[slot] = false;
+        if let Some(pick) = old {
+            if !self.manually_dismissed.contains(&pick.hero_id) {
+                self.manually_dismissed.push(pick.hero_id);
+            }
+            if side == Side::Allies && self.local_player_hero == Some(pick.hero_id) {
+                self.local_player_hero = None;
+            }
+        }
+    }
+
     pub fn apply_event(&mut self, event: DraftEvent) {
         match event {
             DraftEvent::GameRulesStateChanged {
@@ -190,13 +437,21 @@ impl AppSession {
             }
             DraftEvent::LocalPlayerHeroDetected { hero_slug } => {
                 if let Some(id) = self.find_hero(&hero_slug) {
-                    if !self.draft.allies.iter().flatten().any(|p| p.hero_id == id) {
-                        let role = self
-                            .matrix
-                            .hero(id)
-                            .and_then(|h| h.primary_roles.first().copied())
-                            .or(Some(self.draft.target_role));
-                        let _ = self.draft.set_ally(0, Some(DraftPick { hero_id: id, role }));
+                    self.local_player_hero = Some(id);
+                    self.apply_side_pick(Side::Allies, 0, id, None);
+                    self.sync_local_player_target_role();
+                }
+            }
+            DraftEvent::PlayerHeroMapped {
+                steam32,
+                faction,
+                hero_slug,
+            } => {
+                if self.cache_mgr.player_account_id == Some(steam32) {
+                    self.draft.ally_faction = faction;
+                    if let Some(id) = self.find_hero(&hero_slug) {
+                        self.local_player_hero = Some(id);
+                        self.sync_local_player_target_role();
                     }
                 }
             }
@@ -209,7 +464,7 @@ impl AppSession {
                 self.apply_side_pick(side, slot, hero_id, role);
             }
             DraftEvent::DraftReset => {
-                self.draft.clear();
+                self.reset_draft();
             }
             _ => {}
         }
@@ -218,49 +473,39 @@ impl AppSession {
     fn apply_side_pick(
         &mut self,
         side: Side,
-        slot: usize,
+        _slot: usize,
         hero_id: HeroId,
-        fallback_role: Option<Role>,
+        _fallback_role: Option<Role>,
     ) {
-        if slot >= TEAM_SIZE {
+        if self.manually_dismissed.contains(&hero_id) {
             return;
         }
-        let existing_role = match side {
-            Side::Allies => self.draft.allies[slot],
-            Side::Enemies => self.draft.enemies[slot],
-        }
-        .filter(|p| p.hero_id == hero_id)
-        .and_then(|p| p.role);
-
-        // Relocate cleanly if this hero was previously placed in another slot or side
-        for idx in 0..TEAM_SIZE {
-            if (side != Side::Allies || idx != slot)
-                && self.draft.allies[idx].map(|p| p.hero_id) == Some(hero_id)
-            {
-                let _ = self.draft.set_ally(idx, None);
-            }
-            if (side != Side::Enemies || idx != slot)
-                && self.draft.enemies[idx].map(|p| p.hero_id) == Some(hero_id)
-            {
-                let _ = self.draft.set_enemy(idx, None);
-            }
+        if self
+            .side_picks(side)
+            .iter()
+            .flatten()
+            .any(|p| p.hero_id == hero_id)
+        {
+            return;
         }
 
-        let primary_role = self
-            .matrix
-            .hero(hero_id)
-            .and_then(|h| h.primary_roles.first().copied());
-        let pick = Some(DraftPick {
-            hero_id,
-            role: existing_role.or(primary_role).or(fallback_role),
-        });
-        match side {
-            Side::Allies => {
-                let _ = self.draft.set_ally(slot, pick);
-            }
-            Side::Enemies => {
-                let _ = self.draft.set_enemy(slot, pick);
-            }
+        self.remove_hero_from_opposite_and_bans(side, hero_id);
+
+        let locked = match side {
+            Side::Allies => self.ally_locked_slots,
+            Side::Enemies => self.enemy_locked_slots,
+        };
+        let picks = self.side_picks(side);
+        let empty_slot = (0..TEAM_SIZE)
+            .find(|&idx| !locked[idx] && picks[idx].is_none())
+            .or_else(|| (0..TEAM_SIZE).find(|&idx| picks[idx].is_none()));
+
+        if let Some(dst) = empty_slot {
+            self.side_picks_mut(side)[dst] = Some(DraftPick {
+                hero_id,
+                role: Role::ALL.get(dst).copied(),
+            });
+            self.rebalance_unlocked_side_roles(side);
         }
     }
 
@@ -467,6 +712,36 @@ fn truncate_name(s: &str, max_len: usize) -> String {
     }
 }
 
+fn execute_side_pick_command(
+    session: &mut AppSession,
+    side: Side,
+    parts: &[&str],
+) -> Result<(), String> {
+    let usage = match side {
+        Side::Allies => "Usage: ally <1..5> <hero_name>",
+        Side::Enemies => "Usage: enemy <1..5> <hero_name>",
+    };
+    if parts.len() < 3 {
+        return Err(usage.into());
+    }
+    let slot = parts[1]
+        .parse::<usize>()
+        .map_err(|_| "Slot must be 1..5".to_string())?;
+    if !(1..=5).contains(&slot) {
+        return Err("Slot must be between 1 and 5".into());
+    }
+    let query = parts[2..].join(" ");
+    if query == "none" || query == "-" {
+        session.clear_slot_manual(side, slot - 1);
+    } else {
+        let hero_id = session
+            .find_hero(&query)
+            .ok_or_else(|| format!("Hero not found: '{query}'"))?;
+        session.set_slot_manual(side, slot - 1, hero_id);
+    }
+    Ok(())
+}
+
 pub fn execute_command(session: &mut AppSession, line: &str) -> Result<bool, String> {
     let parts: Vec<&str> = line.split_whitespace().collect();
     let Some(&cmd) = parts.first() else {
@@ -476,7 +751,7 @@ pub fn execute_command(session: &mut AppSession, line: &str) -> Result<bool, Str
     match cmd {
         "q" | "quit" | "exit" => return Ok(false),
         "reset" | "clear" => {
-            session.draft.clear();
+            session.reset_draft();
         }
         "sync" => {
             let _ = session.sync_db(true)?;
@@ -546,69 +821,27 @@ pub fn execute_command(session: &mut AppSession, line: &str) -> Result<bool, Str
                 session.set_account_id(Some(s32), true);
             }
         }
-        "ally" | "a" => {
-            if parts.len() < 3 {
-                return Err("Usage: ally <1..5> <hero_name>".into());
+        "ally" | "a" => execute_side_pick_command(session, Side::Allies, &parts)?,
+        "enemy" | "e" => execute_side_pick_command(session, Side::Enemies, &parts)?,
+        "swap" => {
+            if parts.len() != 4 {
+                return Err("Usage: swap <ally|enemy> <1..5> <1..5>".into());
             }
-            let slot = parts[1]
+            let side = match parts[1].to_ascii_lowercase().as_str() {
+                "ally" | "allies" | "a" => Side::Allies,
+                "enemy" | "enemies" | "e" => Side::Enemies,
+                _ => return Err("Side must be ally or enemy".into()),
+            };
+            let a = parts[2]
                 .parse::<usize>()
                 .map_err(|_| "Slot must be 1..5".to_string())?;
-            if !(1..=5).contains(&slot) {
-                return Err("Slot must be between 1 and 5".into());
-            }
-            let query = parts[2..].join(" ");
-            if query == "none" || query == "-" {
-                session
-                    .draft
-                    .set_ally(slot - 1, None)
-                    .map_err(|e| e.to_string())?;
-            } else {
-                let hero_id = session
-                    .find_hero(&query)
-                    .ok_or_else(|| format!("Hero not found: '{query}'"))?;
-                session
-                    .draft
-                    .set_ally(
-                        slot - 1,
-                        Some(DraftPick {
-                            hero_id,
-                            role: Role::ALL.get(slot - 1).copied(),
-                        }),
-                    )
-                    .map_err(|e| e.to_string())?;
-            }
-        }
-        "enemy" | "e" => {
-            if parts.len() < 3 {
-                return Err("Usage: enemy <1..5> <hero_name>".into());
-            }
-            let slot = parts[1]
+            let b = parts[3]
                 .parse::<usize>()
                 .map_err(|_| "Slot must be 1..5".to_string())?;
-            if !(1..=5).contains(&slot) {
+            if !(1..=5).contains(&a) || !(1..=5).contains(&b) {
                 return Err("Slot must be between 1 and 5".into());
             }
-            let query = parts[2..].join(" ");
-            if query == "none" || query == "-" {
-                session
-                    .draft
-                    .set_enemy(slot - 1, None)
-                    .map_err(|e| e.to_string())?;
-            } else {
-                let hero_id = session
-                    .find_hero(&query)
-                    .ok_or_else(|| format!("Hero not found: '{query}'"))?;
-                session
-                    .draft
-                    .set_enemy(
-                        slot - 1,
-                        Some(DraftPick {
-                            hero_id,
-                            role: Role::ALL.get(slot - 1).copied(),
-                        }),
-                    )
-                    .map_err(|e| e.to_string())?;
-            }
+            session.swap_slots(side, a - 1, b - 1);
         }
         "ban" | "b" => {
             if parts.len() < 2 {
@@ -625,7 +858,7 @@ pub fn execute_command(session: &mut AppSession, line: &str) -> Result<bool, Str
         }
         _ => {
             return Err(
-                "Commands: ally <1..5> <hero> | enemy <1..5> <hero> | ban <hero> | role <1..5> | bracket <medal> | faction <radiant|dire> | account <id|auto|none> | sync | reset | quit"
+                "Commands: ally <1..5> <hero> | enemy <1..5> <hero> | swap <ally|enemy> <1..5> <1..5> | ban <hero> | role <1..5> | bracket <medal> | faction <radiant|dire> | account <id|auto|none> | sync | reset | quit"
                     .into(),
             );
         }
@@ -856,33 +1089,103 @@ mod tests {
     }
 
     #[test]
-    fn pick_detected_moves_hero_across_slots_without_duplicate_error_and_uses_primary_role() {
-        use truesight_core::domain::{HeroId, Role, Side};
+    fn pick_detected_assigns_roles_by_affinity_preserves_user_locks_and_tracks_local_hero() {
+        use truesight_core::domain::{Faction, HeroId, Role, Side};
         use truesight_core::ports::DraftEvent;
 
         let mut session = AppSession::new().unwrap();
+        session.set_account_id(Some(111_222_333), true);
+
+        // Live GSI local player Night Stalker (60) auto-places into Pos 3 Offlane and sets target_role
         session.apply_event(DraftEvent::LocalPlayerHeroDetected {
             hero_slug: "npc_dota_hero_night_stalker".into(),
         });
-        assert_eq!(session.draft.allies[0].unwrap().hero_id, HeroId(60));
+        assert_eq!(session.local_player_hero, Some(HeroId(60)));
+        assert_eq!(session.draft.allies[2].unwrap().hero_id, HeroId(60));
+        assert_eq!(session.draft.allies[2].unwrap().role, Some(Role::Offlane));
+        assert_eq!(session.draft.target_role, Role::Offlane);
 
-        // Top-bar vision emits Spectre at slot 0 and Night Stalker at slot 1
+        // Feeding Allied replay top-bar lobby order assigns optimal P1..P5 roles rather than lobby slot indices
+        for (slot, hid) in [(0, 67_u16), (1, 60), (2, 27), (3, 64), (4, 128)] {
+            session.apply_event(DraftEvent::PickDetected {
+                side: Side::Allies,
+                slot,
+                hero_id: HeroId(hid),
+                role: Role::ALL.get(slot).copied(),
+            });
+        }
+        assert_eq!(session.draft.allies[0].unwrap().hero_id, HeroId(67)); // Spectre -> P1 Carry
+        assert_eq!(session.draft.allies[1].unwrap().hero_id, HeroId(128)); // Snapfire -> P2 Mid
+        assert_eq!(session.draft.allies[2].unwrap().hero_id, HeroId(60)); // Night Stalker -> P3 Offlane
+        assert_eq!(session.draft.allies[3].unwrap().hero_id, HeroId(27)); // Shadow Shaman -> P4
+        assert_eq!(session.draft.allies[4].unwrap().hero_id, HeroId(64)); // Jakiro -> P5
+        assert_eq!(session.draft.target_role, Role::Offlane);
+
+        // Enemy top-bar picks: Slark=93, Viper=47, Tusk=100, Beastmaster=38, Clinkz=56
+        for (slot, hid) in [(0, 93_u16), (1, 47), (2, 100), (3, 38), (4, 56)] {
+            session.apply_event(DraftEvent::PickDetected {
+                side: Side::Enemies,
+                slot,
+                hero_id: HeroId(hid),
+                role: Role::ALL.get(slot).copied(),
+            });
+        }
+        assert_eq!(session.draft.enemies[0].unwrap().hero_id, HeroId(93));
+        let viper_slot = session
+            .draft
+            .enemies
+            .iter()
+            .position(|p| p.map(|d| d.hero_id) == Some(HeroId(47)))
+            .expect("Viper placed on Enemies");
+        assert!(viper_slot == 1 || viper_slot == 2);
+
+        // User manually swaps Viper to P5 (slot 4) and Beastmaster to P3 (slot 2)
+        session.swap_slots(Side::Enemies, viper_slot, 4);
+        let bm_slot = session
+            .draft
+            .enemies
+            .iter()
+            .position(|p| p.map(|d| d.hero_id) == Some(HeroId(38)))
+            .expect("Beastmaster placed on Enemies");
+        if bm_slot != 2 {
+            session.swap_slots(Side::Enemies, bm_slot, 2);
+        }
+        assert!(session.enemy_locked_slots[4]);
+        assert!(session.enemy_locked_slots[2]);
+        assert_eq!(session.draft.enemies[4].unwrap().hero_id, HeroId(47));
+        assert_eq!(session.draft.enemies[4].unwrap().role, Some(Role::HardSupport));
+        assert_eq!(session.draft.enemies[2].unwrap().hero_id, HeroId(38));
+        assert_eq!(session.draft.enemies[2].unwrap().role, Some(Role::Offlane));
+
+        // Subsequent vision PickDetected frames must respect locked slots
+        session.apply_event(DraftEvent::PickDetected {
+            side: Side::Enemies,
+            slot: 1,
+            hero_id: HeroId(47),
+            role: Some(Role::Mid),
+        });
+        assert_eq!(session.draft.enemies[4].unwrap().hero_id, HeroId(47));
+        assert_eq!(session.draft.enemies[2].unwrap().hero_id, HeroId(38));
+
+        // Clearing Spectre (67) removes it and suppresses re-adding from subsequent vision polls until reset
+        session.clear_slot_manual(Side::Allies, 0);
+        assert!(session.draft.allies[0].is_none());
         session.apply_event(DraftEvent::PickDetected {
             side: Side::Allies,
             slot: 0,
             hero_id: HeroId(67),
             role: Some(Role::Carry),
         });
-        session.apply_event(DraftEvent::PickDetected {
-            side: Side::Allies,
-            slot: 1,
-            hero_id: HeroId(60),
-            role: Some(Role::Mid),
-        });
+        assert!(session.draft.allies[0].is_none());
 
-        assert_eq!(session.draft.allies[0].unwrap().hero_id, HeroId(67));
-        assert_eq!(session.draft.allies[0].unwrap().role, Some(Role::Carry));
-        assert_eq!(session.draft.allies[1].unwrap().hero_id, HeroId(60));
-        assert_eq!(session.draft.allies[1].unwrap().role, Some(Role::Offlane));
+        // Replay PlayerHeroMapped matches linked Steam32 ID to faction, local hero, and role
+        session.apply_event(DraftEvent::PlayerHeroMapped {
+            steam32: 111_222_333,
+            faction: Faction::Dire,
+            hero_slug: "npc_dota_hero_night_stalker".into(),
+        });
+        assert_eq!(session.draft.ally_faction, Faction::Dire);
+        assert_eq!(session.local_player_hero, Some(HeroId(60)));
+        assert_eq!(session.draft.target_role, Role::Offlane);
     }
 }
