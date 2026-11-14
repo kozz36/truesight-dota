@@ -5,11 +5,13 @@ mod session;
 #[cfg(test)]
 mod tests;
 
-pub use cli::{execute_command, parse_account_id_arg, render_dashboard_string};
+pub use cli::{
+    CliInputEvent, execute_command, parse_account_id_arg, render_dashboard_string, run_cli_loop,
+    spawn_input_reader,
+};
 pub use session::AppSession;
 
-use cli::{ANSI_BOLD, ANSI_RED, ANSI_RESET};
-use std::io::{self, BufRead, Write};
+use std::io::{self, Write};
 use truesight_adapters::gsi::BoundedGsiListener;
 use truesight_adapters::sync::LocalCacheManager;
 use truesight_adapters::vision::BoundedVisionWorker;
@@ -93,34 +95,15 @@ fn main() {
         }
     }
 
-    let stdin = io::stdin();
+    let input_rx = spawn_input_reader(io::stdin());
     let mut stdout = io::stdout();
-
-    loop {
-        session.poll_live_sources(gsi_listener.as_mut(), vision_worker.as_mut());
-
-        if write!(
-            stdout,
-            "\x1b[2J\x1b[H{}\n{ANSI_BOLD}truesight>{ANSI_RESET} (ally <1..5> <hero> | enemy <1..5> <hero> | role <1..5> | reset | quit): ",
-            render_dashboard_string(&session, true)
-        )
-        .is_err()
-            || stdout.flush().is_err()
-        {
-            break;
-        }
-
-        let mut line = String::new();
-        match stdin.lock().read_line(&mut line) {
-            Ok(0) => break,
-            Ok(_) => match execute_command(&mut session, &line) {
-                Ok(true) => {}
-                Ok(false) => break,
-                Err(msg) => {
-                    let _ = writeln!(stdout, "{ANSI_RED}Error: {msg}{ANSI_RESET}");
-                }
-            },
-            Err(_) => break,
-        }
-    }
+    let _ = run_cli_loop(
+        &mut session,
+        gsi_listener.as_mut(),
+        vision_worker.as_mut(),
+        &input_rx,
+        &mut stdout,
+        true,
+        std::time::Duration::from_millis(100),
+    );
 }

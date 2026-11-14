@@ -1,5 +1,11 @@
 use crate::session::AppSession;
+use std::io::{self, Read, Write};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::thread;
+use std::time::Duration;
+use truesight_adapters::gsi::BoundedGsiListener;
 use truesight_adapters::sync::normalize_steam32_id;
+use truesight_adapters::vision::BoundedVisionWorker;
 use truesight_core::domain::{Bracket, Faction, Role, Side, TEAM_SIZE};
 
 pub(crate) const ANSI_RESET: &str = "\x1b[0m";
@@ -369,4 +375,184 @@ pub fn parse_account_id_arg(args: &[String]) -> Result<Option<Option<u64>>, Stri
         i += 1;
     }
     Ok(None)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CliInputEvent {
+    Chunk(String),
+    Eof,
+}
+
+pub fn spawn_input_reader<R: Read + Send + 'static>(mut reader: R) -> Receiver<CliInputEvent> {
+    let (tx, rx) = mpsc::channel();
+    let spawn_res = thread::Builder::new()
+        .name("truesight-cli-input".into())
+        .spawn(move || {
+            let mut buf = [0u8; 256];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => {
+                        let _ = tx.send(CliInputEvent::Eof);
+                        break;
+                    }
+                    Ok(n) => {
+                        let text = String::from_utf8_lossy(&buf[..n]).into_owned();
+                        if tx.send(CliInputEvent::Chunk(text)).is_err() {
+                            break;
+                        }
+                    }
+                    Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(_) => {
+                        let _ = tx.send(CliInputEvent::Eof);
+                        break;
+                    }
+                }
+            }
+        });
+    if spawn_res.is_err() {
+        // Channel will report Disconnected cleanly if thread creation fails.
+    }
+    rx
+}
+
+fn render_cli_frame<W: Write>(
+    out: &mut W,
+    dashboard: &str,
+    color: bool,
+    last_error: Option<&str>,
+    partial_line: &str,
+) -> io::Result<()> {
+    let (bold, red, reset) = if color {
+        (ANSI_BOLD, ANSI_RED, ANSI_RESET)
+    } else {
+        ("", "", "")
+    };
+    write!(out, "\x1b[2J\x1b[H{dashboard}\n")?;
+    if let Some(err) = last_error {
+        writeln!(out, "{red}Error: {err}{reset}")?;
+    }
+    write!(
+        out,
+        "{bold}truesight>{reset} (ally <1..5> <hero> | enemy <1..5> <hero> | role <1..5> | reset | quit): {partial_line}"
+    )?;
+    out.flush()
+}
+
+fn process_cli_chunk(
+    session: &mut AppSession,
+    chunk: &str,
+    partial_line: &mut String,
+    last_error: &mut Option<String>,
+    last_dashboard: &mut String,
+    color: bool,
+    dirty: &mut bool,
+) -> bool {
+    for ch in chunk.chars() {
+        match ch {
+            '\r' => {}
+            '\x08' | '\x7f' => {
+                if partial_line.pop().is_some() {
+                    *dirty = true;
+                }
+            }
+            '\n' => {
+                let cmd = std::mem::take(partial_line);
+                *last_error = None;
+                match execute_command(session, &cmd) {
+                    Ok(true) => {
+                        *last_dashboard = render_dashboard_string(session, color);
+                        *dirty = true;
+                    }
+                    Ok(false) => return false,
+                    Err(msg) => {
+                        *last_error = Some(msg);
+                        *dirty = true;
+                    }
+                }
+            }
+            _ => {
+                partial_line.push(ch);
+                *dirty = true;
+            }
+        }
+    }
+    true
+}
+
+pub fn run_cli_loop<W: Write>(
+    session: &mut AppSession,
+    mut gsi_listener: Option<&mut BoundedGsiListener>,
+    mut vision_worker: Option<&mut BoundedVisionWorker>,
+    input_rx: &Receiver<CliInputEvent>,
+    out: &mut W,
+    color: bool,
+    poll_interval: Duration,
+) -> io::Result<()> {
+    let mut partial_line = String::new();
+    let mut last_error: Option<String> = None;
+    let mut last_dashboard = render_dashboard_string(session, color);
+    let mut dirty = true;
+
+    loop {
+        if session.poll_live_sources(gsi_listener.as_deref_mut(), vision_worker.as_deref_mut()) {
+            let rendered = render_dashboard_string(session, color);
+            if rendered != last_dashboard {
+                last_dashboard = rendered;
+                dirty = true;
+            }
+        }
+
+        if dirty {
+            match render_cli_frame(
+                out,
+                &last_dashboard,
+                color,
+                last_error.as_deref(),
+                &partial_line,
+            ) {
+                Ok(()) => dirty = false,
+                Err(e) if e.kind() == io::ErrorKind::BrokenPipe => return Ok(()),
+                Err(e) => return Err(e),
+            }
+        }
+
+        match input_rx.recv_timeout(poll_interval) {
+            Ok(ev) => {
+                let mut events = vec![ev];
+                while let Ok(more) = input_rx.try_recv() {
+                    events.push(more);
+                }
+                for item in events {
+                    match item {
+                        CliInputEvent::Chunk(chunk) => {
+                            if !process_cli_chunk(
+                                session,
+                                &chunk,
+                                &mut partial_line,
+                                &mut last_error,
+                                &mut last_dashboard,
+                                color,
+                                &mut dirty,
+                            ) {
+                                return Ok(());
+                            }
+                        }
+                        CliInputEvent::Eof => {
+                            if !partial_line.trim().is_empty() {
+                                let _ = execute_command(session, &partial_line);
+                            }
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                if !partial_line.trim().is_empty() {
+                    let _ = execute_command(session, &partial_line);
+                }
+                return Ok(());
+            }
+        }
+    }
 }

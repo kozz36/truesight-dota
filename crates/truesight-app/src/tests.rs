@@ -1,4 +1,7 @@
-use super::{AppSession, execute_command, parse_account_id_arg, render_dashboard_string};
+use super::{
+    AppSession, CliInputEvent, execute_command, parse_account_id_arg, render_dashboard_string,
+    run_cli_loop, spawn_input_reader,
+};
 
 #[test]
 fn interactive_commands_update_5v5_table_and_recommendations() {
@@ -427,4 +430,131 @@ fn draft_reset_and_new_match_transition_reset_vision_worker_without_mid_draft_wi
     });
     assert_eq!(session.draft.allies.iter().flatten().count(), 0);
     assert!(!session.ally_locked_slots[0]);
+}
+
+#[derive(Clone, Default)]
+struct SharedBuffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl SharedBuffer {
+    fn as_string(&self) -> String {
+        let bytes = self.0.lock().unwrap().clone();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+}
+
+impl std::io::Write for SharedBuffer {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn cli_loop_polls_live_gsi_while_awaiting_input_and_preserves_partial_command() {
+    let mut cursor_session = AppSession::new().unwrap();
+    let cursor_rx = spawn_input_reader(std::io::Cursor::new(b"role 2\nquit\n".to_vec()));
+    let mut cursor_out = SharedBuffer::default();
+    run_cli_loop(
+        &mut cursor_session,
+        None,
+        None,
+        &cursor_rx,
+        &mut cursor_out,
+        false,
+        std::time::Duration::from_millis(10),
+    )
+    .unwrap();
+    assert_eq!(
+        cursor_session.draft.target_role,
+        truesight_core::domain::Role::Mid
+    );
+
+    let mut session = AppSession::new().unwrap();
+    let medusa_id = session.find_hero("medusa").unwrap().0;
+    let antimage_id = session.find_hero("antimage").unwrap();
+    let mut listener = truesight_adapters::gsi::BoundedGsiListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr();
+    let (tx, rx) = std::sync::mpsc::sync_channel::<CliInputEvent>(16);
+    let mut out = SharedBuffer::default();
+    let out_reader = out.clone();
+
+    std::thread::scope(|scope| {
+        let handle = scope.spawn(move || {
+            run_cli_loop(
+                &mut session,
+                Some(&mut listener),
+                None,
+                &rx,
+                &mut out,
+                false,
+                std::time::Duration::from_millis(15),
+            )
+            .unwrap();
+            session
+        });
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !out_reader.as_string().contains("TRUESIGHT-DOTA") {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Timed out waiting for initial CLI render"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        tx.send(CliInputEvent::Chunk("ally 1 ".into())).unwrap();
+
+        let body =
+            format!(r#"{{"truesight_pick":{{"side":"enemy","slot":0,"hero_id":{medusa_id}}}}}"#);
+        let req = format!(
+            "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let mut stream = std::net::TcpStream::connect(addr).unwrap();
+        std::io::Write::write_all(&mut stream, req.as_bytes()).unwrap();
+        std::io::Write::flush(&mut stream).unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let snapshot = out_reader.as_string();
+            let last_frame = snapshot.rsplit("\x1b[2J\x1b[H").next().unwrap_or("");
+            if last_frame.contains("Medusa") && last_frame.ends_with(": ally 1 ") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Timed out waiting for live GSI frame preserving partial prompt; latest frame:\n{last_frame}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        tx.send(CliInputEvent::Chunk("antimage\nquit\n".into()))
+            .unwrap();
+        let final_session = handle.join().unwrap();
+        assert_eq!(
+            final_session
+                .draft
+                .allies
+                .iter()
+                .flatten()
+                .map(|p| p.hero_id)
+                .collect::<Vec<_>>(),
+            vec![antimage_id]
+        );
+        assert_eq!(
+            final_session
+                .draft
+                .enemies
+                .iter()
+                .flatten()
+                .map(|p| p.hero_id)
+                .collect::<Vec<_>>(),
+            vec![truesight_core::domain::HeroId(medusa_id)]
+        );
+    });
 }

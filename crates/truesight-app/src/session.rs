@@ -185,14 +185,14 @@ impl AppSession {
         })
     }
 
-    pub fn poll_sync_completion(&mut self) {
+    pub fn poll_sync_completion(&mut self) -> bool {
         let outcome = match self.sync_rx.as_ref().map(|rx| rx.try_recv()) {
             Some(Ok(done)) => Some(Ok(done)),
             Some(Err(TryRecvError::Disconnected)) => Some(Err(())),
             Some(Err(TryRecvError::Empty)) | None => None,
         };
         let Some(outcome) = outcome else {
-            return;
+            return false;
         };
 
         self.sync_in_flight = false;
@@ -203,13 +203,13 @@ impl AppSession {
                 "{} · sync failed",
                 self.cache_mgr.freshness_badge(LocalCacheManager::now_unix())
             );
-            return;
+            return true;
         };
 
         if done.generation != self.sync_generation
             || done.account_id != self.cache_mgr.player_account_id
         {
-            return;
+            return true;
         }
 
         match done.result {
@@ -244,6 +244,7 @@ impl AppSession {
                 self.last_sync_notice = Some(format!("Sync notice: {e} (using last valid model)"));
             }
         }
+        true
     }
 
     pub fn sync_db(&mut self, force: bool) -> Result<String, String> {
@@ -642,12 +643,13 @@ impl AppSession {
         &mut self,
         gsi_listener: Option<&mut BoundedGsiListener>,
         vision_worker: Option<&mut BoundedVisionWorker>,
-    ) {
-        self.poll_sync_completion();
+    ) -> bool {
+        let mut changed = self.poll_sync_completion();
         if let Some(listener) = gsi_listener {
             if let Ok(events) = listener.poll_events() {
                 for ev in events {
                     self.apply_event(ev);
+                    changed = true;
                 }
             }
         }
@@ -655,14 +657,17 @@ impl AppSession {
             if self.vision_reset_pending {
                 worker.reset();
                 self.vision_reset_pending = false;
+                changed = true;
             }
             worker.set_ally_faction(self.draft.ally_faction);
             if let Ok(events) = worker.poll_events() {
                 for ev in events {
                     self.apply_event(ev);
+                    changed = true;
                 }
             }
         }
+        changed
     }
 
     pub fn evaluate(&self) -> (DraftAnalysis5v5, Vec<HeroRecommendation>) {
