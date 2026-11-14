@@ -5,13 +5,12 @@ use eframe::egui::{
 };
 use std::collections::HashMap;
 use truesight_adapters::gsi::BoundedGsiListener;
+use truesight_adapters::vision::parse_hero_atlas;
 use truesight_core::domain::{
     AttackType, Bracket, DraftPick, Faction, HeroId, Role, Side, TEAM_SIZE,
 };
 use truesight_core::math::{DraftAnalysis5v5, MatchupMatrix};
 use truesight_core::ports::DraftEventSource;
-
-const HERO_ATLAS_BYTES: &[u8] = include_bytes!("../assets/hero_atlas.bin");
 
 // =============================================================================
 // Gem of Truesight Color System (OKLCH tokens mapped to sRGB)
@@ -292,63 +291,8 @@ pub fn compute_comp_diagnostic(
 }
 
 // =============================================================================
-// Embedded Hero Atlas Decoder & Texture Cache
+// Texture Cache (Backed by Embedded Adapter Hero Atlas)
 // =============================================================================
-
-pub struct DecodedHeroAtlas {
-    pub hero_width: usize,
-    pub hero_height: usize,
-    pub gem_width: usize,
-    pub gem_height: usize,
-    pub gem_rgb: Vec<u8>,
-    pub heroes: HashMap<HeroId, Vec<u8>>,
-}
-
-pub fn parse_hero_atlas() -> Option<DecodedHeroAtlas> {
-    if HERO_ATLAS_BYTES.len() < 14 || &HERO_ATLAS_BYTES[0..4] != b"TSHA" {
-        return None;
-    }
-    let count = u16::from_le_bytes([HERO_ATLAS_BYTES[4], HERO_ATLAS_BYTES[5]]) as usize;
-    let hero_width = u16::from_le_bytes([HERO_ATLAS_BYTES[6], HERO_ATLAS_BYTES[7]]) as usize;
-    let hero_height = u16::from_le_bytes([HERO_ATLAS_BYTES[8], HERO_ATLAS_BYTES[9]]) as usize;
-    let gem_width = u16::from_le_bytes([HERO_ATLAS_BYTES[10], HERO_ATLAS_BYTES[11]]) as usize;
-    let gem_height = u16::from_le_bytes([HERO_ATLAS_BYTES[12], HERO_ATLAS_BYTES[13]]) as usize;
-
-    let gem_len = gem_width.checked_mul(gem_height)?.checked_mul(3)?;
-    let mut offset = 14usize;
-    let gem_end = offset.checked_add(gem_len)?;
-    if gem_end > HERO_ATLAS_BYTES.len() {
-        return None;
-    }
-    let gem_rgb = HERO_ATLAS_BYTES[offset..gem_end].to_vec();
-    offset = gem_end;
-
-    let hero_len = hero_width.checked_mul(hero_height)?.checked_mul(3)?;
-    let mut heroes = HashMap::with_capacity(count);
-    for _ in 0..count {
-        let id_end = offset.checked_add(2)?;
-        if id_end > HERO_ATLAS_BYTES.len() {
-            return None;
-        }
-        let hid = u16::from_le_bytes([HERO_ATLAS_BYTES[offset], HERO_ATLAS_BYTES[offset + 1]]);
-        offset = id_end;
-        let frame_end = offset.checked_add(hero_len)?;
-        if frame_end > HERO_ATLAS_BYTES.len() {
-            return None;
-        }
-        heroes.insert(HeroId(hid), HERO_ATLAS_BYTES[offset..frame_end].to_vec());
-        offset = frame_end;
-    }
-
-    Some(DecodedHeroAtlas {
-        hero_width,
-        hero_height,
-        gem_width,
-        gem_height,
-        gem_rgb,
-        heroes,
-    })
-}
 
 struct HeroTextureSet {
     color: TextureHandle,

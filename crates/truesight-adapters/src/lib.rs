@@ -3,6 +3,7 @@ pub mod meta_repo;
 pub mod snapshot_data;
 pub mod snapshot_pairs;
 pub mod sync;
+pub mod vision;
 
 #[cfg(test)]
 mod tests {
@@ -461,5 +462,165 @@ mod tests {
             (eval_rad.ally_win_probability - eval_dire.ally_win_probability).abs() < 1e-6,
             "Changing ally_faction must preserve strict 50-50 faction-neutral win probability"
         );
+    }
+
+    #[test]
+    fn vision_capture_adapter_recognizes_topbar_10_slots_and_maps_radiant_dire_sides() {
+        use crate::vision::{
+            HeroVisionCatalog, RgbFrame, ScreenFrameSource, VisionCaptureAdapter,
+            compute_topbar_slot_rects, parse_hero_atlas,
+        };
+        use truesight_core::domain::Faction;
+
+        struct MockFrameSource {
+            frames: std::collections::VecDeque<Option<RgbFrame>>,
+        }
+        impl ScreenFrameSource for MockFrameSource {
+            fn capture_frame(&mut self) -> Result<Option<RgbFrame>, truesight_core::ports::PortError> {
+                Ok(self.frames.pop_front().flatten())
+            }
+        }
+
+        fn paint_hero_into_frame(
+            frame: &mut [u8],
+            frame_w: usize,
+            rect: crate::vision::TopBarSlotRect,
+            hero_rgb: &[u8],
+            src_w: usize,
+            src_h: usize,
+        ) {
+            for dy in 0..rect.height {
+                let sy = (dy * src_h) / rect.height;
+                for dx in 0..rect.width {
+                    let sx = (dx * src_w) / rect.width;
+                    let src_idx = (sy * src_w + sx) * 3;
+                    let dst_idx = ((rect.y + dy) * frame_w + (rect.x + dx)) * 3;
+                    frame[dst_idx..dst_idx + 3].copy_from_slice(&hero_rgb[src_idx..src_idx + 3]);
+                }
+            }
+        }
+
+        let atlas = parse_hero_atlas().expect("embedded hero atlas must load");
+        let catalog = HeroVisionCatalog::from_embedded().expect("vision catalog must load");
+
+        // Frame 1: 1920x1080 with Radiant slots 0 (Anti-Mage=1), 2 (Magnus=97) and Dire slot 0 (Medusa=94), rest dark
+        let (w1, h1) = (1920usize, 1080usize);
+        let mut rgb1 = vec![0u8; w1 * h1 * 3];
+        let (rad_r1, dire_r1) = compute_topbar_slot_rects(w1, h1);
+        paint_hero_into_frame(
+            &mut rgb1,
+            w1,
+            rad_r1[0],
+            &atlas.heroes[&HeroId(1)],
+            atlas.hero_width,
+            atlas.hero_height,
+        );
+        paint_hero_into_frame(
+            &mut rgb1,
+            w1,
+            rad_r1[2],
+            &atlas.heroes[&HeroId(97)],
+            atlas.hero_width,
+            atlas.hero_height,
+        );
+        paint_hero_into_frame(
+            &mut rgb1,
+            w1,
+            dire_r1[0],
+            &atlas.heroes[&HeroId(94)],
+            atlas.hero_width,
+            atlas.hero_height,
+        );
+
+        // Frame 2: 2560x1440 scaled frame adding Dire slot 1 (Storm Spirit=17) while local player is Dire
+        let (w2, h2) = (2560usize, 1440usize);
+        let mut rgb2 = vec![0u8; w2 * h2 * 3];
+        let (rad_r2, dire_r2) = compute_topbar_slot_rects(w2, h2);
+        paint_hero_into_frame(
+            &mut rgb2,
+            w2,
+            rad_r2[0],
+            &atlas.heroes[&HeroId(1)],
+            atlas.hero_width,
+            atlas.hero_height,
+        );
+        paint_hero_into_frame(
+            &mut rgb2,
+            w2,
+            rad_r2[2],
+            &atlas.heroes[&HeroId(97)],
+            atlas.hero_width,
+            atlas.hero_height,
+        );
+        paint_hero_into_frame(
+            &mut rgb2,
+            w2,
+            dire_r2[0],
+            &atlas.heroes[&HeroId(94)],
+            atlas.hero_width,
+            atlas.hero_height,
+        );
+        paint_hero_into_frame(
+            &mut rgb2,
+            w2,
+            dire_r2[1],
+            &atlas.heroes[&HeroId(17)],
+            atlas.hero_width,
+            atlas.hero_height,
+        );
+
+        let source = MockFrameSource {
+            frames: std::collections::VecDeque::from([
+                Some(RgbFrame {
+                    width: w1,
+                    height: h1,
+                    rgb: rgb1,
+                }),
+                Some(RgbFrame {
+                    width: w2,
+                    height: h2,
+                    rgb: rgb2,
+                }),
+            ]),
+        };
+
+        let mut adapter = VisionCaptureAdapter::new(source, catalog);
+        adapter.set_ally_faction(Faction::Radiant);
+        let evs1 = adapter.poll_events().unwrap();
+        assert_eq!(evs1.len(), 3, "Frame 1 must detect 3 picked heroes and ignore 7 dark slots");
+        assert!(evs1.contains(&DraftEvent::PickDetected {
+            side: Side::Allies,
+            slot: 0,
+            hero_id: HeroId(1),
+            role: Some(Role::Carry),
+        }));
+        assert!(evs1.contains(&DraftEvent::PickDetected {
+            side: Side::Allies,
+            slot: 2,
+            hero_id: HeroId(97),
+            role: Some(Role::Offlane),
+        }));
+        assert!(evs1.contains(&DraftEvent::PickDetected {
+            side: Side::Enemies,
+            slot: 0,
+            hero_id: HeroId(94),
+            role: Some(Role::Carry),
+        }));
+
+        // Switch ally faction to Dire: Dire slots become Side::Allies, Radiant slots become Side::Enemies
+        adapter.set_ally_faction(Faction::Dire);
+        let evs2 = adapter.poll_events().unwrap();
+        assert!(evs2.contains(&DraftEvent::PickDetected {
+            side: Side::Allies,
+            slot: 1,
+            hero_id: HeroId(17),
+            role: Some(Role::Mid),
+        }));
+        assert!(evs2.contains(&DraftEvent::PickDetected {
+            side: Side::Enemies,
+            slot: 0,
+            hero_id: HeroId(1),
+            role: Some(Role::Carry),
+        }));
     }
 }
