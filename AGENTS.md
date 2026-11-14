@@ -4,7 +4,7 @@ This file defines the mandatory implementation, architectural, statistical, and 
 
 ## Quick Path
 
-1. **Load Project Skills First**: Read [`skills/truesight-dota-domain/SKILL.md`](skills/truesight-dota-domain/SKILL.md) and [`skills/rust-architect/SKILL.md`](skills/rust-architect/SKILL.md) before modifying any domain model, probability formula, OpenDota adapter, or UI workflow.
+1. **Load Project Skills First**: Read [`skills/truesight-dota-domain/SKILL.md`](skills/truesight-dota-domain/SKILL.md) and [`.agents/skills/rust-architect/SKILL.md`](.agents/skills/rust-architect/SKILL.md) before modifying any domain model, probability formula, OpenDota adapter, or UI workflow.
 2. **Execute Red-Green-Refactor TDD**: Write a failing deterministic test (`RED`) in the target crate before writing production code (`GREEN`).
 3. **Run Full Verification Suite** (both feature profiles must pass with zero warnings):
    ```bash
@@ -58,4 +58,4 @@ Every change to `truesight-core::math` or `truesight-adapters` MUST preserve the
 | Skill | Trigger & Purpose | Path |
 |-------|-------------------|------|
 | `truesight-dota-domain` | Trigger: `truesight-dota`, Dota 2 5v5 draft math, counter synergy matrix, OpenDota cache sync, Comfort v3. Enforce TrueSight Dota domain and TDD invariants. | [`skills/truesight-dota-domain/SKILL.md`](skills/truesight-dota-domain/SKILL.md) |
-| `rust-architect` | Systems-grade Rust engineering skill (`edition = "2024"`, MSRV `1.85`, `#![forbid(unsafe_code)]`, hexagonal boundaries, CLI/TUI & desktop architecture). | [`skills/rust-architect/SKILL.md`](skills/rust-architect/SKILL.md) |
+| `rust-architect` | Systems-grade Rust engineering skill (`edition = "2024"`, MSRV `1.85`, `#![forbid(unsafe_code)]`, hexagonal boundaries, CLI/TUI & desktop architecture). | [`.agents/skills/rust-architect/SKILL.md`](.agents/skills/rust-architect/SKILL.md) |

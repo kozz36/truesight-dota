@@ -60,7 +60,6 @@ quit                    # Exit session
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — Local build prerequisites, TDD guidelines, privacy rules, and PR verification matrix.
 - [`SECURITY.md`](SECURITY.md) — Security architecture (`#![forbid(unsafe_code)]`, loopback GSI bounds) and vulnerability reporting process.
 - [`skills/truesight-dota-domain/SKILL.md`](skills/truesight-dota-domain/SKILL.md) — Product domain skill and invariant reference for AI agents and contributors.
-- [`skills/rust-architect/SKILL.md`](skills/rust-architect/SKILL.md) — Bundled Rust architecture & systems engineering skill (`edition = "2024"`, MSRV `1.85`, `#![forbid(unsafe_code)]`).
 - [`docs/architecture.md`](docs/architecture.md) — Hexagonal architecture, Engine v2 & Comfort v3 mathematical equations, and GSI / Vision / Account specifications.
 - [`docs/roadmap-and-tasks.md`](docs/roadmap-and-tasks.md) — Formal engineering task plan (`T1`–`T22`), TDD verification gates, and data sync schedule.
 - [`.github/workflows/ci.yml`](.github/workflows/ci.yml), [`.github/workflows/release.yml`](.github/workflows/release.yml), and [`.github/dependabot.yml`](.github/dependabot.yml) — Automated dual-feature CI, `v*` binary release packaging, and weekly dependency updates.
