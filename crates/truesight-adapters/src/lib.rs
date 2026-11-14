@@ -827,4 +827,116 @@ mod tests {
             "STRATZ synergy override must preserve strict counter antisymmetry"
         );
     }
+
+    #[test]
+    fn vision_catalog_matches_pickphase_upper_crop_and_rejects_flat_medal_slots() {
+        use crate::vision::{
+            HeroVisionCatalog, RgbFrame, ScreenFrameSource, VisionCaptureAdapter,
+            compute_ingame_topbar_slot_rects, compute_pickphase_topbar_slot_rects, parse_hero_atlas,
+        };
+        use std::collections::VecDeque;
+
+        struct QueueSource(VecDeque<RgbFrame>);
+        impl ScreenFrameSource for QueueSource {
+            fn capture_frame(&mut self) -> Result<Option<RgbFrame>, truesight_core::ports::PortError> {
+                Ok(self.0.pop_front())
+            }
+        }
+
+        let atlas = parse_hero_atlas().expect("embedded hero atlas must load");
+        let catalog = HeroVisionCatalog::from_embedded().expect("vision catalog must load");
+
+        let frame_w = 2560_usize;
+        let frame_h = 96_usize;
+        let virtual_h = 1440_usize;
+
+        let (rad_pick, dire_pick) = compute_pickphase_topbar_slot_rects(frame_w, virtual_h);
+        let (_rad_game, _dire_game) = compute_ingame_topbar_slot_rects(frame_w, virtual_h);
+
+        let mut pick_rgb = vec![18_u8; frame_w * frame_h * 3];
+
+        // Paint flat gray slots + small silver badge in center columns for R0 and D0
+        for rect in [rad_pick[0], dire_pick[0]] {
+            for py in rect.y..rect.y + rect.height {
+                for px in rect.x..rect.x + rect.width {
+                    let idx = (py * frame_w + px) * 3;
+                    pick_rgb[idx] = 68;
+                    pick_rgb[idx + 1] = 72;
+                    pick_rgb[idx + 2] = 78;
+                }
+            }
+            for py in rect.y + 4..rect.y + 14 {
+                for px in rect.x + rect.width / 2 - 10..rect.x + rect.width / 2 + 10 {
+                    let idx = (py * frame_w + px) * 3;
+                    pick_rgb[idx] = 190;
+                    pick_rgb[idx + 1] = 195;
+                    pick_rgb[idx + 2] = 200;
+                }
+            }
+        }
+
+        let paint_upper = |buf: &mut [u8], rect: crate::vision::TopBarSlotRect, hid: u16| {
+            let hero_rgb = &atlas.heroes[&HeroId(hid)];
+            let src_x0 = 4_usize;
+            let src_w = atlas.hero_width - 8;
+            let src_y0 = 2_usize;
+            let src_h = 22_usize;
+            for dy in 0..rect.height {
+                let sy = src_y0 + (dy * src_h) / rect.height;
+                for dx in 0..rect.width {
+                    let sx = src_x0 + (dx * src_w) / rect.width;
+                    let src_idx = (sy * atlas.hero_width + sx) * 3;
+                    let dst_idx = ((rect.y + dy) * frame_w + (rect.x + dx)) * 3;
+                    buf[dst_idx..dst_idx + 3].copy_from_slice(&hero_rgb[src_idx..src_idx + 3]);
+                }
+            }
+        };
+
+        let expected_rad = [(1, 60_u16), (2, 27), (3, 64), (4, 128)];
+        let expected_dire = [(1, 47_u16), (2, 100), (3, 38), (4, 56)];
+        for &(slot, hid) in &expected_rad {
+            paint_upper(&mut pick_rgb, rad_pick[slot], hid);
+        }
+        for &(slot, hid) in &expected_dire {
+            paint_upper(&mut pick_rgb, dire_pick[slot], hid);
+        }
+
+        let source = QueueSource(VecDeque::from([RgbFrame {
+            width: frame_w,
+            height: frame_h,
+            rgb: pick_rgb,
+        }]));
+        let mut adapter = VisionCaptureAdapter::new(source, catalog);
+        let events = adapter.poll_events().unwrap();
+        assert_eq!(events.len(), 8, "Expected 8 picks and 0 empty medal slots: {events:?}");
+
+        for &(slot, hid) in &expected_rad {
+            assert!(
+                events.iter().any(|ev| matches!(
+                    ev,
+                    DraftEvent::PickDetected {
+                        side: Side::Allies,
+                        slot: s,
+                        hero_id,
+                        ..
+                    } if *s == slot && *hero_id == HeroId(hid)
+                )),
+                "Missing Radiant pick slot {slot} hero {hid} in {events:?}"
+            );
+        }
+        for &(slot, hid) in &expected_dire {
+            assert!(
+                events.iter().any(|ev| matches!(
+                    ev,
+                    DraftEvent::PickDetected {
+                        side: Side::Enemies,
+                        slot: s,
+                        hero_id,
+                        ..
+                    } if *s == slot && *hero_id == HeroId(hid)
+                )),
+                "Missing Dire pick slot {slot} hero {hid} in {events:?}"
+            );
+        }
+    }
 }

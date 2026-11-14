@@ -6,12 +6,11 @@ use eframe::egui::{
 use std::collections::HashMap;
 use truesight_adapters::gsi::BoundedGsiListener;
 use truesight_adapters::sync::{AccountLinkConfig, normalize_steam32_id, save_account_config};
-use truesight_adapters::vision::parse_hero_atlas;
+use truesight_adapters::vision::{BoundedVisionWorker, parse_hero_atlas};
 use truesight_core::domain::{
     AttackType, Bracket, DraftPick, Faction, HeroId, Role, Side, TEAM_SIZE,
 };
 use truesight_core::math::{DraftAnalysis5v5, MatchupMatrix};
-use truesight_core::ports::DraftEventSource;
 
 // =============================================================================
 // Gem of Truesight Color System (OKLCH tokens mapped to sRGB)
@@ -696,6 +695,7 @@ fn paint_trend_badge(ui: &mut egui::Ui, trend_pct: f32) {
 pub struct TrueSightGuiApp {
     session: AppSession,
     gsi_listener: Option<BoundedGsiListener>,
+    vision_worker: Option<BoundedVisionWorker>,
     textures: GuiTextureCache,
     style_configured: bool,
     matrix_tab: MatrixTab,
@@ -709,7 +709,11 @@ pub struct TrueSightGuiApp {
 }
 
 impl TrueSightGuiApp {
-    pub fn new(session: AppSession, gsi_listener: Option<BoundedGsiListener>) -> Self {
+    pub fn new(
+        session: AppSession,
+        gsi_listener: Option<BoundedGsiListener>,
+        vision_worker: Option<BoundedVisionWorker>,
+    ) -> Self {
         let account_input = session
             .cache_mgr
             .player_account_id
@@ -718,6 +722,7 @@ impl TrueSightGuiApp {
         Self {
             session,
             gsi_listener,
+            vision_worker,
             textures: GuiTextureCache::default(),
             style_configured: false,
             matrix_tab: MatrixTab::Counter,
@@ -2716,13 +2721,8 @@ impl TrueSightGuiApp {
         self.configure_visuals(ctx);
         self.textures.ensure_loaded(ctx);
 
-        if let Some(ref mut listener) = self.gsi_listener {
-            if let Ok(events) = listener.poll_events() {
-                for ev in events {
-                    self.session.apply_event(ev);
-                }
-            }
-        }
+        self.session
+            .poll_live_sources(self.gsi_listener.as_mut(), self.vision_worker.as_mut());
 
         let (analysis, _) = self.session.evaluate();
         let mut rects = LayoutRects {
@@ -2869,7 +2869,11 @@ impl eframe::App for TrueSightGuiApp {
     }
 }
 
-pub fn run_gui(session: AppSession, gsi_listener: Option<BoundedGsiListener>) -> Result<(), String> {
+pub fn run_gui(
+    session: AppSession,
+    gsi_listener: Option<BoundedGsiListener>,
+    vision_worker: Option<BoundedVisionWorker>,
+) -> Result<(), String> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1468.0, 960.0])
@@ -2879,7 +2883,13 @@ pub fn run_gui(session: AppSession, gsi_listener: Option<BoundedGsiListener>) ->
     eframe::run_native(
         "TrueSight Dota",
         options,
-        Box::new(move |_cc| Ok(Box::new(TrueSightGuiApp::new(session, gsi_listener)))),
+        Box::new(move |_cc| {
+            Ok(Box::new(TrueSightGuiApp::new(
+                session,
+                gsi_listener,
+                vision_worker,
+            )))
+        }),
     )
     .map_err(|e| e.to_string())
 }
@@ -2976,7 +2986,7 @@ mod tests {
         assert!(execute_command(&mut session, "enemy 5 witch doctor").unwrap());
         session.draft.target_role = Role::Mid;
 
-        let mut app = TrueSightGuiApp::new(session, None);
+        let mut app = TrueSightGuiApp::new(session, None, None);
         app.picker_target = Some(PickerTarget::Slot(Side::Allies, 1));
 
         let ctx = egui::Context::default();

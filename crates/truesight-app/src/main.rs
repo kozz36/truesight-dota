@@ -4,6 +4,7 @@ mod gui;
 use std::io::{self, BufRead, Write};
 use truesight_adapters::gsi::BoundedGsiListener;
 use truesight_adapters::sync::{LocalCacheManager, normalize_steam32_id};
+use truesight_adapters::vision::BoundedVisionWorker;
 use truesight_core::domain::{Bracket, DraftPick, DraftState, Faction, HeroId, Role, Side, TEAM_SIZE};
 use truesight_core::math::{
     DraftAnalysis5v5, HeroRecommendation, MatchupMatrix, ModelWeights, evaluate_draft_5v5,
@@ -136,7 +137,11 @@ impl AppSession {
     }
 
     pub fn find_hero(&self, query: &str) -> Option<HeroId> {
-        let q = query.trim().to_ascii_lowercase();
+        let q_raw = query.trim().to_ascii_lowercase();
+        let q = q_raw
+            .strip_prefix("npc_dota_hero_")
+            .unwrap_or(&q_raw)
+            .to_string();
         if q.is_empty() {
             return None;
         }
@@ -185,13 +190,14 @@ impl AppSession {
             }
             DraftEvent::LocalPlayerHeroDetected { hero_slug } => {
                 if let Some(id) = self.find_hero(&hero_slug) {
-                    let _ = self.draft.set_ally(
-                        0,
-                        Some(DraftPick {
-                            hero_id: id,
-                            role: Some(self.draft.target_role),
-                        }),
-                    );
+                    if !self.draft.allies.iter().flatten().any(|p| p.hero_id == id) {
+                        let role = self
+                            .matrix
+                            .hero(id)
+                            .and_then(|h| h.primary_roles.first().copied())
+                            .or(Some(self.draft.target_role));
+                        let _ = self.draft.set_ally(0, Some(DraftPick { hero_id: id, role }));
+                    }
                 }
             }
             DraftEvent::PickDetected {
@@ -200,20 +206,83 @@ impl AppSession {
                 hero_id,
                 role,
             } => {
-                let pick = Some(DraftPick { hero_id, role });
-                match side {
-                    Side::Allies => {
-                        let _ = self.draft.set_ally(slot, pick);
-                    }
-                    Side::Enemies => {
-                        let _ = self.draft.set_enemy(slot, pick);
-                    }
-                }
+                self.apply_side_pick(side, slot, hero_id, role);
             }
             DraftEvent::DraftReset => {
                 self.draft.clear();
             }
             _ => {}
+        }
+    }
+
+    fn apply_side_pick(
+        &mut self,
+        side: Side,
+        slot: usize,
+        hero_id: HeroId,
+        fallback_role: Option<Role>,
+    ) {
+        if slot >= TEAM_SIZE {
+            return;
+        }
+        let existing_role = match side {
+            Side::Allies => self.draft.allies[slot],
+            Side::Enemies => self.draft.enemies[slot],
+        }
+        .filter(|p| p.hero_id == hero_id)
+        .and_then(|p| p.role);
+
+        // Relocate cleanly if this hero was previously placed in another slot or side
+        for idx in 0..TEAM_SIZE {
+            if (side != Side::Allies || idx != slot)
+                && self.draft.allies[idx].map(|p| p.hero_id) == Some(hero_id)
+            {
+                let _ = self.draft.set_ally(idx, None);
+            }
+            if (side != Side::Enemies || idx != slot)
+                && self.draft.enemies[idx].map(|p| p.hero_id) == Some(hero_id)
+            {
+                let _ = self.draft.set_enemy(idx, None);
+            }
+        }
+
+        let primary_role = self
+            .matrix
+            .hero(hero_id)
+            .and_then(|h| h.primary_roles.first().copied());
+        let pick = Some(DraftPick {
+            hero_id,
+            role: existing_role.or(primary_role).or(fallback_role),
+        });
+        match side {
+            Side::Allies => {
+                let _ = self.draft.set_ally(slot, pick);
+            }
+            Side::Enemies => {
+                let _ = self.draft.set_enemy(slot, pick);
+            }
+        }
+    }
+
+    pub fn poll_live_sources(
+        &mut self,
+        gsi_listener: Option<&mut BoundedGsiListener>,
+        vision_worker: Option<&mut BoundedVisionWorker>,
+    ) {
+        if let Some(listener) = gsi_listener {
+            if let Ok(events) = listener.poll_events() {
+                for ev in events {
+                    self.apply_event(ev);
+                }
+            }
+        }
+        if let Some(worker) = vision_worker {
+            worker.set_ally_faction(self.draft.ally_faction);
+            if let Ok(events) = worker.poll_events() {
+                for ev in events {
+                    self.apply_event(ev);
+                }
+            }
         }
     }
 
@@ -658,12 +727,13 @@ fn main() {
     if let Some(ref l) = gsi_listener {
         session.last_gsi_state = format!("LISTENING on http://{}", l.local_addr());
     }
+    let mut vision_worker = BoundedVisionWorker::spawn();
 
     #[cfg(feature = "gui")]
     {
         let force_cli = args.iter().any(|a| a == "--cli" || a == "--tui");
         if !force_cli {
-            if let Err(e) = gui::run_gui(session, gsi_listener) {
+            if let Err(e) = gui::run_gui(session, gsi_listener, vision_worker) {
                 let _ = writeln!(io::stderr(), "GUI error: {e}");
                 std::process::exit(1);
             }
@@ -675,13 +745,7 @@ fn main() {
     let mut stdout = io::stdout();
 
     loop {
-        if let Some(ref mut listener) = gsi_listener {
-            if let Ok(events) = listener.poll_events() {
-                for ev in events {
-                    session.apply_event(ev);
-                }
-            }
-        }
+        session.poll_live_sources(gsi_listener.as_mut(), vision_worker.as_mut());
 
         if write!(
             stdout,
@@ -789,5 +853,36 @@ mod tests {
         let matches = session.filter_heroes_for_slot(truesight_core::domain::Side::Allies, 1, "inv");
         assert!(!matches.is_empty());
         assert_eq!(matches[0].1, "Invoker");
+    }
+
+    #[test]
+    fn pick_detected_moves_hero_across_slots_without_duplicate_error_and_uses_primary_role() {
+        use truesight_core::domain::{HeroId, Role, Side};
+        use truesight_core::ports::DraftEvent;
+
+        let mut session = AppSession::new().unwrap();
+        session.apply_event(DraftEvent::LocalPlayerHeroDetected {
+            hero_slug: "npc_dota_hero_night_stalker".into(),
+        });
+        assert_eq!(session.draft.allies[0].unwrap().hero_id, HeroId(60));
+
+        // Top-bar vision emits Spectre at slot 0 and Night Stalker at slot 1
+        session.apply_event(DraftEvent::PickDetected {
+            side: Side::Allies,
+            slot: 0,
+            hero_id: HeroId(67),
+            role: Some(Role::Carry),
+        });
+        session.apply_event(DraftEvent::PickDetected {
+            side: Side::Allies,
+            slot: 1,
+            hero_id: HeroId(60),
+            role: Some(Role::Mid),
+        });
+
+        assert_eq!(session.draft.allies[0].unwrap().hero_id, HeroId(67));
+        assert_eq!(session.draft.allies[0].unwrap().role, Some(Role::Carry));
+        assert_eq!(session.draft.allies[1].unwrap().hero_id, HeroId(60));
+        assert_eq!(session.draft.allies[1].unwrap().role, Some(Role::Offlane));
     }
 }
