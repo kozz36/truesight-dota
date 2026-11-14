@@ -487,12 +487,12 @@ fn paint_tinted_cell(
     }
 
     // Bottom dark legibility shade
-    let shade_top = rect.min.y + rect.height() * 0.52;
+    let shade_top = rect.min.y + rect.height() * 0.62;
     let shade_rect = Rect::from_min_max(pos2(rect.min.x, shade_top), rect.max);
     painter.rect_filled(
         shade_rect,
         0.0,
-        Color32::from_rgba_unmultiplied(10, 9, 24, 210),
+        Color32::from_rgba_unmultiplied(10, 9, 24, 190),
     );
 
     painter.rect_stroke(
@@ -914,6 +914,8 @@ impl TrueSightGuiApp {
                         let _ = crate::execute_command(&mut self.session, "enemy 3 axe");
                         let _ = crate::execute_command(&mut self.session, "enemy 4 tusk");
                         let _ = crate::execute_command(&mut self.session, "enemy 5 witch doctor");
+                        self.session.ally_locked_slots = [false; TEAM_SIZE];
+                        self.session.enemy_locked_slots = [false; TEAM_SIZE];
                         self.session.draft.target_role = Role::Mid;
                         self.picker_target = Some(PickerTarget::Slot(Side::Allies, 1));
                         self.status_banner =
@@ -948,6 +950,7 @@ impl TrueSightGuiApp {
         ui: &mut egui::Ui,
         analysis: &DraftAnalysis5v5,
         side: Side,
+        slots_out: &mut [SlotTelemetry; TEAM_SIZE],
     ) -> Rect {
         let is_ally = side == Side::Allies;
         let accent = if is_ally { P_GEM } else { P_DIRE };
@@ -973,7 +976,7 @@ impl TrueSightGuiApp {
         ];
 
         hud_card_fill(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 4.0;
+            ui.spacing_mut().item_spacing.y = 8.0;
             // Card Header
             ui.horizontal(|ui| {
                 ui.label(RichText::new(title).size(11.0).strong().color(accent));
@@ -990,7 +993,7 @@ impl TrueSightGuiApp {
                     paint_mini_badge(ui, faction.label(), fac_col, fac_col);
                 });
             });
-            ui.add_space(6.0);
+            ui.add_space(4.0);
 
             for slot in 0..TEAM_SIZE {
                 let is_picking = self.picker_target == Some(PickerTarget::Slot(side, slot))
@@ -1024,261 +1027,247 @@ impl TrueSightGuiApp {
                     P_INDIGO_3
                 };
 
-                let row_frame = egui::Frame::NONE
-                    .fill(bg_fill)
-                    .stroke(Stroke::new(1.0_f32, border_col))
-                    .inner_margin(Margin::symmetric(8, 3))
-                    .show(ui, |ui| {
-                        ui.set_min_size(vec2(ui.available_width(), 44.0));
-                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                        ui.spacing_mut().interact_size.y = 13.0;
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 8.0;
-
-                            // 1. Portrait (58x33) or dashed '?'
-                            if let Some(pick) = current_pick {
-                                let tex = self
-                                    .textures
-                                    .heroes
-                                    .get(&pick.hero_id)
-                                    .map(|s| &s.color);
-                                paint_portrait_16_9(ui, tex, vec2(58.0, 33.0), P_LINE, 1.0);
-                            } else {
-                                let (r, _) =
-                                    ui.allocate_exact_size(vec2(58.0, 33.0), Sense::hover());
-                                ui.painter().rect_stroke(
-                                    r,
-                                    0.0,
-                                    Stroke::new(1.0_f32, if is_picking { P_GEM } else { P_LINE }),
-                                    StrokeKind::Inside,
-                                );
-                                ui.painter().text(
-                                    r.center(),
-                                    Align2::CENTER_CENTER,
-                                    "?",
-                                    FontId::proportional(15.0),
-                                    if is_picking { P_GEM } else { P_MUTED },
-                                );
-                            }
-
-                            // 2. Middle 3-line telemetry column
-                            ui.vertical(|ui| {
-                                ui.spacing_mut().item_spacing.y = 1.0;
-                                if let Some(pick) = current_pick {
-                                    let profile = self.session.matrix.hero(pick.hero_id);
-                                    ui.horizontal(|ui| {
-                                        ui.spacing_mut().item_spacing.x = 3.0;
-                                        ui.label(
-                                            RichText::new(role_short[slot])
-                                                .size(9.0)
-                                                .color(P_MUTED),
-                                        );
-                                        if let Some(h) = profile {
-                                            let atk_lbl = match h.attack_type {
-                                                AttackType::Melee => "M",
-                                                AttackType::Ranged => "R",
-                                            };
-                                            paint_mini_badge(ui, atk_lbl, P_SILVER, P_LINE);
-                                            if h.has_disable {
-                                                paint_mini_badge(ui, "DIS", P_CYAN, P_CYAN);
-                                            }
-                                            if h.has_initiation {
-                                                paint_mini_badge(ui, "INIT", P_GEM, P_GEM_DEEP);
-                                            }
-                                            paint_trend_badge(ui, h.trend_delta * 100.0);
-                                        }
-                                    });
-
-                                    let hero_name = profile
-                                        .map(|h| h.display_name.as_str())
-                                        .unwrap_or("Unknown");
-                                    ui.horizontal(|ui| {
-                                        ui.spacing_mut().item_spacing.x = 4.0;
-                                        ui.label(
-                                            RichText::new(hero_name)
-                                                .size(12.5)
-                                                .strong()
-                                                .color(P_GLINT),
-                                        );
-                                        if is_local_you {
-                                            paint_mini_badge(ui, "YOU", P_GEM, P_GEM);
-                                        }
-                                        if is_locked {
-                                            paint_mini_badge(ui, "LOCK", P_SILVER, P_LINE);
-                                        }
-                                    });
-
-                                    if let Some(b) = breakdown {
-                                        let m_pct = b.meta * 100.0;
-                                        let c_pct = b.cnt * 100.0;
-                                        let s_pct = b.syn * 100.0;
-                                        ui.horizontal(|ui| {
-                                            ui.spacing_mut().item_spacing.x = 3.0;
-                                            ui.label(
-                                                RichText::new("Meta").size(9.5).color(P_MUTED),
-                                            );
-                                            ui.label(
-                                                RichText::new(fmt_val(m_pct))
-                                                    .size(9.5)
-                                                    .strong()
-                                                    .color(tone_for_user(m_pct, sign).color()),
-                                            );
-                                            ui.label(RichText::new("·").size(9.5).color(P_MUTED));
-                                            ui.label(RichText::new("Cnt").size(9.5).color(P_MUTED));
-                                            ui.label(
-                                                RichText::new(fmt_val(c_pct))
-                                                    .size(9.5)
-                                                    .strong()
-                                                    .color(tone_for_user(c_pct, sign).color()),
-                                            );
-                                            ui.label(RichText::new("·").size(9.5).color(P_MUTED));
-                                            ui.label(RichText::new("Syn").size(9.5).color(P_MUTED));
-                                            ui.label(
-                                                RichText::new(fmt_val(s_pct))
-                                                    .size(9.5)
-                                                    .strong()
-                                                    .color(tone_for_user(s_pct, sign).color()),
-                                            );
-                                        });
-                                    }
-                                } else {
-                                    ui.label(
-                                        RichText::new(format!(
-                                            "{} · {}",
-                                            role_short[slot],
-                                            if is_picking { "PICKING" } else { "EMPTY" }
-                                        ))
-                                        .size(9.0)
-                                        .color(if is_picking { P_GEM } else { P_MUTED }),
-                                    );
-                                    ui.label(
-                                        RichText::new("Click to pick hero...")
-                                            .size(12.0)
-                                            .color(P_MUTED),
-                                    );
-                                    ui.label(
-                                        RichText::new(format!("Synced with Pos {}", slot + 1))
-                                            .size(9.5)
-                                            .color(P_MUTED),
-                                    );
-                                }
-                            });
-
-                            // 3. Right Net / Threat resultant + clear & role-swap buttons
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if current_pick.is_some() {
-                                    ui.spacing_mut().item_spacing.x = 1.5;
-                                    if ui
-                                        .add(
-                                            egui::Button::new(
-                                                RichText::new("×").size(11.0).color(P_MUTED),
-                                            )
-                                            .frame(false)
-                                            .min_size(vec2(11.0, 11.0)),
-                                        )
-                                        .on_hover_text("Clear hero slot")
-                                        .clicked()
-                                    {
-                                        self.session.clear_slot_manual(side, slot);
-                                        if self.picker_target
-                                            == Some(PickerTarget::Slot(side, slot))
-                                        {
-                                            self.picker_target = None;
-                                        }
-                                        self.status_banner = format!(
-                                            "Cleared {} P{}.",
-                                            if is_ally { "Ally" } else { "Enemy" },
-                                            slot + 1
-                                        );
-                                    }
-                                    ui.vertical(|ui| {
-                                        ui.spacing_mut().item_spacing.y = 0.0;
-                                        if slot > 0
-                                            && ui
-                                                .add(
-                                                    egui::Button::new(
-                                                        RichText::new("^")
-                                                            .size(9.5)
-                                                            .strong()
-                                                            .color(P_SILVER),
-                                                    )
-                                                    .frame(false)
-                                                    .min_size(vec2(11.0, 11.0)),
-                                                )
-                                                .on_hover_text("Move role up (swap and lock)")
-                                                .clicked()
-                                        {
-                                            self.session.swap_slots(side, slot, slot - 1);
-                                            self.picker_target = None;
-                                            self.status_banner = format!(
-                                                "Swapped {} P{} <-> P{}.",
-                                                if is_ally { "Ally" } else { "Enemy" },
-                                                slot + 1,
-                                                slot
-                                            );
-                                        }
-                                        if slot + 1 < TEAM_SIZE
-                                            && ui
-                                                .add(
-                                                    egui::Button::new(
-                                                        RichText::new("v")
-                                                            .size(9.0)
-                                                            .strong()
-                                                            .color(P_SILVER),
-                                                    )
-                                                    .frame(false)
-                                                    .min_size(vec2(11.0, 11.0)),
-                                                )
-                                                .on_hover_text("Move role down (swap and lock)")
-                                                .clicked()
-                                        {
-                                            self.session.swap_slots(side, slot, slot + 1);
-                                            self.picker_target = None;
-                                            self.status_banner = format!(
-                                                "Swapped {} P{} <-> P{}.",
-                                                if is_ally { "Ally" } else { "Enemy" },
-                                                slot + 1,
-                                                slot + 2
-                                            );
-                                        }
-                                    });
-                                }
-                                ui.vertical(|ui| {
-                                    ui.with_layout(Layout::top_down(Align::Max), |ui| {
-                                        if let Some(b) = breakdown {
-                                            let net_pct = b.net * 100.0;
-                                            ui.label(
-                                                RichText::new(fmt_pct(net_pct))
-                                                    .size(13.5)
-                                                    .strong()
-                                                    .color(tone_for_user(net_pct, sign).color()),
-                                            );
-                                            ui.label(
-                                                RichText::new(net_caption)
-                                                    .size(8.5)
-                                                    .color(P_MUTED),
-                                            );
-                                        } else {
-                                            ui.label(
-                                                RichText::new("[Enter]")
-                                                    .size(11.0)
-                                                    .strong()
-                                                    .color(if is_picking { P_GEM } else { P_MUTED }),
-                                            );
-                                        }
-                                    });
-                                });
-                            });
-                        });
-                    });
-
-                // Left 3px side accent bar
-                let r = row_frame.response.rect;
+                let (r, _) =
+                    ui.allocate_exact_size(vec2(ui.available_width(), 56.0), Sense::hover());
+                ui.painter().rect_filled(r, 0.0, bg_fill);
+                ui.painter().rect_stroke(
+                    r,
+                    0.0,
+                    Stroke::new(1.0_f32, border_col),
+                    StrokeKind::Inside,
+                );
                 ui.painter().rect_filled(
                     Rect::from_min_max(r.min, pos2(r.min.x + 3.0, r.max.y)),
                     0.0,
                     accent,
                 );
+
+                // 1. Portrait (64x36, exact 16:9) or dashed '?'
+                let portrait_rect = Rect::from_min_size(
+                    pos2(r.min.x + 8.0, (r.center().y - 18.0).round()),
+                    vec2(64.0, 36.0),
+                );
+                if let Some(pick) = current_pick {
+                    if let Some(tex) = self.textures.heroes.get(&pick.hero_id).map(|s| &s.color) {
+                        ui.painter()
+                            .image(tex.id(), portrait_rect, uv_full(), Color32::WHITE);
+                    }
+                    ui.painter().rect_stroke(
+                        portrait_rect,
+                        0.0,
+                        Stroke::new(1.0_f32, P_LINE),
+                        StrokeKind::Inside,
+                    );
+                } else {
+                    ui.painter().rect_stroke(
+                        portrait_rect,
+                        0.0,
+                        Stroke::new(1.0_f32, if is_picking { P_GEM } else { P_LINE }),
+                        StrokeKind::Inside,
+                    );
+                    ui.painter().text(
+                        portrait_rect.center(),
+                        Align2::CENTER_CENTER,
+                        "?",
+                        FontId::proportional(15.0),
+                        if is_picking { P_GEM } else { P_MUTED },
+                    );
+                }
+
+                // 2. Right Clear Button (`×`) outside card hit zone
+                let clear_rect_opt = if current_pick.is_some() {
+                    let cr = Rect::from_center_size(
+                        pos2(r.max.x - 11.0, r.center().y),
+                        vec2(14.0, 14.0),
+                    );
+                    let clear_resp = ui
+                        .interact(
+                            cr,
+                            Id::new(("slot_clear_btn", is_ally, slot)),
+                            Sense::click(),
+                        )
+                        .on_hover_text("Clear hero slot");
+                    let x_col = if clear_resp.hovered() { P_DIRE } else { P_MUTED };
+                    ui.painter().text(
+                        cr.center(),
+                        Align2::CENTER_CENTER,
+                        "×",
+                        FontId::proportional(13.0),
+                        x_col,
+                    );
+                    if clear_resp.clicked() {
+                        self.session.clear_slot_manual(side, slot);
+                        if self.picker_target == Some(PickerTarget::Slot(side, slot)) {
+                            self.picker_target = None;
+                        }
+                        self.status_banner = format!(
+                            "Cleared {} P{}.",
+                            if is_ally { "Ally" } else { "Enemy" },
+                            slot + 1
+                        );
+                    }
+                    Some(cr)
+                } else {
+                    None
+                };
+
+                // 3. Right Net / Threat Column (deterministic rect left of clear button)
+                let net_right = match clear_rect_opt {
+                    Some(cr) => cr.min.x - 4.0,
+                    None => r.max.x - 8.0,
+                };
+                let net_rect = Rect::from_min_max(
+                    pos2((net_right - 54.0).max(portrait_rect.max.x + 12.0), r.min.y + 10.0),
+                    pos2(net_right, r.max.y - 10.0),
+                );
+                {
+                    let mut child = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(net_rect)
+                            .layout(Layout::top_down(Align::Max)),
+                    );
+                    let ui = &mut child;
+                    ui.set_clip_rect(net_rect);
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    if let Some(b) = breakdown {
+                        let net_pct = b.net * 100.0;
+                        ui.label(
+                            RichText::new(fmt_pct(net_pct))
+                                .size(13.5)
+                                .strong()
+                                .color(tone_for_user(net_pct, sign).color()),
+                        );
+                        ui.label(RichText::new(net_caption).size(8.5).color(P_MUTED));
+                    } else {
+                        ui.add_space(6.0);
+                        ui.label(
+                            RichText::new("[Enter]")
+                                .size(11.0)
+                                .strong()
+                                .color(if is_picking { P_GEM } else { P_MUTED }),
+                        );
+                    }
+                }
+
+                // 4. Clipped Middle 3-line Telemetry Column
+                let mid_rect = Rect::from_min_max(
+                    pos2(portrait_rect.max.x + 8.0, r.min.y + 4.0),
+                    pos2(
+                        (net_rect.min.x - 6.0).max(portrait_rect.max.x + 24.0),
+                        r.max.y - 4.0,
+                    ),
+                );
+                {
+                    let mut child = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(mid_rect)
+                            .layout(Layout::top_down(Align::Min)),
+                    );
+                    let ui = &mut child;
+                    ui.set_clip_rect(mid_rect);
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                    ui.spacing_mut().interact_size.y = 12.0;
+                    ui.spacing_mut().item_spacing.y = 1.5;
+                    if let Some(pick) = current_pick {
+                        let profile = self.session.matrix.hero(pick.hero_id);
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 2.0;
+                            ui.label(RichText::new(role_short[slot]).size(9.0).color(P_MUTED));
+                            if let Some(h) = profile {
+                                let atk_lbl = match h.attack_type {
+                                    AttackType::Melee => "M",
+                                    AttackType::Ranged => "R",
+                                };
+                                paint_mini_badge(ui, atk_lbl, P_SILVER, P_LINE);
+                                if h.has_disable {
+                                    paint_mini_badge(ui, "DIS", P_CYAN, P_CYAN);
+                                }
+                                if h.has_initiation {
+                                    paint_mini_badge(ui, "INIT", P_GEM, P_GEM_DEEP);
+                                }
+                                paint_trend_badge(ui, h.trend_delta * 100.0);
+                            }
+                            if is_local_you {
+                                paint_mini_badge(ui, "YOU", P_GEM, P_GEM);
+                            }
+                            if is_locked {
+                                paint_mini_badge(ui, "LOCK", P_SILVER, P_LINE);
+                            }
+                        });
+
+                        let hero_name =
+                            profile.map(|h| h.display_name.as_str()).unwrap_or("Unknown");
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(hero_name)
+                                    .size(12.5)
+                                    .strong()
+                                    .color(P_GLINT),
+                            )
+                            .truncate(),
+                        );
+
+                        if let Some(b) = breakdown {
+                            let m_pct = b.meta * 100.0;
+                            let c_pct = b.cnt * 100.0;
+                            let s_pct = b.syn * 100.0;
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 2.5;
+                                ui.label(RichText::new("Meta").size(9.5).color(P_MUTED));
+                                ui.label(
+                                    RichText::new(fmt_val(m_pct))
+                                        .size(9.5)
+                                        .strong()
+                                        .color(tone_for_user(m_pct, sign).color()),
+                                );
+                                ui.label(RichText::new("·").size(9.5).color(P_MUTED));
+                                ui.label(RichText::new("Cnt").size(9.5).color(P_MUTED));
+                                ui.label(
+                                    RichText::new(fmt_val(c_pct))
+                                        .size(9.5)
+                                        .strong()
+                                        .color(tone_for_user(c_pct, sign).color()),
+                                );
+                                ui.label(RichText::new("·").size(9.5).color(P_MUTED));
+                                ui.label(RichText::new("Syn").size(9.5).color(P_MUTED));
+                                ui.label(
+                                    RichText::new(fmt_val(s_pct))
+                                        .size(9.5)
+                                        .strong()
+                                        .color(tone_for_user(s_pct, sign).color()),
+                                );
+                            });
+                        }
+                    } else {
+                        ui.label(
+                            RichText::new(format!(
+                                "{} · {}",
+                                role_short[slot],
+                                if is_picking { "PICKING" } else { "EMPTY" }
+                            ))
+                            .size(9.0)
+                            .color(if is_picking { P_GEM } else { P_MUTED }),
+                        );
+                        ui.label(
+                            RichText::new("Click to pick hero...")
+                                .size(12.0)
+                                .color(P_MUTED),
+                        );
+                        ui.label(
+                            RichText::new(format!("Synced with Pos {}", slot + 1))
+                                .size(9.5)
+                                .color(P_MUTED),
+                        );
+                    }
+                }
+
+                slots_out[slot] = SlotTelemetry {
+                    row: r,
+                    portrait: portrait_rect,
+                    mid: mid_rect,
+                    net: net_rect,
+                    clear: clear_rect_opt,
+                };
 
                 // Drag-to-swap target highlight and drop commit
                 if let Some((drag_side, src_slot)) = self.drag_slot
@@ -1314,11 +1303,12 @@ impl TrueSightGuiApp {
                     }
                 }
 
-                // Restrict hit rect away from right-hand control buttons (×, ^, v)
-                let card_hit_rect = if current_pick.is_some() {
-                    Rect::from_min_max(r.min, pos2((r.max.x - 38.0).max(r.min.x + 40.0), r.max.y))
-                } else {
-                    r
+                // Restrict hit rect strictly left of the clear (`×`) button
+                let card_hit_rect = match clear_rect_opt {
+                    Some(cr) => {
+                        Rect::from_min_max(r.min, pos2((cr.min.x - 2.0).max(r.min.x + 40.0), r.max.y))
+                    }
+                    None => r,
                 };
                 let card_resp = ui.interact(
                     card_hit_rect,
@@ -1452,6 +1442,19 @@ impl TrueSightGuiApp {
                 .flatten()
                 .flatten()
                 .count();
+            let mut ally_meta_sum = 0.0_f32;
+            let mut enemy_meta_sum = 0.0_f32;
+            for slot in 0..TEAM_SIZE {
+                if let Some(b) = compute_slot_breakdown(&self.session, analysis, Side::Allies, slot)
+                {
+                    ally_meta_sum += b.meta * 100.0;
+                }
+                if let Some(b) =
+                    compute_slot_breakdown(&self.session, analysis, Side::Enemies, slot)
+                {
+                    enemy_meta_sum += b.meta * 100.0;
+                }
+            }
             let ally_comp =
                 compute_comp_diagnostic(&self.session.draft.allies, &self.session.matrix).score
                     * 100.0;
@@ -1463,7 +1466,11 @@ impl TrueSightGuiApp {
                 (
                     "Meta edge",
                     analysis.total_meta_edge * 100.0,
-                    format!("Role baseline vs 50%"),
+                    format!(
+                        "A {} · E {}",
+                        fmt_val(ally_meta_sum),
+                        fmt_val(enemy_meta_sum)
+                    ),
                 ),
                 (
                     "Counter edge",
@@ -1520,6 +1527,7 @@ impl TrueSightGuiApp {
             ui.add_space(8.0);
 
             // 5. Draft Order (10 slots) & Bans (16 slots) side-by-side
+            let thumb_row_h = 26.0_f32;
             ui.columns(2, |cols| {
                 // Draft Order Box
                 egui::Frame::NONE
@@ -1527,6 +1535,8 @@ impl TrueSightGuiApp {
                     .stroke(Stroke::new(1.0_f32, P_INDIGO_3))
                     .inner_margin(Margin::symmetric(8, 6))
                     .show(&mut cols[0], |ui| {
+                        let inner_w = ui.available_width();
+                        ui.set_min_width(inner_w);
                         ui.horizontal(|ui| {
                             ui.label(RichText::new("DRAFT ORDER").size(9.5).color(P_MUTED));
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -1541,61 +1551,65 @@ impl TrueSightGuiApp {
                             });
                         });
                         ui.add_space(4.0);
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 3.0;
-                            let w = ((ui.available_width() - 9.0 * 3.0) / 10.0).max(24.0);
-                            let h = (w * 9.0 / 16.0).round();
-                            for i in 0..TEAM_SIZE {
-                                if let Some(p) = self.session.draft.allies[i] {
-                                    let tex = self
-                                        .textures
-                                        .heroes
-                                        .get(&p.hero_id)
-                                        .map(|s| &s.color);
-                                    paint_portrait_16_9(ui, tex, vec2(w, h), P_GEM, 1.5);
-                                } else {
-                                    let (r, _) =
-                                        ui.allocate_exact_size(vec2(w, h), Sense::hover());
-                                    ui.painter().rect_stroke(
-                                        r,
-                                        0.0,
-                                        Stroke::new(1.0_f32, P_GEM),
-                                        StrokeKind::Inside,
-                                    );
-                                    ui.painter().text(
-                                        r.center(),
-                                        Align2::CENTER_CENTER,
-                                        format!("P{}", i + 1),
-                                        FontId::proportional(8.5),
-                                        P_GEM,
-                                    );
+                        ui.allocate_ui_with_layout(
+                            vec2(inner_w, thumb_row_h),
+                            Layout::left_to_right(Align::Center),
+                            |ui| {
+                                ui.spacing_mut().item_spacing.x = 3.0;
+                                let w = ((inner_w - 9.0 * 3.0) / 10.0).max(20.0);
+                                let h = (w * 9.0 / 16.0).round().min(thumb_row_h);
+                                for i in 0..TEAM_SIZE {
+                                    if let Some(p) = self.session.draft.allies[i] {
+                                        let tex = self
+                                            .textures
+                                            .heroes
+                                            .get(&p.hero_id)
+                                            .map(|s| &s.color);
+                                        paint_portrait_16_9(ui, tex, vec2(w, h), P_GEM, 1.5);
+                                    } else {
+                                        let (r, _) =
+                                            ui.allocate_exact_size(vec2(w, h), Sense::hover());
+                                        ui.painter().rect_stroke(
+                                            r,
+                                            0.0,
+                                            Stroke::new(1.0_f32, P_GEM),
+                                            StrokeKind::Inside,
+                                        );
+                                        ui.painter().text(
+                                            r.center(),
+                                            Align2::CENTER_CENTER,
+                                            format!("P{}", i + 1),
+                                            FontId::proportional(8.5),
+                                            P_GEM,
+                                        );
+                                    }
+                                    if let Some(p) = self.session.draft.enemies[i] {
+                                        let tex = self
+                                            .textures
+                                            .heroes
+                                            .get(&p.hero_id)
+                                            .map(|s| &s.color);
+                                        paint_portrait_16_9(ui, tex, vec2(w, h), P_DIRE, 1.5);
+                                    } else {
+                                        let (r, _) =
+                                            ui.allocate_exact_size(vec2(w, h), Sense::hover());
+                                        ui.painter().rect_stroke(
+                                            r,
+                                            0.0,
+                                            Stroke::new(1.0_f32, P_LINE),
+                                            StrokeKind::Inside,
+                                        );
+                                        ui.painter().text(
+                                            r.center(),
+                                            Align2::CENTER_CENTER,
+                                            format!("E{}", i + 1),
+                                            FontId::proportional(8.5),
+                                            P_MUTED,
+                                        );
+                                    }
                                 }
-                                if let Some(p) = self.session.draft.enemies[i] {
-                                    let tex = self
-                                        .textures
-                                        .heroes
-                                        .get(&p.hero_id)
-                                        .map(|s| &s.color);
-                                    paint_portrait_16_9(ui, tex, vec2(w, h), P_DIRE, 1.5);
-                                } else {
-                                    let (r, _) =
-                                        ui.allocate_exact_size(vec2(w, h), Sense::hover());
-                                    ui.painter().rect_stroke(
-                                        r,
-                                        0.0,
-                                        Stroke::new(1.0_f32, P_LINE),
-                                        StrokeKind::Inside,
-                                    );
-                                    ui.painter().text(
-                                        r.center(),
-                                        Align2::CENTER_CENTER,
-                                        format!("E{}", i + 1),
-                                        FontId::proportional(8.5),
-                                        P_MUTED,
-                                    );
-                                }
-                            }
-                        });
+                            },
+                        );
                     });
 
                 // Bans Box
@@ -1604,6 +1618,8 @@ impl TrueSightGuiApp {
                     .stroke(Stroke::new(1.0_f32, P_INDIGO_3))
                     .inner_margin(Margin::symmetric(8, 6))
                     .show(&mut cols[1], |ui| {
+                        let inner_w = ui.available_width();
+                        ui.set_min_width(inner_w);
                         let banned_ids: Vec<HeroId> =
                             self.session.draft.bans.iter().copied().flatten().collect();
                         ui.horizontal(|ui| {
@@ -1643,50 +1659,54 @@ impl TrueSightGuiApp {
                             });
                         });
                         ui.add_space(4.0);
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 3.0;
-                            let slots_shown = 8usize;
-                            let w = ((ui.available_width() - 7.0 * 3.0) / 8.0).max(24.0);
-                            let h = (w * 9.0 / 16.0).round();
-                            for idx in 0..slots_shown {
-                                if let Some(&hid) = banned_ids.get(idx) {
-                                    let (r, resp) =
-                                        ui.allocate_exact_size(vec2(w, h), Sense::click());
-                                    if let Some(t) =
-                                        self.textures.heroes.get(&hid).map(|s| &s.banned)
-                                    {
-                                        ui.painter().image(
-                                            t.id(),
+                        ui.allocate_ui_with_layout(
+                            vec2(inner_w, thumb_row_h),
+                            Layout::left_to_right(Align::Center),
+                            |ui| {
+                                ui.spacing_mut().item_spacing.x = 3.0;
+                                let slots_shown = 8usize;
+                                let w = ((inner_w - 7.0 * 3.0) / 8.0).max(24.0);
+                                let h = (w * 9.0 / 16.0).round().min(thumb_row_h);
+                                for idx in 0..slots_shown {
+                                    if let Some(&hid) = banned_ids.get(idx) {
+                                        let (r, resp) =
+                                            ui.allocate_exact_size(vec2(w, h), Sense::click());
+                                        if let Some(t) =
+                                            self.textures.heroes.get(&hid).map(|s| &s.banned)
+                                        {
+                                            ui.painter().image(
+                                                t.id(),
+                                                r,
+                                                uv_full(),
+                                                Color32::WHITE,
+                                            );
+                                        }
+                                        ui.painter().rect_stroke(
                                             r,
-                                            uv_full(),
-                                            Color32::WHITE,
+                                            0.0,
+                                            Stroke::new(1.0_f32, P_DIRE_DEEP),
+                                            StrokeKind::Inside,
+                                        );
+                                        ui.painter().line_segment(
+                                            [r.min, r.max],
+                                            Stroke::new(1.5_f32, P_DIRE),
+                                        );
+                                        if resp.clicked() {
+                                            let _ = self.session.draft.toggle_ban(hid);
+                                        }
+                                    } else {
+                                        let (r, _) =
+                                            ui.allocate_exact_size(vec2(w, h), Sense::hover());
+                                        ui.painter().rect_stroke(
+                                            r,
+                                            0.0,
+                                            Stroke::new(1.0_f32, P_LINE),
+                                            StrokeKind::Inside,
                                         );
                                     }
-                                    ui.painter().rect_stroke(
-                                        r,
-                                        0.0,
-                                        Stroke::new(1.0_f32, P_DIRE_DEEP),
-                                        StrokeKind::Inside,
-                                    );
-                                    ui.painter().line_segment(
-                                        [r.min, r.max],
-                                        Stroke::new(1.5_f32, P_DIRE),
-                                    );
-                                    if resp.clicked() {
-                                        let _ = self.session.draft.toggle_ban(hid);
-                                    }
-                                } else {
-                                    let (r, _) =
-                                        ui.allocate_exact_size(vec2(w, h), Sense::hover());
-                                    ui.painter().rect_stroke(
-                                        r,
-                                        0.0,
-                                        Stroke::new(1.0_f32, P_LINE),
-                                        StrokeKind::Inside,
-                                    );
                                 }
-                            }
-                        });
+                            },
+                        );
                     });
             });
 
@@ -1898,11 +1918,12 @@ impl TrueSightGuiApp {
         }
     }
 
-    fn render_suggested_picks_card(&mut self, ui: &mut egui::Ui) -> Rect {
+    fn render_suggested_picks_card(&mut self, ui: &mut egui::Ui) -> (Rect, f32) {
         let target_role = self.session.draft.target_role;
         let target_slot_idx = target_role.index();
+        let mut last_col_max_x = 0.0_f32;
 
-        hud_card_fill(ui, |ui| {
+        let card_rect = hud_card_fill(ui, |ui| {
             // Header
             ui.horizontal(|ui| {
                 ui.label(
@@ -1957,8 +1978,9 @@ impl TrueSightGuiApp {
             let filter_lower = self.suggest_filter.to_ascii_lowercase();
 
             let table_w = ui.available_width();
-            let col_gap = ((table_w - 760.0) / 10.0).clamp(8.0, 22.0);
-            let hero_col_w = (table_w - 720.0 - 10.0 * col_gap).max(165.0);
+            let usable_w = (table_w - 16.0).max(580.0);
+            let hero_col_w = (usable_w * 0.19).clamp(172.0, 340.0);
+            let col_gap = ((usable_w - 578.0 - hero_col_w) / 10.0).max(8.0);
 
             egui::ScrollArea::vertical()
                 .id_salt("v4_suggested_picks_scroll")
@@ -1973,6 +1995,7 @@ impl TrueSightGuiApp {
                                 vec2(hero_col_w, 16.0),
                                 Layout::left_to_right(Align::Center),
                                 |ui| {
+                                    ui.set_min_width(hero_col_w);
                                     ui.label(
                                         RichText::new("HERO").size(9.5).strong().color(P_MUTED),
                                     );
@@ -2023,6 +2046,8 @@ impl TrueSightGuiApp {
                                     vec2(hero_col_w, 27.0),
                                     Layout::left_to_right(Align::Center),
                                     |ui| {
+                                        ui.set_min_width(hero_col_w);
+                                        ui.set_max_width(hero_col_w);
                                         ui.spacing_mut().item_spacing.x = 7.0;
                                         let tex = self
                                             .textures
@@ -2030,11 +2055,14 @@ impl TrueSightGuiApp {
                                             .get(&rec.hero_id)
                                             .map(|s| &s.color);
                                         paint_portrait_16_9(ui, tex, vec2(48.0, 27.0), P_LINE, 1.0);
-                                        ui.label(
-                                            RichText::new(name)
-                                                .size(12.0)
-                                                .strong()
-                                                .color(P_GLINT),
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(name)
+                                                    .size(12.0)
+                                                    .strong()
+                                                    .color(P_GLINT),
+                                            )
+                                            .truncate(),
                                         );
                                     },
                                 );
@@ -2103,10 +2131,10 @@ impl TrueSightGuiApp {
                                                 .heroes
                                                 .get(&ep.hero_id)
                                                 .map(|s| &s.toned);
-                                            paint_tinted_square_cell(ui, 26.0, tex, d, 8.5, 1.5);
+                                            paint_tinted_square_cell(ui, 28.0, tex, d, 8.5, 1.5);
                                         } else {
                                             let (r, _) = ui.allocate_exact_size(
-                                                vec2(26.0, 26.0),
+                                                vec2(28.0, 28.0),
                                                 Sense::hover(),
                                             );
                                             ui.painter().rect_stroke(
@@ -2174,17 +2202,18 @@ impl TrueSightGuiApp {
                                 )
                                 .fill(P_INDIGO_1)
                                 .stroke(Stroke::new(1.0_f32, P_GEM));
-                                if ui.add(pick_btn).clicked() {
-                                    let _ = self.session.draft.set_ally(
+                                let pick_resp = ui.add(pick_btn);
+                                last_col_max_x = last_col_max_x.max(pick_resp.rect.max.x);
+                                if pick_resp.clicked() {
+                                    let picked_name = name.to_owned();
+                                    self.session.set_slot_manual(
+                                        Side::Allies,
                                         target_slot_idx,
-                                        Some(DraftPick {
-                                            hero_id: rec.hero_id,
-                                            role: Some(target_role),
-                                        }),
+                                        rec.hero_id,
                                     );
                                     self.status_banner = format!(
                                         "Picked {} into Ally P{}.",
-                                        name,
+                                        picked_name,
                                         target_slot_idx + 1
                                     );
                                 }
@@ -2192,17 +2221,23 @@ impl TrueSightGuiApp {
                             }
                         });
                 });
-        })
+        });
+        (card_rect, last_col_max_x)
     }
 
-    fn render_matrix_card(&mut self, ui: &mut egui::Ui, analysis: &DraftAnalysis5v5) -> Rect {
+    fn render_matrix_card(
+        &mut self,
+        ui: &mut egui::Ui,
+        analysis: &DraftAnalysis5v5,
+    ) -> (Rect, Vec2, f32, f32, f32) {
         let title = match self.matrix_tab {
             MatrixTab::Counter => "COUNTER MATRIX",
             MatrixTab::Synergy => "ALLY SYNERGY",
             MatrixTab::Comp => "COMPOSITION",
         };
+        let mut metrics = (Vec2::ZERO, 0.0_f32, 0.0_f32, 0.0_f32);
 
-        hud_card_fill(ui, |ui| {
+        let card_rect = hud_card_fill(ui, |ui| {
             // Header with COUNTER | SYNERGY | COMP tabs
             ui.horizontal(|ui| {
                 ui.label(RichText::new(title).size(11.0).strong().color(P_GLINT));
@@ -2231,29 +2266,32 @@ impl TrueSightGuiApp {
 
             ui.add_space(8.0);
 
-            match self.matrix_tab {
+            metrics = match self.matrix_tab {
                 MatrixTab::Counter => self.render_counter_tab(ui, analysis),
                 MatrixTab::Synergy => self.render_synergy_tab(ui, analysis),
-                MatrixTab::Comp => self.render_comp_tab(ui, analysis),
+                MatrixTab::Comp => {
+                    self.render_comp_tab(ui, analysis);
+                    let (cell_sz, h_gap, v_gap) = Self::matrix_grid_metrics(ui);
+                    (cell_sz, h_gap, v_gap, ui.min_rect().max.y)
+                }
             }
-        })
+        });
+        (card_rect, metrics.0, metrics.1, metrics.2, metrics.3)
     }
 
     fn matrix_grid_metrics(ui: &egui::Ui) -> (Vec2, f32, f32) {
-        let gap = 4.0_f32;
+        let v_gap = 4.0_f32;
         let avail_w = ui.available_width().max(260.0);
         let avail_h = ui.available_height().max(280.0);
-        // Reserve ~44px at bottom for the gradient scale bar + 1-2 line legend
-        let cell_w = ((avail_w - 6.0 * gap) / 7.0).floor().clamp(34.0, 62.0);
-        let cell_h = ((avail_h - 46.0 - 6.0 * gap) / 7.0)
-            .floor()
-            .clamp(32.0, cell_w)
-            .min(58.0);
-        let h_gap = ((avail_w - 7.0 * cell_w) / 6.0).clamp(4.0, 10.0);
-        (vec2(cell_w, cell_h), h_gap, gap)
+        // Reserve ~58px at bottom for the gradient scale bar + wrapped caption + clearance
+        let max_w = ((avail_w - 6.0 * v_gap) / 7.0).floor();
+        let max_h = ((avail_h - 58.0 - 6.0 * v_gap) / 7.0).floor();
+        let side = max_w.min(max_h).clamp(32.0, 56.0);
+        let h_gap = ((avail_w - 7.0 * side) / 6.0).clamp(4.0, 6.0);
+        (vec2(side, side), h_gap, v_gap)
     }
 
-    fn render_counter_tab(&self, ui: &mut egui::Ui, analysis: &DraftAnalysis5v5) {
+    fn render_counter_tab(&self, ui: &mut egui::Ui, analysis: &DraftAnalysis5v5) -> (Vec2, f32, f32, f32) {
         let (cell_sz, h_gap, v_gap) = Self::matrix_grid_metrics(ui);
 
         ui.vertical(|ui| {
@@ -2402,14 +2440,15 @@ impl TrueSightGuiApp {
         ui.add_space(6.0);
         paint_matrix_scale_bar(ui, "Enemy wins", "Ally wins");
         ui.add_space(2.0);
-        ui.label(
+        let note_resp = ui.label(
             RichText::new("Cell portrait = matchup winner. Right col = ally avg; bottom row = enemy avg vs team.")
                 .size(9.0)
                 .color(P_MUTED),
         );
+        (cell_sz, h_gap, v_gap, note_resp.rect.max.y)
     }
 
-    fn render_synergy_tab(&self, ui: &mut egui::Ui, analysis: &DraftAnalysis5v5) {
+    fn render_synergy_tab(&self, ui: &mut egui::Ui, analysis: &DraftAnalysis5v5) -> (Vec2, f32, f32, f32) {
         let (cell_sz, h_gap, v_gap) = Self::matrix_grid_metrics(ui);
 
         ui.vertical(|ui| {
@@ -2564,11 +2603,12 @@ impl TrueSightGuiApp {
         ui.add_space(6.0);
         paint_matrix_scale_bar(ui, "Anti-synergy", "Synergy");
         ui.add_space(2.0);
-        ui.label(
+        let note_resp = ui.label(
             RichText::new("Symmetric ally pairs. Right col = avg synergy with allies; corner = normalized Ally Synergy.")
                 .size(9.0)
                 .color(P_MUTED),
         );
+        (cell_sz, h_gap, v_gap, note_resp.rect.max.y)
     }
 
     fn render_comp_tab(&self, ui: &mut egui::Ui, analysis: &DraftAnalysis5v5) {
@@ -2835,6 +2875,29 @@ impl TrueSightGuiApp {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, Copy)]
+pub struct SlotTelemetry {
+    pub row: Rect,
+    pub portrait: Rect,
+    pub mid: Rect,
+    pub net: Rect,
+    pub clear: Option<Rect>,
+}
+
+impl Default for SlotTelemetry {
+    fn default() -> Self {
+        Self {
+            row: Rect::NOTHING,
+            portrait: Rect::NOTHING,
+            mid: Rect::NOTHING,
+            net: Rect::NOTHING,
+            clear: None,
+        }
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy)]
 pub struct LayoutRects {
     pub top_bar: Rect,
@@ -2843,6 +2906,13 @@ pub struct LayoutRects {
     pub enemies: Rect,
     pub suggested: Rect,
     pub matrix: Rect,
+    pub ally_slots: [SlotTelemetry; TEAM_SIZE],
+    pub enemy_slots: [SlotTelemetry; TEAM_SIZE],
+    pub matrix_cell_size: Vec2,
+    pub matrix_h_gap: f32,
+    pub matrix_v_gap: f32,
+    pub matrix_bottom_y: f32,
+    pub suggested_last_col_max_x: f32,
 }
 
 impl TrueSightGuiApp {
@@ -2861,6 +2931,13 @@ impl TrueSightGuiApp {
             enemies: Rect::NOTHING,
             suggested: Rect::NOTHING,
             matrix: Rect::NOTHING,
+            ally_slots: [SlotTelemetry::default(); TEAM_SIZE],
+            enemy_slots: [SlotTelemetry::default(); TEAM_SIZE],
+            matrix_cell_size: Vec2::ZERO,
+            matrix_h_gap: 0.0,
+            matrix_v_gap: 0.0,
+            matrix_bottom_y: 0.0,
+            suggested_last_col_max_x: 0.0,
         };
 
         egui::CentralPanel::default()
@@ -2870,12 +2947,12 @@ impl TrueSightGuiApp {
                 rects.top_bar = self.render_top_bar(ui);
                 ui.add_space(10.0);
 
-                // 2. Top Row: Allies (348px) | Oracle (flex) | Enemies (348px)
+                // 2. Top Row: Allies (356px) | Oracle (flex) | Enemies (356px)
                 let total_w = ui.available_width();
-                let side_w = 348.0_f32.min(total_w * 0.27);
+                let side_w = 356.0_f32.min(total_w * 0.275);
                 let gap = 10.0;
                 let center_w = (total_w - 2.0 * side_w - 2.0 * gap).max(360.0);
-                let top_row_h = 384.0_f32;
+                let top_row_h = 368.0_f32;
 
                 ui.horizontal_top(|ui| {
                     ui.spacing_mut().item_spacing.x = gap;
@@ -2883,7 +2960,12 @@ impl TrueSightGuiApp {
                         vec2(side_w, top_row_h),
                         Layout::top_down(Align::Min),
                         |ui| {
-                            rects.allies = self.render_team_card(ui, &analysis, Side::Allies);
+                            rects.allies = self.render_team_card(
+                                ui,
+                                &analysis,
+                                Side::Allies,
+                                &mut rects.ally_slots,
+                            );
                         },
                     );
                     ui.allocate_ui_with_layout(
@@ -2897,17 +2979,25 @@ impl TrueSightGuiApp {
                         vec2(side_w, top_row_h),
                         Layout::top_down(Align::Min),
                         |ui| {
-                            rects.enemies = self.render_team_card(ui, &analysis, Side::Enemies);
+                            rects.enemies = self.render_team_card(
+                                ui,
+                                &analysis,
+                                Side::Enemies,
+                                &mut rects.enemy_slots,
+                            );
                         },
                     );
                 });
 
                 ui.add_space(10.0);
 
-                // 3. Bottom Row: Suggested Picks (flex) | 5v5 Matrix / Comp (434px)
-                let matrix_w = 434.0_f32.min(total_w * 0.34);
-                let recs_w = (total_w - matrix_w - gap).max(480.0);
+                // 3. Bottom Row: Suggested Picks (flex) | 5v5 Matrix / Comp (square-coupled)
                 let bottom_h = ui.available_height().max(320.0);
+                let ideal_cell = ((bottom_h - 134.0) / 7.0).floor().clamp(32.0, 56.0);
+                let matrix_w = (7.0 * ideal_cell + 6.0 * 4.0 + 20.0)
+                    .min(total_w * 0.34)
+                    .max(380.0);
+                let recs_w = (total_w - matrix_w - gap).max(480.0);
 
                 ui.horizontal_top(|ui| {
                     ui.spacing_mut().item_spacing.x = gap;
@@ -2915,14 +3005,22 @@ impl TrueSightGuiApp {
                         vec2(recs_w, bottom_h),
                         Layout::top_down(Align::Min),
                         |ui| {
-                            rects.suggested = self.render_suggested_picks_card(ui);
+                            let (s_rect, last_x) = self.render_suggested_picks_card(ui);
+                            rects.suggested = s_rect;
+                            rects.suggested_last_col_max_x = last_x;
                         },
                     );
                     ui.allocate_ui_with_layout(
                         vec2(matrix_w, bottom_h),
                         Layout::top_down(Align::Min),
                         |ui| {
-                            rects.matrix = self.render_matrix_card(ui, &analysis);
+                            let (m_rect, cell_sz, h_gap, v_gap, bottom_y) =
+                                self.render_matrix_card(ui, &analysis);
+                            rects.matrix = m_rect;
+                            rects.matrix_cell_size = cell_sz;
+                            rects.matrix_h_gap = h_gap;
+                            rects.matrix_v_gap = v_gap;
+                            rects.matrix_bottom_y = bottom_y;
                         },
                     );
                 });
@@ -3108,6 +3206,41 @@ mod tests {
         );
     }
 
+    fn make_5v5_gui_session() -> AppSession {
+        let mut session = AppSession::new().unwrap();
+        assert!(execute_command(&mut session, "ally 1 faceless void").unwrap());
+        assert!(execute_command(&mut session, "ally 2 crystal maiden").unwrap());
+        assert!(execute_command(&mut session, "ally 3 shadow demon").unwrap());
+        assert!(execute_command(&mut session, "ally 4 magnus").unwrap());
+        assert!(execute_command(&mut session, "ally 5 jakiro").unwrap());
+        assert!(execute_command(&mut session, "enemy 1 medusa").unwrap());
+        assert!(execute_command(&mut session, "enemy 2 storm spirit").unwrap());
+        assert!(execute_command(&mut session, "enemy 3 axe").unwrap());
+        assert!(execute_command(&mut session, "enemy 4 tusk").unwrap());
+        assert!(execute_command(&mut session, "enemy 5 witch doctor").unwrap());
+        session.local_player_hero = session.draft.allies[2].map(|p| p.hero_id);
+        session.draft.target_role = Role::Mid;
+        session
+    }
+
+    fn render_at_viewport(
+        app: &mut TrueSightGuiApp,
+        ctx: &egui::Context,
+        viewport: Vec2,
+    ) -> LayoutRects {
+        let raw_input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), viewport)),
+            ..Default::default()
+        };
+        let mut layout = None;
+        for _ in 0..2 {
+            let _ = ctx.run(raw_input.clone(), |ctx| {
+                layout = Some(app.render_frame(ctx));
+            });
+        }
+        layout.expect("layout rects captured")
+    }
+
     #[test]
     fn v4_layout_rects_fit_viewport_and_align_cards() {
         let mut session = AppSession::new().unwrap();
@@ -3125,42 +3258,202 @@ mod tests {
         let mut app = TrueSightGuiApp::new(session, None, None);
         app.picker_target = Some(PickerTarget::Slot(Side::Allies, 1));
 
-        let ctx = egui::Context::default();
-        let raw_input = egui::RawInput {
-            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1468.0, 960.0))),
-            ..Default::default()
-        };
+        for viewport in [
+            vec2(1433.0, 952.0),
+            vec2(1468.0, 960.0),
+            vec2(2560.0, 1440.0),
+        ] {
+            let ctx = egui::Context::default();
+            for tab in [MatrixTab::Counter, MatrixTab::Synergy, MatrixTab::Comp] {
+                app.matrix_tab = tab;
+                let r = render_at_viewport(&mut app, &ctx, viewport);
 
-        for tab in [MatrixTab::Counter, MatrixTab::Synergy, MatrixTab::Comp] {
-            app.matrix_tab = tab;
-            let mut layout = None;
-            for _ in 0..2 {
-                let _ = ctx.run(raw_input.clone(), |ctx| {
-                    layout = Some(app.render_frame(ctx));
-                });
+                assert!(
+                    r.top_bar.height() > 24.0 && r.top_bar.height() < 65.0,
+                    "viewport={viewport:?} tab={tab:?} top_bar height out of range: {:?}",
+                    r.top_bar
+                );
+                assert!(r.allies.min.y > r.top_bar.max.y);
+                assert!(
+                    (r.allies.min.y - r.oracle.min.y).abs() <= 1.5,
+                    "viewport={viewport:?} tab={tab:?} allies={:?} oracle={:?}",
+                    r.allies,
+                    r.oracle
+                );
+                assert!(
+                    (r.allies.min.y - r.enemies.min.y).abs() <= 1.5,
+                    "viewport={viewport:?} tab={tab:?} allies={:?} enemies={:?}",
+                    r.allies,
+                    r.enemies
+                );
+                assert!(
+                    (r.allies.max.y - r.oracle.max.y).abs() <= 2.0,
+                    "viewport={viewport:?} tab={tab:?} allies={:?} oracle={:?}",
+                    r.allies,
+                    r.oracle
+                );
+                assert!(
+                    (r.allies.max.y - r.enemies.max.y).abs() <= 2.0,
+                    "viewport={viewport:?} tab={tab:?} allies={:?} enemies={:?}",
+                    r.allies,
+                    r.enemies
+                );
+                assert!(
+                    r.enemies.max.x <= viewport.x,
+                    "viewport={viewport:?} tab={tab:?} enemies overflowed right: {:?}",
+                    r.enemies
+                );
+
+                assert!(r.suggested.min.y > r.allies.max.y);
+                assert!(
+                    (r.suggested.min.y - r.matrix.min.y).abs() <= 1.5,
+                    "viewport={viewport:?} tab={tab:?} suggested={:?} matrix={:?}",
+                    r.suggested,
+                    r.matrix
+                );
+                assert!(
+                    (r.suggested.max.y - r.matrix.max.y).abs() <= 2.0,
+                    "viewport={viewport:?} tab={tab:?} suggested={:?} matrix={:?}",
+                    r.suggested,
+                    r.matrix
+                );
+                assert!(
+                    r.matrix.max.x <= viewport.x && r.matrix.max.y <= viewport.y,
+                    "viewport={viewport:?} tab={tab:?} bottom overflow: {:?}",
+                    r.matrix
+                );
             }
-            let r = layout.expect("layout rects captured");
+        }
+    }
 
-            // Top bar must stay compact and never consume the whole window
+    #[test]
+    fn v4_slot_internal_geometry_prevents_badge_percentage_and_clear_overlap() {
+        let mut app = TrueSightGuiApp::new(make_5v5_gui_session(), None, None);
+        let ctx = egui::Context::default();
+        let viewport = vec2(1433.0, 952.0);
+        let r = render_at_viewport(&mut app, &ctx, viewport);
+
+        for (side_name, card_rect, slots) in [
+            ("allies", r.allies, &r.ally_slots),
+            ("enemies", r.enemies, &r.enemy_slots),
+        ] {
+            for i in 0..TEAM_SIZE {
+                let s = slots[i];
+                let ratio = s.portrait.width() / s.portrait.height().max(1.0);
+                assert!(
+                    (ratio - 16.0 / 9.0).abs() < 0.05,
+                    "{side_name} slot {i} portrait aspect ratio {ratio} != 16:9 ({:?})",
+                    s.portrait
+                );
+                assert!(
+                    (s.row.height() - 56.0).abs() <= 1.0,
+                    "{side_name} slot {i} height={} != 56.0",
+                    s.row.height()
+                );
+                if i > 0 {
+                    let gap = s.row.min.y - slots[i - 1].row.max.y;
+                    assert!(
+                        (gap - 8.0).abs() <= 1.5,
+                        "{side_name} slot {i} vertical gap={gap} != 8.0"
+                    );
+                }
+                assert!(
+                    s.portrait.max.x < s.mid.min.x,
+                    "{side_name} slot {i} portrait overlapped mid: {:?} vs {:?}",
+                    s.portrait,
+                    s.mid
+                );
+                assert!(
+                    s.mid.max.x < s.net.min.x,
+                    "{side_name} slot {i} mid overlapped net: {:?} vs {:?}",
+                    s.mid,
+                    s.net
+                );
+                let clear_rect = s
+                    .clear
+                    .unwrap_or_else(|| panic!("{side_name} slot {i} missing clear button rect"));
+                assert!(
+                    s.net.max.x < clear_rect.min.x,
+                    "{side_name} slot {i} net overlapped clear: {:?} vs {:?}",
+                    s.net,
+                    clear_rect
+                );
+                assert!(
+                    clear_rect.max.x <= s.row.max.x,
+                    "{side_name} slot {i} clear exceeded row"
+                );
+            }
+            let bottom_void = card_rect.max.y - slots[TEAM_SIZE - 1].row.max.y;
             assert!(
-                r.top_bar.height() > 24.0 && r.top_bar.height() < 65.0,
-                "tab={tab:?} top_bar height out of range: {:?}",
-                r.top_bar
+                bottom_void <= 16.0,
+                "{side_name} bottom empty void too large: {bottom_void}px"
             );
+        }
 
-            // Top row cards must start below top_bar and share identical top Y & bottom Y
-            assert!(r.allies.min.y > r.top_bar.max.y);
-            assert!((r.allies.min.y - r.oracle.min.y).abs() <= 1.5, "tab={tab:?} allies={:?} oracle={:?}", r.allies, r.oracle);
-            assert!((r.allies.min.y - r.enemies.min.y).abs() <= 1.5, "tab={tab:?} allies={:?} enemies={:?}", r.allies, r.enemies);
-            assert!((r.allies.max.y - r.oracle.max.y).abs() <= 2.0, "tab={tab:?} allies={:?} oracle={:?}", r.allies, r.oracle);
-            assert!((r.allies.max.y - r.enemies.max.y).abs() <= 2.0, "tab={tab:?} allies={:?} enemies={:?}", r.allies, r.enemies);
-            assert!(r.enemies.max.x <= 1468.0, "tab={tab:?} enemies overflowed right: {:?}", r.enemies);
+        // Simulate a real pointer click on Ally P1's clear button (`×`)
+        let clear_pos = r.ally_slots[0].clear.unwrap().center();
+        for pressed in [true, false] {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), viewport)),
+                events: vec![
+                    egui::Event::PointerMoved(clear_pos),
+                    egui::Event::PointerButton {
+                        pos: clear_pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::default(),
+                    },
+                ],
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                app.render_frame(ctx);
+            });
+        }
+        assert!(
+            app.session.draft.allies[0].is_none(),
+            "clicking Ally P1 clear button rect {:?} did not clear slot",
+            clear_pos
+        );
+        assert!(app.picker_target.is_none());
+    }
 
-            // Bottom row cards must start below top row, align top & bottom, and stay inside viewport
-            assert!(r.suggested.min.y > r.allies.max.y);
-            assert!((r.suggested.min.y - r.matrix.min.y).abs() <= 1.5, "tab={tab:?} suggested={:?} matrix={:?}", r.suggested, r.matrix);
-            assert!((r.suggested.max.y - r.matrix.max.y).abs() <= 2.0, "tab={tab:?} suggested={:?} matrix={:?}", r.suggested, r.matrix);
-            assert!(r.matrix.max.x <= 1468.0 && r.matrix.max.y <= 960.0, "tab={tab:?} bottom overflow: {:?}", r.matrix);
+    #[test]
+    fn v4_matrix_square_aspect_ratio_and_suggested_table_fill() {
+        for viewport in [
+            vec2(1433.0, 952.0),
+            vec2(1468.0, 960.0),
+            vec2(2560.0, 1440.0),
+        ] {
+            let mut app = TrueSightGuiApp::new(make_5v5_gui_session(), None, None);
+            app.matrix_tab = MatrixTab::Counter;
+            let ctx = egui::Context::default();
+            let r = render_at_viewport(&mut app, &ctx, viewport);
+
+            assert!(
+                (r.matrix_cell_size.x - r.matrix_cell_size.y).abs() <= 0.5,
+                "viewport={viewport:?} matrix cells not square: {:?}",
+                r.matrix_cell_size
+            );
+            assert!(
+                (r.matrix_h_gap - r.matrix_v_gap).abs() <= 2.0,
+                "viewport={viewport:?} matrix gaps asymmetric: h={} v={}",
+                r.matrix_h_gap,
+                r.matrix_v_gap
+            );
+            assert!(
+                r.matrix_bottom_y <= r.matrix.max.y - 6.0,
+                "viewport={viewport:?} matrix caption clipped/touching border: bottom_y={} card_max_y={}",
+                r.matrix_bottom_y,
+                r.matrix.max.y
+            );
+            assert!(
+                r.suggested_last_col_max_x >= r.suggested.max.x - 36.0
+                    && r.suggested_last_col_max_x <= r.suggested.max.x - 6.0,
+                "viewport={viewport:?} suggested table last_x={} vs card max_x={}",
+                r.suggested_last_col_max_x,
+                r.suggested.max.x
+            );
         }
     }
 
@@ -3185,18 +3478,7 @@ mod tests {
 
         let mut app = TrueSightGuiApp::new(session, None, None);
         let ctx = egui::Context::default();
-        let raw_input = egui::RawInput {
-            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1468.0, 960.0))),
-            ..Default::default()
-        };
-
-        let mut layout = None;
-        for _ in 0..2 {
-            let _ = ctx.run(raw_input.clone(), |ctx| {
-                layout = Some(app.render_frame(ctx));
-            });
-        }
-        let r = layout.expect("layout rects captured with 5v5 YOU+LOCK badges");
+        let r = render_at_viewport(&mut app, &ctx, vec2(1468.0, 960.0));
         assert!(
             (r.allies.max.y - r.oracle.max.y).abs() <= 2.0,
             "allies={:?} oracle={:?}",
@@ -3212,13 +3494,7 @@ mod tests {
 
         app.session.clear_slot_manual(Side::Allies, 1);
         assert!(app.session.draft.allies[1].is_none());
-        let mut after_clear = None;
-        for _ in 0..2 {
-            let _ = ctx.run(raw_input.clone(), |ctx| {
-                after_clear = Some(app.render_frame(ctx));
-            });
-        }
-        let r2 = after_clear.expect("layout rects captured after manual clear");
+        let r2 = render_at_viewport(&mut app, &ctx, vec2(1468.0, 960.0));
         assert!(
             (r2.allies.max.y - r2.oracle.max.y).abs() <= 2.0,
             "after clear: allies={:?} oracle={:?}",
