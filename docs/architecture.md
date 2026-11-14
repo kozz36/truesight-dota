@@ -83,11 +83,14 @@ $$\text{Logit}(P_{\text{win}}) = 3.2 \cdot \left( w_{\text{meta}} E_{\text{meta}
 - Active heroes combine empirical-Bayes performance ($m = 16$ at $50\%$) with an active practice volume mastery bonus:
   $$\Delta_{\text{comfort}} = \text{clamp}\!\left(\frac{W_{\text{eff}} + 8.0}{G_{\text{eff}} + 16.0} - 0.50 + \mathbb{I}(\widehat{WR}_{\text{eff}} \ge 0.50 \land G_{\text{eff}} \ge 0.50) \cdot 0.0065 \ln(1 + G_{\text{eff}}),\; -0.05,\; +0.05\right)$$
 
-## 4. Database Synchronization & Local Cache Architecture
+## 4. Database Synchronization, Account Resolution & Vision Capture
 
 `LocalCacheManager` (`crates/truesight-adapters/src/sync.rs`) manages `~/.local/share/truesight-dota/cache/`:
 - **Meta Snapshot (`opendota_hero_stats.json`)**: **24-hour TTL (`86,400 s`)**, matching OpenDota's daily rolling aggregation window.
-- **Player Comfort & Match History (`players/{account_id}/player_heroes.json` + `player_matches.json`)**: **1-hour TTL (`3,600 s`)**, capturing both lifetime totals and the latest 500 matches played by the linked Steam32 account.
+- **Per-Account Player Comfort & Match History (`players/{account_id}/player_heroes.json` + `player_matches.json`)**: **1-hour TTL (`3,600 s`)**, capturing both lifetime totals and the latest 500 matches played by the linked Steam32 account.
+- **3-Tier Steam32 Account Resolution**: `(1)` Explicit override (`TRUESIGHT_STEAM32_ID`, `~/.config/truesight-dota/config.toml`, `--account-id`, or the GUI **STEAM ACCOUNT LINK** modal) $\to$ `(2)` Dota 2 GSI `"player.steamid"` (`steam64 - 76561197960265728`) $\to$ `(3)` local Steam `loginusers.vdf` (`"MostRecent" "1"`). Unlinked users evaluate cleanly against neutral `+0.00%` personal comfort defaults.
+- **Optional STRATZ Empirical `with` Synergy**: When `STRATZ_API_TOKEN` is configured, overlays empirical GraphQL `with` synergy weights in `SeededMetaRepository` while preserving counter antisymmetry and double-centered synergy symmetry.
+- **GSI Faction & Vision Capture (`crates/truesight-adapters/src/vision.rs`)**: `BoundedGsiListener` extracts `"player.team_name"` (`radiant` | `dire`) into `DraftEvent::FactionDetected` and `DraftState.ally_faction` while keeping `P(Allies) + P(Enemies) = 1.0`. `VisionCaptureAdapter` classifies the 10 top-bar portraits against the embedded 127-hero RGB atlas (`crates/truesight-adapters/assets/hero_atlas.bin`) and maps Radiant (`0..4`) vs Dire (`5..9`) onto `Side::Allies` / `Side::Enemies`.
 - **Non-blocking Startup & Manual Sync**: Stale caches trigger a background refresh thread at startup without delaying GUI startup; users can also force an immediate refresh via the **`[Sync DB]`** button in the GUI or `truesight-dota --sync` in the terminal.
 
 ## 5. Toolchain & Validation Matrix
@@ -99,4 +102,4 @@ $$\text{Logit}(P_{\text{win}}) = 3.2 \cdot \left( w_{\text{meta}} E_{\text{meta}
 | `selected_toolchain` | `rustc 1.99.1 (58cf8f9c3 2026-10-13)` | Pinned via `rust-toolchain.toml` on CachyOS Linux (`x86_64-unknown-linux-gnu`) |
 | `TRUESIGHT_GSI_ADDR` | `127.0.0.1:4001` (default) | Local bind address for Dota 2 Game State Integration HTTP POST payloads |
 
-See [`docs/roadmap-and-tasks.md`](roadmap-and-tasks.md) for the complete `T1`–`T16` Phase 1 task log and the planned `T17`–`T20` Phase 2 roadmap.
+See [`docs/roadmap-and-tasks.md`](roadmap-and-tasks.md) for the complete `T1`–`T16` Phase 1 and `T17`–`T22` Phase 2 task log.

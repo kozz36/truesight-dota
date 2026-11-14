@@ -11,6 +11,8 @@ High-performance, native Rust 5v5 live draft analyzer and probabilistic hero rec
 2. **Force an immediate database sync from OpenDota** (`heroStats` 24h TTL + linked Steam32 account 1h TTL):
    ```bash
    truesight-dota --sync
+   # Optional explicit Steam32/Steam64 account override (or auto | none):
+   truesight-dota --sync --account-id <steam32_or_steam64>
    ```
 3. **Run the live 5v5 draft CLI/TUI demo**:
    ```bash
@@ -34,8 +36,8 @@ High-performance, native Rust 5v5 live draft analyzer and probabilistic hero rec
 | **8 Individual Dota 2 Medals** | Instant switching across `Herald`, `Guardian`, `Crusader`, `Archon`, `Legend`, `Ancient`, `Divine`, and `Immortal`, dynamically scaling meta winrates, counter sharpness ($\tau_b$), and pairwise synergies. |
 | **Mathematical Invariants** | Strict counter antisymmetry ($\Delta C(A,B) = -\Delta C(B,A)$), zero-mean double-centered synergy ($\Delta S(A,B) = \Delta S(B,A)$), $\sqrt{N}$ variance normalization, and exact identity between `Projected Win%` and header `ALLIES WIN PROBABILITY`. |
 | **Engine v2 & Comfort v3** | Incorporates **7-day patch momentum** (`pub_pick_trend`/`pub_win_trend`), **Personal Comfort v3** (per-match exponential recency decay $\tau = 75\text{d}$ over `/matches` + active volume mastery $\ln(1 + G_{\text{eff}})$), and **structural team composition balance** (`Melee`/`Ranged` ratio + `Disabler`/`Initiator` coverage). |
-| **Auto-Sync Local Cache (`24h` / `1h` TTL)** | Stores cached OpenDota snapshots (`opendota_hero_stats.json`, `player_heroes.json`, `player_matches.json`) in `~/.local/share/truesight-dota/cache/` with automatic background refresh on startup (`24h` Meta TTL, `1h` Player TTL) plus a **`[Sync DB]`** button in the GUI. |
-| **Hands-Free Slot Picker** | Click any Ally (`A1..A5`) or Enemy (`E1..E5`) slot button once, type the hero name directly with auto-focus, and press `Enter` to assign. |
+| **Auto-Sync & Account Linking** | 3-tier Steam32 resolver (`Explicit GUI/--account-id/config.toml` $\to$ `GSI player.steamid` $\to$ local Steam `loginusers.vdf`), isolating OpenDota player caches under `~/.local/share/truesight-dota/cache/players/{account_id}/` (`24h` Meta TTL, `1h` Player TTL) plus optional `STRATZ_API_TOKEN` GraphQL `with` synergy and a clickable **`[Sync DB]`** / Account modal in the GUI. |
+| **Hands-Free Slot Picker & Vision Port** | Click any Ally (`A1..A5`) or Enemy (`E1..E5`) slot button once, type the hero name directly with auto-focus, and press `Enter` to assign. Includes `VisionCaptureAdapter` (`truesight-adapters::vision`) for 10-slot Radiant/Dire top-bar portrait matching and GSI `player.team_name` faction routing. |
 
 ## Interactive CLI Commands (`truesight-dota --cli`)
 
@@ -45,6 +47,8 @@ enemy <1..5> <hero>     # Assign hero to Enemy slot E1..E5 (or 'none' to clear)
 ban <hero>              # Toggle hero ban
 role <1..5>             # Set target recommendation role (Pos 1..5)
 bracket <medal>         # Switch medal: herald | guardian | crusader | archon | legend | ancient | divine | immortal
+faction <radiant|dire>  # Switch Allies team faction (draft math stays 50-50 neutral)
+account <id|auto|none>  # Link explicit Steam32/Steam64 ID, switch to auto detection, or unlink
 sync                    # Force live refresh from OpenDota API into ~/.local/share/truesight-dota/cache/
 reset                   # Clear current draft
 quit                    # Exit session
@@ -53,10 +57,13 @@ quit                    # Exit session
 ## Documentation & Governance
 
 - [`AGENTS.md`](AGENTS.md) — Engineering, hexagonal architecture, statistical invariants, and Red-Green TDD testing policy.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — Local build prerequisites, TDD guidelines, privacy rules, and PR verification matrix.
+- [`SECURITY.md`](SECURITY.md) — Security architecture (`#![forbid(unsafe_code)]`, loopback GSI bounds) and vulnerability reporting process.
 - [`skills/truesight-dota-domain/SKILL.md`](skills/truesight-dota-domain/SKILL.md) — Product domain skill and invariant reference for AI agents and contributors.
 - [`skills/rust-architect/SKILL.md`](skills/rust-architect/SKILL.md) — Bundled Rust architecture & systems engineering skill (`edition = "2024"`, MSRV `1.85`, `#![forbid(unsafe_code)]`).
-- [`docs/architecture.md`](docs/architecture.md) — Hexagonal architecture, Engine v2 & Comfort v3 mathematical equations, and GSI / Vision port specifications.
-- [`docs/roadmap-and-tasks.md`](docs/roadmap-and-tasks.md) — Formal engineering task plan (`T1`–`T16`), TDD verification gates, and data sync schedule.
+- [`docs/architecture.md`](docs/architecture.md) — Hexagonal architecture, Engine v2 & Comfort v3 mathematical equations, and GSI / Vision / Account specifications.
+- [`docs/roadmap-and-tasks.md`](docs/roadmap-and-tasks.md) — Formal engineering task plan (`T1`–`T22`), TDD verification gates, and data sync schedule.
+- [`.github/workflows/ci.yml`](.github/workflows/ci.yml), [`.github/workflows/release.yml`](.github/workflows/release.yml), and [`.github/dependabot.yml`](.github/dependabot.yml) — Automated dual-feature CI, `v*` binary release packaging, and weekly dependency updates.
 
 ## License
 
