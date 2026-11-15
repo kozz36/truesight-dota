@@ -30,8 +30,16 @@ pub struct AppSession {
     pub last_sync_notice: Option<String>,
     sync_generation: u64,
     sync_rx: Option<Receiver<SyncCompletion>>,
+    sync_workers: Vec<std::thread::JoinHandle<()>>,
     last_rules_state: Option<String>,
     vision_reset_pending: bool,
+}
+
+impl Drop for AppSession {
+    fn drop(&mut self) {
+        let _ = self.cache_mgr.cancel_in_flight();
+        self.reap_finished_sync_workers();
+    }
 }
 
 fn hero_role_affinity(matrix: &MatchupMatrix, hero_id: HeroId, role: Role) -> f32 {
@@ -110,9 +118,22 @@ impl AppSession {
             last_sync_notice: None,
             sync_generation: 0,
             sync_rx: None,
+            sync_workers: Vec::new(),
             last_rules_state: None,
             vision_reset_pending: false,
         })
+    }
+
+    fn reap_finished_sync_workers(&mut self) {
+        let mut active = Vec::with_capacity(self.sync_workers.len());
+        for handle in self.sync_workers.drain(..) {
+            if handle.is_finished() {
+                let _ = handle.join();
+            } else {
+                active.push(handle);
+            }
+        }
+        self.sync_workers = active;
     }
 
     pub fn set_bracket(&mut self, bracket: Bracket) {
@@ -134,17 +155,19 @@ impl AppSession {
     }
 
     pub fn set_account_id(&mut self, account_id: Option<u64>, explicit: bool) {
-        self.sync_generation = self.sync_generation.saturating_add(1);
+        self.sync_generation = self.cache_mgr.cancel_in_flight();
         self.sync_in_flight = false;
         self.sync_rx = None;
+        self.reap_finished_sync_workers();
         self.cache_mgr.set_account_id(account_id, explicit);
         self.reload_repository();
     }
 
     pub fn set_account_auto(&mut self) {
-        self.sync_generation = self.sync_generation.saturating_add(1);
+        self.sync_generation = self.cache_mgr.cancel_in_flight();
         self.sync_in_flight = false;
         self.sync_rx = None;
+        self.reap_finished_sync_workers();
         self.cache_mgr.set_auto_account();
         self.reload_repository();
     }
@@ -156,11 +179,13 @@ impl AppSession {
         if self.sync_in_flight {
             return false;
         }
-        let generation = self.sync_generation;
+        self.reap_finished_sync_workers();
+        let (generation, _) = self.cache_mgr.begin_sync_generation();
+        self.sync_generation = generation;
         let account_id = self.cache_mgr.player_account_id;
         let bg_mgr = self.cache_mgr.clone();
         let (tx, rx) = mpsc::sync_channel(1);
-        let spawned = std::thread::Builder::new()
+        match std::thread::Builder::new()
             .name("truesight-sync-worker".into())
             .spawn(move || {
                 let result = task(bg_mgr, force);
@@ -169,14 +194,16 @@ impl AppSession {
                     account_id,
                     result,
                 });
-            })
-            .is_ok();
-        if spawned {
-            self.sync_in_flight = true;
-            self.sync_rx = Some(rx);
-            self.db_status = "DB [SYNCING...]".into();
+            }) {
+            Ok(handle) => {
+                self.sync_in_flight = true;
+                self.sync_rx = Some(rx);
+                self.sync_workers.push(handle);
+                self.db_status = "DB [SYNCING...]".into();
+                true
+            }
+            Err(_) => false,
         }
-        spawned
     }
 
     pub fn start_background_sync(&mut self, force: bool) -> bool {
@@ -197,6 +224,7 @@ impl AppSession {
 
         self.sync_in_flight = false;
         self.sync_rx = None;
+        self.reap_finished_sync_workers();
 
         let Ok(done) = outcome else {
             self.db_status = format!(
@@ -248,6 +276,8 @@ impl AppSession {
     }
 
     pub fn sync_db(&mut self, force: bool) -> Result<String, String> {
+        let (generation, _) = self.cache_mgr.begin_sync_generation();
+        self.sync_generation = generation;
         let msg = self
             .cache_mgr
             .sync_from_opendota(force)

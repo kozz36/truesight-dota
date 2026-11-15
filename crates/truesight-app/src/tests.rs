@@ -717,3 +717,101 @@ fn gsi_http_listener_reconciles_full_session_state_after_overflow_when_peer_stop
     assert!(!session.poll_live_sources(Some(&mut listener), None));
     assert_eq!(listener.queue_stats().recovered_resyncs, 1);
 }
+
+#[test]
+fn sync_coordinator_serializes_generations_rejects_stale_writes_and_preserves_valid_cache_on_corruption() {
+    use std::time::Duration;
+    use truesight_adapters::sync::LocalCacheManager;
+    use truesight_core::domain::{Bracket, HeroId};
+    use truesight_core::ports::StatsRepository;
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_sync_gen_coord_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    let mut session = AppSession::new().unwrap();
+    session.cache_mgr = LocalCacheManager::with_dir(tmp_dir.clone(), 111_111_111);
+    session.reload_repository();
+
+    let (started1_tx, started1_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let (gate1_tx, gate1_rx) = std::sync::mpsc::sync_channel::<()>(0);
+    let (w1_res_tx, w1_res_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+
+    let now_base = LocalCacheManager::now_unix();
+    let stale_meta = r#"[{"id": 1, "1_pick": 1000, "1_win": 410, "2_pick": 1000, "2_win": 410, "3_pick": 1000, "3_win": 410, "4_pick": 1000, "4_win": 410, "5_pick": 1000, "5_win": 410, "6_pick": 1000, "6_win": 410, "7_pick": 1000, "7_win": 410}]"#;
+    let acct1_player = r#"[{"hero_id": 1, "last_played": 1794499000, "games": 40, "win": 35}]"#;
+
+    // 1. Launch Worker 1 for Account 111_111_111 and pause it behind gate1
+    assert!(session.start_background_sync_with(true, move |mgr, _| {
+        let _ = started1_tx.send(());
+        let _ = gate1_rx.recv();
+        let res = mgr
+            .write_cached_files(Some(stale_meta), Some(acct1_player), now_base.saturating_add(50))
+            .map_err(|e| e.0);
+        let _ = w1_res_tx.send(res.clone());
+        res.map(|_| "Worker 1".into())
+    }));
+    started1_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+    // 2. Switch to Account 222_333_444 and complete Worker 2 with newer valid shared meta + acct 222 data
+    session.set_account_id(Some(222_333_444), true);
+    let fresh_meta = r#"[{"id": 1, "1_pick": 1000, "1_win": 700, "2_pick": 1000, "2_win": 700, "3_pick": 1000, "3_win": 700, "4_pick": 1000, "4_win": 700, "5_pick": 1000, "5_win": 700, "6_pick": 1000, "6_win": 700, "7_pick": 1000, "7_win": 700}]"#;
+    let acct2_player = r#"[{"hero_id": 2, "last_played": 1794499000, "games": 50, "win": 40}]"#;
+    assert!(session.start_background_sync_with(true, move |mgr, _| {
+        assert!(!mgr.is_cancelled());
+        mgr.write_cached_files(Some(fresh_meta), Some(acct2_player), now_base)
+            .map_err(|e| e.0)?;
+        Ok("Worker 2 newer cache".into())
+    }));
+
+    for _ in 0..100 {
+        session.poll_live_sources(None, None);
+        if !session.sync_in_flight {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!session.sync_in_flight);
+    assert!(session.matrix.hero(HeroId(1)).unwrap().role_winrates[0] > 0.62);
+    assert_eq!(session.matrix.hero(HeroId(2)).unwrap().personal_matches, 50);
+
+    // 3. Release stale Worker 1: generation fence must reject its write instead of overwriting Worker 2
+    gate1_tx.send(()).unwrap();
+    let w1_res = w1_res_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(w1_res.is_err(), "Stale Worker 1 write must be fenced out: {w1_res:?}");
+
+    session.reload_repository();
+    assert!(
+        session.matrix.hero(HeroId(1)).unwrap().role_winrates[0] > 0.62,
+        "Stale Worker 1 must not overwrite newer shared heroStats"
+    );
+    assert_eq!(
+        session.matrix.hero(HeroId(1)).unwrap().personal_matches,
+        0,
+        "Account 111 personal hero data must not leak into Account 222"
+    );
+    assert_eq!(session.matrix.hero(HeroId(2)).unwrap().personal_matches, 50);
+
+    // 4. Truncated/corrupt payload must be rejected without touching valid cache or advancing timestamps
+    let err = session
+        .cache_mgr
+        .write_cached_files(Some(r#"[{"id": 1, "1_pick": 1000"#), None, now_base + 9_999);
+    assert!(err.is_err(), "Truncated JSON payload must be rejected");
+    assert_ne!(session.cache_mgr.read_timestamps().0, Some(now_base + 9_999));
+    let still_valid = session
+        .cache_mgr
+        .build_repository()
+        .load_matrix(Bracket::Legend)
+        .unwrap();
+    assert!(still_valid.hero(HeroId(1)).unwrap().role_winrates[0] > 0.62);
+
+    // No leftover temp staging files in cache_dir
+    for entry in std::fs::read_dir(&tmp_dir).unwrap().flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        assert!(!name.contains(".tmp."), "Leftover temp file found: {name}");
+    }
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}

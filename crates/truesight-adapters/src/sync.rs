@@ -1,7 +1,9 @@
 use crate::meta_repo::SeededMetaRepository;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use truesight_core::domain::HeroId;
 use truesight_core::ports::PortError;
@@ -250,12 +252,45 @@ pub fn detect_local_steam_vdf() -> Option<u64> {
     None
 }
 
+#[derive(Debug, Default)]
+struct CacheSyncState {
+    latest_started_gen: u64,
+    latest_committed_meta_gen: u64,
+}
+
+fn coordinator_for_dir(dir: &Path) -> Arc<Mutex<CacheSyncState>> {
+    static REGISTRY: OnceLock<Mutex<Vec<(PathBuf, Arc<Mutex<CacheSyncState>>)>>> = OnceLock::new();
+    let reg = REGISTRY.get_or_init(|| Mutex::new(Vec::new()));
+    let mut list = reg.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, coord)) = list.iter().find(|(p, _)| p == dir) {
+        return Arc::clone(coord);
+    }
+    let coord = Arc::new(Mutex::new(CacheSyncState::default()));
+    list.push((dir.to_path_buf(), Arc::clone(&coord)));
+    coord
+}
+
+fn atomic_write_file(path: &Path, content: &str) -> Result<(), PortError> {
+    static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("cache");
+    let tmp = path.with_file_name(format!(".{name}.tmp.{}.{seq}", std::process::id()));
+    let res = fs::write(&tmp, content).and_then(|()| fs::rename(&tmp, path));
+    if res.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    res.map_err(|e| PortError(e.to_string()))
+}
+
 #[derive(Debug, Clone)]
 pub struct LocalCacheManager {
     pub cache_dir: PathBuf,
     pub player_account_id: Option<u64>,
     pub explicit_override: bool,
     pub explicitly_unlinked: bool,
+    sync_generation: u64,
+    cancel_token: Arc<AtomicBool>,
+    coordinator: Arc<Mutex<CacheSyncState>>,
 }
 
 impl Default for LocalCacheManager {
@@ -265,43 +300,20 @@ impl Default for LocalCacheManager {
 }
 
 impl LocalCacheManager {
+    fn default_cache_dir() -> PathBuf {
+        PathBuf::from(std::env::var("HOME").as_deref().unwrap_or("/tmp")).join(".local/share/truesight-dota/cache")
+    }
+
     pub fn new(player_account_id: u64) -> Self {
-        let base = std::env::var("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("/tmp"));
-        let cache_dir = base.join(".local/share/truesight-dota/cache");
-        Self {
-            cache_dir,
-            player_account_id: normalize_steam32_id(player_account_id),
-            explicit_override: true,
-            explicitly_unlinked: false,
-        }
+        Self { explicit_override: true, ..Self::with_optional_account(Self::default_cache_dir(), normalize_steam32_id(player_account_id)) }
     }
 
     pub fn auto_detected() -> Self {
-        let base = std::env::var("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("/tmp"));
-        let cache_dir = base.join(".local/share/truesight-dota/cache");
+        let dir = Self::default_cache_dir();
         match load_account_config() {
-            AccountLinkConfig::Explicit(id) => Self {
-                cache_dir,
-                player_account_id: Some(id),
-                explicit_override: true,
-                explicitly_unlinked: false,
-            },
-            AccountLinkConfig::Unlinked => Self {
-                cache_dir,
-                player_account_id: None,
-                explicit_override: true,
-                explicitly_unlinked: true,
-            },
-            AccountLinkConfig::Auto => Self {
-                cache_dir,
-                player_account_id: detect_local_steam_vdf(),
-                explicit_override: false,
-                explicitly_unlinked: false,
-            },
+            AccountLinkConfig::Explicit(id) => Self { explicit_override: true, ..Self::with_optional_account(dir, Some(id)) },
+            AccountLinkConfig::Unlinked => Self { explicit_override: true, explicitly_unlinked: true, ..Self::with_optional_account(dir, None) },
+            AccountLinkConfig::Auto => Self::with_optional_account(dir, detect_local_steam_vdf()),
         }
     }
 
@@ -310,12 +322,33 @@ impl LocalCacheManager {
     }
 
     pub fn with_optional_account(cache_dir: PathBuf, player_account_id: Option<u64>) -> Self {
+        let coordinator = coordinator_for_dir(&cache_dir);
         Self {
             cache_dir,
             player_account_id: player_account_id.and_then(normalize_steam32_id),
             explicit_override: false,
             explicitly_unlinked: false,
+            sync_generation: 0,
+            cancel_token: Arc::new(AtomicBool::new(false)),
+            coordinator,
         }
+    }
+
+    pub fn begin_sync_generation(&mut self) -> (u64, Arc<AtomicBool>) {
+        self.cancel_token.store(true, Ordering::Release);
+        let mut state = self.coordinator.lock().unwrap_or_else(|e| e.into_inner());
+        state.latest_started_gen = state.latest_started_gen.saturating_add(1);
+        self.sync_generation = state.latest_started_gen;
+        self.cancel_token = Arc::new(AtomicBool::new(false));
+        (self.sync_generation, Arc::clone(&self.cancel_token))
+    }
+
+    pub fn cancel_in_flight(&mut self) -> u64 {
+        self.begin_sync_generation().0
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel_token.load(Ordering::Acquire)
     }
 
     pub fn set_account_id(&mut self, account_id: Option<u64>, explicit: bool) {
@@ -408,101 +441,115 @@ impl LocalCacheManager {
         }
     }
 
-    pub fn write_cached_files(
+    fn publish_staged_cache(
         &self,
         meta_json: Option<&str>,
+        stratz_json: Option<&str>,
         player_json: Option<&str>,
+        player_matches_json: Option<&str>,
         now_unix: u64,
     ) -> Result<(), PortError> {
-        fs::create_dir_all(&self.cache_dir).map_err(|e| PortError(e.to_string()))?;
-        let (mut meta_ts, _) = self.read_timestamps();
+        let is_arr = |s: &str| { let t = s.trim(); t.starts_with('[') && t.ends_with(']') };
+        if let Some(m) = meta_json.filter(|m| !is_arr(m) || parse_hero_stats_json(m).is_empty()) {
+            let _ = m;
+            return Err(PortError("Invalid or truncated heroStats JSON payload".into()));
+        }
+        if stratz_json.is_some_and(|s| parse_stratz_with_synergy_json(s).is_empty()) {
+            return Err(PortError("Invalid or truncated STRATZ synergy JSON payload".into()));
+        }
+        if player_json.is_some_and(|p| self.player_account_id.is_none() || !is_arr(p) || (p.trim() != "[]" && parse_player_comfort_json(p).is_empty())) {
+            return Err(PortError("Invalid or truncated player comfort JSON payload".into()));
+        }
+        if player_matches_json.is_some_and(|pm| self.player_account_id.is_none() || !is_arr(pm)) {
+            return Err(PortError("Invalid or truncated player matches JSON payload".into()));
+        }
 
+        let mut state = self.coordinator.lock().unwrap_or_else(|e| e.into_inner());
+        let superseded = self.sync_generation > 0
+            && (self.sync_generation < state.latest_started_gen || self.sync_generation < state.latest_committed_meta_gen);
+        if self.is_cancelled() || superseded {
+            return Err(PortError("Sync superseded by newer generation".into()));
+        }
+
+        if meta_json.is_some() || stratz_json.is_some() {
+            fs::create_dir_all(&self.cache_dir).map_err(|e| PortError(e.to_string()))?;
+        }
         if let Some(m_body) = meta_json {
-            fs::write(self.meta_json_path(), m_body).map_err(|e| PortError(e.to_string()))?;
-            meta_ts = Some(now_unix);
+            atomic_write_file(&self.meta_json_path(), m_body)?;
+            atomic_write_file(&self.metadata_path(), &format!("meta_sync_unix={now_unix}\n"))?;
+            state.latest_committed_meta_gen = state.latest_committed_meta_gen.max(self.sync_generation);
         }
-        if let Some(mts) = meta_ts {
-            fs::write(self.metadata_path(), format!("meta_sync_unix={mts}\n"))
-                .map_err(|e| PortError(e.to_string()))?;
+        if let Some(s_body) = stratz_json {
+            atomic_write_file(&self.stratz_synergy_json_path(), s_body)?;
+            state.latest_committed_meta_gen = state.latest_committed_meta_gen.max(self.sync_generation);
         }
-
-        if let Some(p_body) = player_json {
-            if let (Some(p_dir), Some(p_json_path), Some(p_meta_path)) = (
-                self.player_dir(),
-                self.player_json_path(),
-                self.player_metadata_path(),
-            ) {
+        if player_json.is_some() || player_matches_json.is_some() {
+            if let (Some(p_dir), Some(p_path), Some(pm_meta), Some(m_path)) =
+                (self.player_dir(), self.player_json_path(), self.player_metadata_path(), self.player_matches_json_path())
+            {
                 fs::create_dir_all(&p_dir).map_err(|e| PortError(e.to_string()))?;
-                fs::write(p_json_path, p_body).map_err(|e| PortError(e.to_string()))?;
-                fs::write(p_meta_path, format!("player_sync_unix={now_unix}\n"))
-                    .map_err(|e| PortError(e.to_string()))?;
+                if let Some(pm_body) = player_matches_json { atomic_write_file(&m_path, pm_body)?; }
+                if let Some(p_body) = player_json {
+                    atomic_write_file(&p_path, p_body)?;
+                    atomic_write_file(&pm_meta, &format!("player_sync_unix={now_unix}\n"))?;
+                }
             }
         }
-
         Ok(())
+    }
+
+    pub fn write_cached_files(&self, meta_json: Option<&str>, player_json: Option<&str>, now_unix: u64) -> Result<(), PortError> {
+        self.publish_staged_cache(meta_json, None, player_json, None, now_unix)
     }
 
     /// Synchronizes stale or forced endpoints from OpenDota (and optional STRATZ token) with a 6s timeout.
     pub fn sync_from_opendota(&self, force: bool) -> Result<String, PortError> {
+        if self.is_cancelled() {
+            return Err(PortError("Sync cancelled".into()));
+        }
         let now = Self::now_unix();
         let need_meta = force || self.is_meta_stale(now);
         let need_player = self.player_account_id.is_some() && (force || self.is_player_stale(now));
-
         if !need_meta && !need_player {
             return Ok("DB cache is already fresh (Meta <24h, Player <1h).".into());
         }
 
-        let mut fetched_meta = None;
-        let mut fetched_player = None;
+        let is_arr = |s: &str| { let t = s.trim(); t.starts_with('[') && t.ends_with(']') };
+        let (mut fetched_meta, mut fetched_stratz, mut fetched_player, mut fetched_matches) = (None, None, None, None);
         let mut updated_parts = Vec::new();
 
         if need_meta {
             let body = fetch_url("https://api.opendota.com/api/heroStats")?;
-            if body.trim_start().starts_with('[') {
+            if is_arr(&body) && !parse_hero_stats_json(&body).is_empty() {
                 fetched_meta = Some(body);
                 updated_parts.push("heroStats (24h TTL)");
             }
-            if let Ok(token) = std::env::var("STRATZ_API_TOKEN") {
-                if !token.trim().is_empty() {
-                    if let Ok(s_body) = fetch_stratz_with_synergy_graphql(token.trim()) {
-                        let _ = fs::create_dir_all(&self.cache_dir);
-                        let _ = fs::write(self.stratz_synergy_json_path(), s_body);
+            if !self.is_cancelled() {
+                if let Some(token) = std::env::var("STRATZ_API_TOKEN").ok().filter(|t| !t.trim().is_empty()) {
+                    if let Some(sb) = fetch_stratz_with_synergy_graphql(token.trim()).ok().filter(|s| !parse_stratz_with_synergy_json(s).is_empty()) {
+                        fetched_stratz = Some(sb);
                         updated_parts.push("STRATZ synergy");
                     }
                 }
             }
         }
-
-        if need_player {
+        if need_player && !self.is_cancelled() {
             if let Some(account_id) = self.player_account_id {
-                let url = format!("https://api.opendota.com/api/players/{account_id}/heroes");
-                let body = fetch_url(&url)?;
-                if body.trim_start().starts_with('[') {
+                let body = fetch_url(&format!("https://api.opendota.com/api/players/{account_id}/heroes"))?;
+                if is_arr(&body) {
                     fetched_player = Some(body);
                     updated_parts.push("player comfort (1h TTL)");
                 }
-                let matches_url =
-                    format!("https://api.opendota.com/api/players/{account_id}/matches?limit=500");
-                if let Ok(m_body) = fetch_url(&matches_url) {
-                    if m_body.trim_start().starts_with('[') {
-                        if let (Some(p_dir), Some(m_path)) =
-                            (self.player_dir(), self.player_matches_json_path())
-                        {
-                            let _ = fs::create_dir_all(p_dir);
-                            let _ = fs::write(m_path, m_body);
-                        }
+                if !self.is_cancelled() {
+                    if let Some(mb) = fetch_url(&format!("https://api.opendota.com/api/players/{account_id}/matches?limit=500")).ok().filter(|m| is_arr(m)) {
+                        fetched_matches = Some(mb);
                     }
                 }
             }
         }
 
-        self.write_cached_files(fetched_meta.as_deref(), fetched_player.as_deref(), now)?;
-
-        if updated_parts.is_empty() {
-            Ok("Synced OpenDota cache.".into())
-        } else {
-            Ok(format!("Synced OpenDota: {}.", updated_parts.join(" + ")))
-        }
+        self.publish_staged_cache(fetched_meta.as_deref(), fetched_stratz.as_deref(), fetched_player.as_deref(), fetched_matches.as_deref(), now)?;
+        if updated_parts.is_empty() { Ok("Synced OpenDota cache.".into()) } else { Ok(format!("Synced OpenDota: {}.", updated_parts.join(" + "))) }
     }
 
     pub fn freshness_badge(&self, now_unix: u64) -> String {
