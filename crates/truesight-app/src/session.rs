@@ -2,7 +2,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use truesight_adapters::gsi::BoundedGsiListener;
 use truesight_adapters::sync::LocalCacheManager;
 use truesight_adapters::vision::BoundedVisionWorker;
-use truesight_core::domain::{Bracket, DraftPick, DraftState, HeroId, Role, Side, TEAM_SIZE};
+use truesight_core::domain::{Bracket, DraftPick, DraftState, Faction, HeroId, Role, Side, TEAM_SIZE};
 use truesight_core::math::{
     DraftAnalysis5v5, HeroRecommendation, MatchupMatrix, ModelWeights, evaluate_draft_5v5,
     recommend_heroes,
@@ -556,7 +556,7 @@ impl AppSession {
                 self.last_rules_state = Some(state_name);
             }
             DraftEvent::FactionDetected { faction } => {
-                self.draft.ally_faction = faction;
+                self.set_ally_faction(faction);
             }
             DraftEvent::PlayerSteamIdDetected { steam32 } => {
                 if !self.cache_mgr.explicit_override
@@ -578,7 +578,7 @@ impl AppSession {
                 hero_slug,
             } => {
                 if self.cache_mgr.player_account_id == Some(steam32) {
-                    self.draft.ally_faction = faction;
+                    self.set_ally_faction(faction);
                     if let Some(id) = self.find_hero(&hero_slug) {
                         self.local_player_hero = Some(id);
                         self.sync_local_player_target_role();
@@ -592,6 +592,11 @@ impl AppSession {
                 role,
             } => {
                 self.apply_side_pick(side, slot, hero_id, role);
+            }
+            DraftEvent::BanDetected { hero_id } => {
+                if !self.draft.is_unavailable(hero_id) {
+                    let _ = self.draft.toggle_ban(hero_id);
+                }
             }
             DraftEvent::DraftReset => {
                 self.reset_draft();
@@ -668,6 +673,35 @@ impl AppSession {
             }
         }
         changed
+    }
+
+    /// Switches the user's faction and atomically swaps Allied/Enemy picks and slot locks.
+    pub fn set_ally_faction(&mut self, faction: Faction) {
+        if self.draft.ally_faction == faction {
+            return;
+        }
+        self.draft.ally_faction = faction;
+        std::mem::swap(&mut self.draft.allies, &mut self.draft.enemies);
+        std::mem::swap(&mut self.ally_locked_slots, &mut self.enemy_locked_slots);
+        self.rebalance_unlocked_side_roles(Side::Allies);
+        self.rebalance_unlocked_side_roles(Side::Enemies);
+        self.sync_local_player_target_role();
+    }
+
+    /// Evaluates top enemy draft candidates for `enemy_role` using neutral comfort (`0.0`).
+    pub fn recommend_enemy_heroes(&self, enemy_role: Role, top_n: usize) -> Vec<HeroRecommendation> {
+        let mut enemy_draft = DraftState {
+            ally_faction: self.draft.ally_faction.opposite(),
+            allies: self.draft.enemies,
+            enemies: self.draft.allies,
+            bans: self.draft.bans,
+            bracket: self.draft.bracket,
+            target_role: enemy_role,
+        };
+        enemy_draft.target_role = enemy_role;
+        let mut enemy_weights = self.weights;
+        enemy_weights.comfort_weight = 0.0;
+        recommend_heroes(&enemy_draft, &self.matrix, &enemy_weights, top_n)
     }
 
     pub fn evaluate(&self) -> (DraftAnalysis5v5, Vec<HeroRecommendation>) {

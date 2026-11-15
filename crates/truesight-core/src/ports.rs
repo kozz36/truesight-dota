@@ -37,6 +37,9 @@ pub enum DraftEvent {
         hero_id: HeroId,
         role: Option<Role>,
     },
+    BanDetected {
+        hero_id: HeroId,
+    },
     DraftReset,
 }
 

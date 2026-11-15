@@ -275,11 +275,12 @@ pub fn execute_command(session: &mut AppSession, line: &str) -> Result<bool, Str
             let Some(&f_str) = parts.get(1) else {
                 return Err("Usage: faction <radiant|dire>".into());
             };
-            session.draft.ally_faction = match f_str.to_ascii_lowercase().as_str() {
+            let faction = match f_str.to_ascii_lowercase().as_str() {
                 "radiant" | "r" => Faction::Radiant,
                 "dire" | "d" => Faction::Dire,
                 _ => return Err("Faction must be radiant or dire".into()),
             };
+            session.set_ally_faction(faction);
         }
         "account" | "steam" => {
             let Some(&a_str) = parts.get(1) else {

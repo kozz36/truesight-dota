@@ -127,6 +127,43 @@ fn parse_gsi_events_from_root(root: &JsonVal) -> Vec<DraftEvent> {
         }
     }
 
+    if let Some(draft_node) = root.get("draft") {
+        for sub in [
+            Some(draft_node),
+            draft_node.get("team2"),
+            draft_node.get("team3"),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            for idx in 0..16_usize {
+                let key = format!("ban{idx}_id");
+                if let Some(hid) = sub.get(&key).and_then(JsonVal::as_i32) {
+                    if (1..160).contains(&hid) {
+                        let ev = DraftEvent::BanDetected {
+                            hero_id: HeroId(hid as u16),
+                        };
+                        if !events.contains(&ev) {
+                            events.push(ev);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Some(ban_node) = root.get("truesight_ban") {
+        if let Some(hid) = ban_node.get("hero_id").and_then(JsonVal::as_i32) {
+            if (1..160).contains(&hid) {
+                let ev = DraftEvent::BanDetected {
+                    hero_id: HeroId(hid as u16),
+                };
+                if !events.contains(&ev) {
+                    events.push(ev);
+                }
+            }
+        }
+    }
+
     events
 }
 
@@ -471,6 +508,7 @@ fn should_coalesce(existing: &DraftEvent, incoming: &DraftEvent) -> bool {
         (PickDetected { side: s1, slot: l1, .. }, PickDetected { side: s2, slot: l2, .. }) => {
             s1 == s2 && l1 == l2
         }
+        (BanDetected { hero_id: a }, BanDetected { hero_id: b }) => a == b,
         (PlayerHeroMapped { steam32: a, .. }, PlayerHeroMapped { steam32: b, .. }) => a == b,
         (GameRulesStateChanged { state_name: s1, .. }, GameRulesStateChanged { state_name: s2, .. }) => {
             !is_reset_state(s1) || s1 == s2

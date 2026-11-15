@@ -558,3 +558,82 @@ fn cli_loop_polls_live_gsi_while_awaiting_input_and_preserves_partial_command() 
         );
     });
 }
+
+#[test]
+fn faction_change_atomically_swaps_teams_and_enemy_scout_uses_neutral_comfort() {
+    use truesight_core::domain::{Faction, HeroId, Role, Side};
+    use truesight_core::math::evaluate_draft_5v5;
+    use truesight_core::ports::DraftEvent;
+
+    let mut session = AppSession::new().unwrap();
+    let rad_picks = ["antimage", "puck", "magnus", "rubick", "crystal_maiden"];
+    let dire_picks = ["medusa", "storm_spirit", "axe", "tusk", "lion"];
+    for (slot, name) in rad_picks.iter().enumerate() {
+        assert!(execute_command(&mut session, &format!("ally {} {name}", slot + 1)).unwrap());
+    }
+    for (slot, name) in dire_picks.iter().enumerate() {
+        let hid = session.find_hero(name).unwrap();
+        session.apply_event(DraftEvent::PickDetected {
+            side: Side::Enemies,
+            slot,
+            hero_id: hid,
+            role: Role::ALL.get(slot).copied(),
+        });
+    }
+    let expected_rad: Vec<HeroId> = session.draft.allies.iter().flatten().map(|p| p.hero_id).collect();
+    let expected_dire: Vec<HeroId> = session.draft.enemies.iter().flatten().map(|p| p.hero_id).collect();
+    assert_eq!(session.draft.ally_faction, Faction::Radiant);
+    assert_eq!(expected_rad.len(), 5);
+    assert_eq!(expected_dire.len(), 5);
+    assert!(session.ally_locked_slots.iter().all(|&l| l));
+    assert!(!session.enemy_locked_slots[0]);
+    session.set_slot_manual(Side::Enemies, 0, expected_dire[0]);
+    assert!(session.enemy_locked_slots[0]);
+
+    // Switching faction to Dire via GSI event swaps 5v5 teams and locks atomically without dropping heroes
+    session.apply_event(DraftEvent::FactionDetected { faction: Faction::Dire });
+    assert_eq!(session.draft.ally_faction, Faction::Dire);
+    let allies_after: Vec<HeroId> = session.draft.allies.iter().flatten().map(|p| p.hero_id).collect();
+    let enemies_after: Vec<HeroId> = session.draft.enemies.iter().flatten().map(|p| p.hero_id).collect();
+    assert_eq!(allies_after, expected_dire);
+    assert_eq!(enemies_after, expected_rad);
+    assert!(session.ally_locked_slots[0]);
+    assert!(session.enemy_locked_slots.iter().all(|&l| l));
+
+    // Switching back via CLI command restores Radiant on Allies
+    assert!(execute_command(&mut session, "faction radiant").unwrap());
+    assert_eq!(session.draft.ally_faction, Faction::Radiant);
+    assert_eq!(
+        session.draft.allies.iter().flatten().map(|p| p.hero_id).collect::<Vec<_>>(),
+        expected_rad
+    );
+
+    // Clear Enemy Pos 1 so we can scout enemy options; confirm repeated BanDetected is idempotent
+    session.clear_slot_manual(Side::Enemies, 0);
+    let ban_target = session.find_hero("invoker").unwrap();
+    session.apply_event(DraftEvent::BanDetected { hero_id: ban_target });
+    session.apply_event(DraftEvent::BanDetected { hero_id: ban_target });
+    assert!(session.draft.bans.contains(&Some(ban_target)));
+
+    let scout_recs = session.recommend_enemy_heroes(Role::Carry, 5);
+    assert_eq!(scout_recs.len(), 5);
+    assert!(scout_recs.iter().all(|r| r.hero_id != ban_target));
+    assert!(scout_recs.iter().all(|r| r.comfort_delta == 0.0));
+
+    let top_enemy = &scout_recs[0];
+    let mut check_draft = session.draft.clone();
+    check_draft.enemies[Role::Carry.index()] = Some(truesight_core::domain::DraftPick {
+        hero_id: top_enemy.hero_id,
+        role: Some(Role::Carry),
+    });
+    let mut neutral_weights = session.weights;
+    neutral_weights.comfort_weight = 0.0;
+    let check_analysis = evaluate_draft_5v5(&check_draft, &session.matrix, &neutral_weights);
+    let expected_enemy_wr = 1.0 - check_analysis.ally_win_probability;
+    assert!(
+        (top_enemy.projected_win_probability - expected_enemy_wr).abs() < 1e-5,
+        "Scout WR {} != neutral 1 - ally_win {}",
+        top_enemy.projected_win_probability,
+        expected_enemy_wr
+    );
+}

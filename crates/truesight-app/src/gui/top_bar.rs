@@ -69,7 +69,8 @@ impl TrueSightGuiApp {
                 .fill(P_INDIGO_2)
                 .stroke(Stroke::new(1.0_f32, P_GEM_DEEP));
                 if ui.add(fac_btn).clicked() {
-                    self.session.draft.ally_faction = self.session.draft.ally_faction.opposite();
+                    self.session
+                        .set_ally_faction(self.session.draft.ally_faction.opposite());
                 }
 
                 // OpenDota DB & Steam32 Account Link Pill (click to edit Steam32 / Auto / Unlinked)

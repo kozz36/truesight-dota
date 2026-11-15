@@ -1665,3 +1665,32 @@ fn event_queues_coalesce_under_saturation_preserve_resets_and_recover_stationary
     assert!(worker.queue_stats().recovered_resyncs >= 1, "Expected automatic overflow resync: {:?}", worker.queue_stats());
     assert!(!resynced.is_empty(), "Expected recovered vision picks after saturation");
 }
+
+#[test]
+fn gsi_parser_extracts_draft_bans_and_coalesces_duplicate_ban_events() {
+    let payload = r#"{
+        "draft": {
+            "team2": {"ban0_id": 1, "ban1_id": 2, "ban2_id": 0},
+            "team3": {"ban0_id": 94, "ban1_id": 160, "ban2_id": -5}
+        },
+        "truesight_ban": {"hero_id": 13}
+    }"#;
+    let events = crate::gsi::parse_gsi_json_events(payload);
+    assert_eq!(
+        events,
+        vec![
+            DraftEvent::BanDetected { hero_id: HeroId(1) },
+            DraftEvent::BanDetected { hero_id: HeroId(2) },
+            DraftEvent::BanDetected { hero_id: HeroId(94) },
+            DraftEvent::BanDetected { hero_id: HeroId(13) },
+        ]
+    );
+
+    let queue = crate::gsi::BoundedDraftQueue::new(4);
+    assert!(queue.push_for_epoch(0, DraftEvent::BanDetected { hero_id: HeroId(94) }));
+    assert!(queue.push_for_epoch(0, DraftEvent::BanDetected { hero_id: HeroId(94) }));
+    assert_eq!(
+        queue.drain(),
+        vec![DraftEvent::BanDetected { hero_id: HeroId(94) }]
+    );
+}
