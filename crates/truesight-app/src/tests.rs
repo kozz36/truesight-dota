@@ -637,3 +637,83 @@ fn faction_change_atomically_swaps_teams_and_enemy_scout_uses_neutral_comfort() 
         expected_enemy_wr
     );
 }
+
+#[test]
+fn gsi_http_listener_reconciles_full_session_state_after_overflow_when_peer_stops() {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+    use truesight_adapters::gsi::BoundedGsiListener;
+    use truesight_core::domain::Faction;
+
+    let mut listener = BoundedGsiListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr();
+    let mut session = AppSession::new().unwrap();
+    session.set_account_auto();
+
+    let post_json = |body: &str| {
+        let mut s = TcpStream::connect(addr).unwrap();
+        s.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+        write!(
+            s,
+            "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .unwrap();
+        s.flush().unwrap();
+        let mut resp = String::new();
+        let _ = s.read_to_string(&mut resp);
+        assert!(resp.starts_with("HTTP/1.1 200"), "Expected 200 OK, got: {resp}");
+    };
+
+    // 1. Pre-reset match traffic (old hero + in-progress state)
+    post_json(r#"{"map":{"game_state":"DOTA_GAMERULES_STATE_GAME_IN_PROGRESS","clock_time":1200},"truesight_pick":{"side":"ally","slot":0,"hero_id":67}}"#);
+
+    // 2. Match transition reset + Dire faction + SteamID + 16 distinct bans (exceeds 16-item capacity)
+    post_json(concat!(
+        r#"{"map":{"game_state":"DOTA_GAMERULES_STATE_WAIT_FOR_PLAYERS_TO_LOAD","clock_time":-90},"#,
+        r#""player":{"team_name":"dire","steamid":"127255741"},"#,
+        r#""draft":{"team2":{"ban0_id":3,"ban1_id":4,"ban2_id":6,"ban3_id":7,"ban4_id":8,"ban5_id":9,"ban6_id":10,"ban7_id":11},"#,
+        r#""team3":{"ban0_id":12,"ban1_id":14,"ban2_id":15,"ban3_id":16,"ban4_id":18,"ban5_id":19,"ban6_id":20,"ban7_id":21}}}"#,
+    ));
+
+    // 3. Saturate with all 10 picks plus replay player mappings, then stop sending
+    let ally_heroes = [1_u16, 13, 97, 79, 5];
+    let enemy_heroes = [94_u16, 17, 2, 100, 30];
+    for (slot, hid) in ally_heroes.iter().enumerate() {
+        post_json(&format!(
+            r#"{{"truesight_pick":{{"side":"ally","slot":{slot},"hero_id":{hid}}}}}"#
+        ));
+    }
+    for (slot, hid) in enemy_heroes.iter().enumerate() {
+        post_json(&format!(
+            r#"{{"truesight_pick":{{"side":"enemy","slot":{slot},"hero_id":{hid}}}}}"#
+        ));
+    }
+    post_json(concat!(
+        r#"{"map":{"game_state":"DOTA_GAMERULES_STATE_HERO_SELECTION","clock_time":35},"#,
+        r#""player":{"team2":{"player0":{"steamid":"76561198087521469","team_name":"dire"}},"#,
+        r#""team3":{"player5":{"steamid":"76561198000000005","team_name":"radiant"}}},"#,
+        r#""hero":{"team2":{"player0":{"name":"npc_dota_hero_antimage"}}}}"#,
+    ));
+
+    // 4. Single poll_live_sources drains overflowed HTTP queue and reconciles coherent 5v5 + 16 bans
+    assert!(session.poll_live_sources(Some(&mut listener), None));
+    let stats_after_first = listener.queue_stats();
+    assert!(stats_after_first.dropped > 0, "Expected overflow drops: {stats_after_first:?}");
+    assert_eq!(stats_after_first.recovered_resyncs, 1);
+    assert_eq!(session.draft.ally_faction, Faction::Dire);
+    assert_eq!(session.cache_mgr.player_account_id, Some(127_255_741));
+    assert_eq!(session.draft.allies.iter().flatten().count(), 5);
+    assert_eq!(session.draft.enemies.iter().flatten().count(), 5);
+    assert_eq!(session.draft.bans.iter().flatten().count(), 16);
+    assert!(
+        !session.draft.allies.iter().flatten().any(|p| p.hero_id.0 == 67),
+        "Pre-reset hero 67 must not leak into reconciled new match"
+    );
+
+    // 5. Polling again with no traffic must not falsely increment recovered_resyncs
+    assert!(!session.poll_live_sources(Some(&mut listener), None));
+    assert_eq!(listener.queue_stats().recovered_resyncs, 1);
+}

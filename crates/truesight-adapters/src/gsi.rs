@@ -386,7 +386,106 @@ pub fn validate_gsi_bind_addr(addr: &str) -> Result<SocketAddr, PortError> {
 pub struct EventQueueStats {
     pub enqueued: u64,
     pub coalesced: u64,
+    pub dropped: u64,
     pub recovered_resyncs: u64,
+}
+
+#[derive(Default)]
+struct GsiStateSnapshot {
+    pending_reset_state: Option<(String, i32)>,
+    latest_game_state: Option<(String, i32)>,
+    latest_steam32: Option<u64>,
+    latest_faction: Option<Faction>,
+    latest_local_hero: Option<String>,
+    latest_player_mappings: Vec<(u64, Faction, String)>,
+    latest_picks: [[Option<(HeroId, Option<Role>)>; 5]; 2],
+    latest_bans: Vec<HeroId>,
+}
+
+impl GsiStateSnapshot {
+    fn apply_event(&mut self, ev: &DraftEvent) -> bool {
+        match ev {
+            DraftEvent::GameRulesStateChanged { state_name, game_time_secs } => {
+                let prev = self.latest_game_state.as_ref().map(|(s, _)| s.as_str());
+                let reset = (state_name == "DOTA_GAMERULES_STATE_WAIT_FOR_PLAYERS_TO_LOAD" && prev != Some(state_name.as_str()))
+                    || (state_name == "DOTA_GAMERULES_STATE_HERO_SELECTION"
+                        && matches!(prev, Some(p) if !matches!(p, "DOTA_GAMERULES_STATE_HERO_SELECTION" | "DOTA_GAMERULES_STATE_WAIT_FOR_PLAYERS_TO_LOAD")));
+                if reset {
+                    self.latest_local_hero = None;
+                    self.latest_player_mappings.clear();
+                    self.latest_picks = Default::default();
+                    self.latest_bans.clear();
+                    self.pending_reset_state = Some((state_name.clone(), *game_time_secs));
+                }
+                self.latest_game_state = Some((state_name.clone(), *game_time_secs));
+                reset
+            }
+            DraftEvent::PlayerSteamIdDetected { steam32 } => { self.latest_steam32 = Some(*steam32); false }
+            DraftEvent::FactionDetected { faction } => { self.latest_faction = Some(*faction); false }
+            DraftEvent::LocalPlayerHeroDetected { hero_slug } => { self.latest_local_hero = Some(hero_slug.clone()); false }
+            DraftEvent::PlayerHeroMapped { steam32, faction, hero_slug } => {
+                if let Some(entry) = self.latest_player_mappings.iter_mut().find(|(id, _, _)| id == steam32) {
+                    *entry = (*steam32, *faction, hero_slug.clone());
+                } else if self.latest_player_mappings.len() < 10 {
+                    self.latest_player_mappings.push((*steam32, *faction, hero_slug.clone()));
+                }
+                false
+            }
+            DraftEvent::PickDetected { side, slot, hero_id, role } if *slot < 5 => {
+                let side_idx = if matches!(side, Side::Allies) { 0 } else { 1 };
+                self.latest_picks[side_idx][*slot] = Some((*hero_id, *role));
+                false
+            }
+            DraftEvent::BanDetected { hero_id } if !self.latest_bans.contains(hero_id) && self.latest_bans.len() < 16 => {
+                self.latest_bans.push(*hero_id);
+                false
+            }
+            _ => false,
+        }
+    }
+
+    fn push_reconcile_events(&self, out: &mut Vec<DraftEvent>, pending_reset: Option<(String, i32)>) {
+        if let Some((s, t)) = pending_reset {
+            if let Some(pos) = out.iter().position(|e| matches!(e, DraftEvent::GameRulesStateChanged { state_name, .. } if state_name == &s)) {
+                let existing = out.remove(pos);
+                out.insert(0, existing);
+            } else {
+                out.insert(0, DraftEvent::GameRulesStateChanged { state_name: s, game_time_secs: t });
+            }
+        }
+        let upsert = |list: &mut Vec<DraftEvent>, ev: DraftEvent| {
+            if let Some(pos) = list.iter().position(|old| should_coalesce(old, &ev)) {
+                list[pos] = ev;
+            } else {
+                list.push(ev);
+            }
+        };
+        if let Some(steam32) = self.latest_steam32 {
+            upsert(out, DraftEvent::PlayerSteamIdDetected { steam32 });
+        }
+        if let Some(faction) = self.latest_faction {
+            upsert(out, DraftEvent::FactionDetected { faction });
+        }
+        if let Some(ref hero_slug) = self.latest_local_hero {
+            upsert(out, DraftEvent::LocalPlayerHeroDetected { hero_slug: hero_slug.clone() });
+        }
+        for (steam32, faction, hero_slug) in &self.latest_player_mappings {
+            upsert(out, DraftEvent::PlayerHeroMapped { steam32: *steam32, faction: *faction, hero_slug: hero_slug.clone() });
+        }
+        for hero_id in &self.latest_bans {
+            upsert(out, DraftEvent::BanDetected { hero_id: *hero_id });
+        }
+        for (side, slots) in [Side::Allies, Side::Enemies].into_iter().zip(self.latest_picks.iter()) {
+            for (slot, entry) in slots.iter().enumerate() {
+                if let Some((hero_id, role)) = entry {
+                    upsert(out, DraftEvent::PickDetected { side, slot, hero_id: *hero_id, role: *role });
+                }
+            }
+        }
+        if let Some((ref state_name, game_time_secs)) = self.latest_game_state {
+            upsert(out, DraftEvent::GameRulesStateChanged { state_name: state_name.clone(), game_time_secs });
+        }
+    }
 }
 
 #[derive(Default)]
@@ -396,8 +495,10 @@ struct QueueInner {
     epoch: u64,
     reset_requested: bool,
     overflow_resync: bool,
+    resync_pending_completion: bool,
     closed: bool,
     stats: EventQueueStats,
+    gsi_snapshot: GsiStateSnapshot,
 }
 
 /// Bounded thread-safe queue with key coalescing, critical-event preservation, and resync triggers.
@@ -430,6 +531,7 @@ impl BoundedDraftQueue {
         g.epoch = g.epoch.wrapping_add(1);
         g.reset_requested = true;
         g.overflow_resync = false;
+        g.resync_pending_completion = false;
         g.queue.clear();
     }
 
@@ -446,14 +548,13 @@ impl BoundedDraftQueue {
         }
         if g.overflow_resync && g.queue.is_empty() {
             g.overflow_resync = false;
-            g.stats.recovered_resyncs += 1;
+            g.resync_pending_completion = true;
             return (g.epoch, true);
         }
         (g.epoch, false)
     }
 
-    pub fn push_for_epoch(&self, poll_seq: u64, ev: DraftEvent) -> bool {
-        let mut g = self.lock_inner();
+    fn push_into_inner(g: &mut QueueInner, poll_seq: u64, ev: DraftEvent) -> bool {
         if g.closed {
             return false;
         }
@@ -464,13 +565,21 @@ impl BoundedDraftQueue {
         if let Some(pos) = g.queue.iter().position(|old| should_coalesce(old, &ev)) {
             g.queue[pos] = ev;
             g.stats.coalesced += 1;
+            if g.resync_pending_completion {
+                g.resync_pending_completion = false;
+                g.stats.recovered_resyncs += 1;
+            }
             return true;
         }
         if g.queue.len() < g.capacity {
             g.queue.push_back(ev);
+            if g.resync_pending_completion {
+                g.resync_pending_completion = false;
+                g.stats.recovered_resyncs += 1;
+            }
         } else {
             g.overflow_resync = true;
-            g.stats.coalesced += 1;
+            g.stats.dropped += 1;
             if is_critical_event(&ev) {
                 if let Some(idx) = g.queue.iter().position(|e| !is_critical_event(e)) {
                     g.queue.remove(idx);
@@ -481,8 +590,43 @@ impl BoundedDraftQueue {
         true
     }
 
+    pub fn push_for_epoch(&self, poll_seq: u64, ev: DraftEvent) -> bool {
+        let mut g = self.lock_inner();
+        Self::push_into_inner(&mut g, poll_seq, ev)
+    }
+
+    pub fn record_and_push_gsi_events(&self, events: Vec<DraftEvent>) -> bool {
+        let mut g = self.lock_inner();
+        for ev in events {
+            if g.gsi_snapshot.apply_event(&ev) {
+                g.queue.retain(|queued| matches!(
+                    queued,
+                    DraftEvent::FactionDetected { .. } | DraftEvent::PlayerSteamIdDetected { .. }
+                ));
+            }
+            if !Self::push_into_inner(&mut g, 0, ev) {
+                return false;
+            }
+        }
+        true
+    }
+
     pub fn drain(&self) -> Vec<DraftEvent> {
         self.lock_inner().queue.drain(..).collect()
+    }
+
+    pub fn drain_and_reconcile_gsi(&self) -> Vec<DraftEvent> {
+        let mut g = self.lock_inner();
+        let mut out: Vec<DraftEvent> = g.queue.drain(..).collect();
+        let pending_reset = g.gsi_snapshot.pending_reset_state.take();
+        if g.overflow_resync {
+            let snapshot = &g.gsi_snapshot;
+            snapshot.push_reconcile_events(&mut out, pending_reset);
+            g.overflow_resync = false;
+            g.resync_pending_completion = false;
+            g.stats.recovered_resyncs += 1;
+        }
+        out
     }
 
     pub fn stats(&self) -> EventQueueStats {
@@ -565,7 +709,7 @@ impl DraftEventSource for BoundedGsiListener {
     type Error = PortError;
 
     fn poll_events(&mut self) -> Result<Vec<DraftEvent>, Self::Error> {
-        Ok(self.queue.drain())
+        Ok(self.queue.drain_and_reconcile_gsi())
     }
 }
 
@@ -674,10 +818,8 @@ fn handle_gsi_connection(mut stream: TcpStream, queue: &BoundedDraftQueue) {
         return;
     };
 
-    for ev in parse_gsi_events_from_root(&root) {
-        if !queue.push_for_epoch(0, ev) {
-            return;
-        }
+    if !queue.record_and_push_gsi_events(parse_gsi_events_from_root(&root)) {
+        return;
     }
     write_http_response(&mut stream, 200, "OK");
 }

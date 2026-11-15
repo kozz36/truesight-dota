@@ -1598,15 +1598,33 @@ fn event_queues_coalesce_under_saturation_preserve_resets_and_recover_stationary
 
     let drained = q.drain();
     let q_stats = q.stats();
-    assert!(q_stats.enqueued >= 45 && q_stats.coalesced > 0, "Expected coalescing stats: {q_stats:?}");
+    assert!(
+        q_stats.enqueued >= 45 && q_stats.coalesced > 0 && q_stats.dropped > 0,
+        "Expected coalescing and dropped stats: {q_stats:?}"
+    );
     assert!(drained.iter().any(|e| matches!(
         e, DraftEvent::GameRulesStateChanged { state_name, .. } if state_name == "DOTA_GAMERULES_STATE_WAIT_FOR_PLAYERS_TO_LOAD"
     )));
     assert!(drained.contains(&DraftEvent::FactionDetected { faction: Faction::Dire }));
     assert!(!drained.contains(&DraftEvent::FactionDetected { faction: Faction::Radiant }));
     assert!(drained.contains(&DraftEvent::PlayerSteamIdDetected { steam32: 127_255_741 }));
-    let (_, should_resync) = q.begin_poll_cycle();
-    assert!(should_resync && q.stats().recovered_resyncs == 1);
+    let (epoch, should_resync) = q.begin_poll_cycle();
+    assert!(should_resync);
+    assert_eq!(
+        q.stats().recovered_resyncs,
+        0,
+        "recovered_resyncs must not increment until recovery events actually arrive"
+    );
+    assert!(q.push_for_epoch(
+        epoch,
+        DraftEvent::PickDetected {
+            side: Side::Allies,
+            slot: 0,
+            hero_id: HeroId(1),
+            role: Some(Role::Carry),
+        }
+    ));
+    assert_eq!(q.stats().recovered_resyncs, 1);
 
     // Listener diagnostics check
     let mut listener = BoundedGsiListener::bind("127.0.0.1:0").unwrap();
@@ -1654,7 +1672,7 @@ fn event_queues_coalesce_under_saturation_preserve_resets_and_recover_stationary
         thread::sleep(Duration::from_millis(20));
     }
     assert_eq!(first_batch.len(), 8);
-    assert!(worker.queue_stats().coalesced >= 2);
+    assert!(worker.queue_stats().dropped >= 2);
 
     let mut resynced = Vec::new();
     for _ in 0..40 {
