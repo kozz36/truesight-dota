@@ -108,6 +108,7 @@ impl TrueSightGuiApp {
                     {
                         self.session.reset_draft();
                         self.picker_target = None;
+                        self.enemy_scout_role = None;
                         self.drag_slot = None;
                         self.status_banner = "Draft cleared.".into();
                     }

@@ -2,11 +2,16 @@ use super::theme::*;
 use super::viewmodel::*;
 use super::{PickerTarget, TrueSightGuiApp};
 use eframe::egui::{self, Align, Align2, Color32, FontId, Layout, Margin, Rect, RichText, Sense, Stroke, StrokeKind, pos2, vec2};
-use truesight_core::domain::{HeroId, Side, TEAM_SIZE};
+use truesight_core::domain::{HeroId, Role, Side, TEAM_SIZE};
 use truesight_core::math::DraftAnalysis5v5;
 
 impl TrueSightGuiApp {
-    pub(super) fn render_oracle_card(&mut self, ui: &mut egui::Ui, analysis: &DraftAnalysis5v5) -> Rect {
+    pub(super) fn render_oracle_card(
+        &mut self,
+        ui: &mut egui::Ui,
+        analysis: &DraftAnalysis5v5,
+        scout_cards_out: &mut Vec<Rect>,
+    ) -> Rect {
         let ally_pct = analysis.ally_win_probability * 100.0;
         let enemy_pct = 100.0 - ally_pct;
         let lead = ally_pct - 50.0;
@@ -75,7 +80,7 @@ impl TrueSightGuiApp {
                 });
             });
 
-            ui.add_space(6.0);
+            ui.add_space(4.0);
 
             // 2. Tug-of-war bar with 50% center tick
             let bar_w = ui.available_width();
@@ -97,7 +102,7 @@ impl TrueSightGuiApp {
                 Stroke::new(2.0_f32, P_GLINT),
             );
 
-            ui.add_space(8.0);
+            ui.add_space(5.0);
 
             // 3. Four Edge Cards (Meta, Counter, Synergy, Composition)
             let pair_cnt = analysis
@@ -183,12 +188,12 @@ impl TrueSightGuiApp {
                 }
             });
 
-            ui.add_space(8.0);
+            ui.add_space(5.0);
 
             // 4. Insight Strip (Strongest Pair + Hardest Counter)
             self.render_insight_strip(ui, analysis);
 
-            ui.add_space(8.0);
+            ui.add_space(5.0);
 
             // 5. Draft Order (10 slots) & Bans (16 slots) side-by-side
             let thumb_row_h = 26.0_f32;
@@ -374,10 +379,12 @@ impl TrueSightGuiApp {
                     });
             });
 
-            // 6. Active Slot / Ban Search Bar (inline inside Oracle when active)
+            // 6. Active Slot / Ban Search Bar (inline inside Oracle when active), or Enemy Scout strip
+            ui.add_space(4.0);
             if let Some(target) = self.picker_target {
-                ui.add_space(6.0);
                 self.render_inline_picker(ui, target);
+            } else {
+                self.render_enemy_scout_strip(ui, scout_cards_out);
             }
         })
     }
@@ -493,6 +500,132 @@ impl TrueSightGuiApp {
             0.0,
             P_GEM,
         );
+    }
+
+    fn render_enemy_scout_strip(&mut self, ui: &mut egui::Ui, scout_cards_out: &mut Vec<Rect>) {
+        let active_role = self.active_enemy_scout_role();
+        let role_labels = ["POS 1", "POS 2", "POS 3", "POS 4", "POS 5"];
+        let card_size = vec2(48.0, 27.0);
+        let gap = 5.0_f32;
+
+        egui::Frame::NONE
+            .fill(P_INDIGO_2)
+            .stroke(Stroke::new(1.0_f32, P_DIRE_DEEP))
+            .inner_margin(Margin::symmetric(8, 4))
+            .show(ui, |ui| {
+                let inner_w = ui.available_width();
+                ui.set_min_width(inner_w);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.label(
+                        RichText::new("ENEMY SCOUT")
+                            .size(9.0)
+                            .strong()
+                            .color(P_DIRE),
+                    );
+                    for (idx, &role) in Role::ALL.iter().enumerate() {
+                        let selected = active_role == role;
+                        let btn = egui::Button::new(
+                            RichText::new(role_labels[idx])
+                                .size(8.5)
+                                .strong()
+                                .color(if selected { P_VOID } else { P_MUTED }),
+                        )
+                        .fill(if selected { P_DIRE } else { P_INDIGO_1 })
+                        .stroke(Stroke::new(
+                            1.0_f32,
+                            if selected { P_DIRE } else { P_LINE },
+                        ))
+                        .min_size(vec2(36.0, 15.0));
+                        if ui.add(btn).clicked() {
+                            self.enemy_scout_role = Some(role);
+                        }
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(format!("{} · Neutral WR", active_role.label()))
+                                .size(8.5)
+                                .color(P_MUTED),
+                        );
+                    });
+                });
+
+                ui.add_space(2.0);
+                let max_cards = ((inner_w + gap) / (card_size.x + gap))
+                    .floor()
+                    .clamp(1.0, 11.0) as usize;
+                let recs = self.session.recommend_enemy_heroes(active_role, max_cards);
+
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = gap;
+                    for rec in recs {
+                        let (rect, resp) = ui.allocate_exact_size(card_size, Sense::click());
+                        scout_cards_out.push(rect);
+                        let painter = ui.painter();
+                        painter.rect_filled(rect, 0.0, P_INDIGO_3);
+                        if let Some(tex) = self.textures.heroes.get(&rec.hero_id).map(|s| &s.color)
+                        {
+                            painter.image(tex.id(), rect, uv_full(), Color32::WHITE);
+                        }
+
+                        // Dark legibility shade across the lower half for overlaid WR%
+                        let shade_top = rect.min.y + rect.height() * 0.48;
+                        painter.rect_filled(
+                            Rect::from_min_max(pos2(rect.min.x, shade_top), rect.max),
+                            0.0,
+                            Color32::from_rgba_unmultiplied(10, 9, 24, 210),
+                        );
+
+                        let enemy_wr = rec.projected_win_probability * 100.0;
+                        let border_col = if resp.hovered() {
+                            P_GLINT
+                        } else if enemy_wr >= 50.0 {
+                            P_DIRE
+                        } else {
+                            P_INDIGO_3
+                        };
+                        painter.rect_stroke(
+                            rect,
+                            0.0,
+                            Stroke::new(1.2_f32, border_col),
+                            StrokeKind::Inside,
+                        );
+                        painter.text(
+                            pos2(rect.center().x, rect.max.y - 1.5),
+                            Align2::CENTER_BOTTOM,
+                            format!("{enemy_wr:4.1}%"),
+                            FontId::proportional(9.0),
+                            P_GLINT,
+                        );
+
+                        let hname = self
+                            .session
+                            .matrix
+                            .hero(rec.hero_id)
+                            .map(|h| h.display_name.clone())
+                            .unwrap_or_else(|| format!("Hero #{}", rec.hero_id.0));
+                        let tip = format!(
+                            "{hname} ({})\nProjected Enemy Win: {enemy_wr:4.1}% ({})\nClick to assign to Enemy P{}",
+                            active_role.label(),
+                            fmt_pct(rec.net_probability_delta * 100.0),
+                            active_role.index() + 1,
+                        );
+                        let resp = resp.on_hover_text(tip);
+                        if resp.clicked() {
+                            self.session.set_slot_manual(
+                                Side::Enemies,
+                                active_role.index(),
+                                rec.hero_id,
+                            );
+                            self.enemy_scout_role = None;
+                            self.status_banner = format!(
+                                "Scout assigned {hname} into Enemy P{}.",
+                                active_role.index() + 1
+                            );
+                        }
+                    }
+                });
+            });
     }
 
     fn render_inline_picker(&mut self, ui: &mut egui::Ui, target: PickerTarget) {

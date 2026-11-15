@@ -418,3 +418,67 @@ fn v4_inline_picker_and_matrix_tabs_update_session_and_preserve_geometry() {
     }
     assert_eq!(app.status_banner, "Async background refresh ready.");
 }
+
+#[test]
+fn v4_enemy_scout_strip_renders_overlaid_portraits_switches_roles_and_yields_to_picker() {
+    let mut session = AppSession::new().unwrap();
+    assert!(execute_command(&mut session, "ally 1 faceless void").unwrap());
+    assert!(execute_command(&mut session, "ally 3 magnus").unwrap());
+    assert!(execute_command(&mut session, "enemy 1 medusa").unwrap());
+    assert!(execute_command(&mut session, "enemy 4 tusk").unwrap());
+
+    let mut app = TrueSightGuiApp::new(session, None, None);
+    assert_eq!(app.active_enemy_scout_role(), Role::Mid);
+
+    let ctx = egui::Context::default();
+    for viewport in [vec2(1433.0, 952.0), vec2(1468.0, 960.0)] {
+        let r = render_at_viewport(&mut app, &ctx, viewport);
+        assert!(
+            (r.allies.max.y - r.oracle.max.y).abs() <= 2.0,
+            "viewport={viewport:?} allies={:?} oracle={:?}",
+            r.allies,
+            r.oracle
+        );
+        assert!(
+            r.enemy_scout_cards.len() >= 4,
+            "viewport={viewport:?} expected >=4 enemy scout portrait cards, got {}",
+            r.enemy_scout_cards.len()
+        );
+        for (idx, &card) in r.enemy_scout_cards.iter().enumerate() {
+            assert!(
+                r.oracle.contains_rect(card),
+                "viewport={viewport:?} card {idx} {card:?} outside oracle {:?}",
+                r.oracle
+            );
+            let ratio = card.width() / card.height().max(1.0);
+            assert!(
+                (ratio - 16.0 / 9.0).abs() < 0.08,
+                "viewport={viewport:?} card {idx} aspect ratio {ratio} != 16:9 ({card:?})"
+            );
+            if idx > 0 {
+                assert!(
+                    r.enemy_scout_cards[idx - 1].max.x < card.min.x,
+                    "viewport={viewport:?} cards {idx} overlap: {:?} vs {:?}",
+                    r.enemy_scout_cards[idx - 1],
+                    card
+                );
+            }
+        }
+    }
+
+    app.enemy_scout_role = Some(Role::Offlane);
+    assert_eq!(app.active_enemy_scout_role(), Role::Offlane);
+
+    app.picker_target = Some(PickerTarget::Slot(Side::Allies, 1));
+    let r_picking = render_at_viewport(&mut app, &ctx, vec2(1433.0, 952.0));
+    assert!(
+        r_picking.enemy_scout_cards.is_empty(),
+        "Enemy scout strip must yield cleanly while inline manual picker is open"
+    );
+    assert!(
+        (r_picking.allies.max.y - r_picking.oracle.max.y).abs() <= 2.0,
+        "picking mode: allies={:?} oracle={:?}",
+        r_picking.allies,
+        r_picking.oracle
+    );
+}

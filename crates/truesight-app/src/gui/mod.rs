@@ -21,7 +21,7 @@ use theme::{GuiTextureCache, P_GEM, P_GEM_DEEP, P_INDIGO_1, P_INDIGO_2, P_INDIGO
 use truesight_adapters::gsi::BoundedGsiListener;
 use truesight_adapters::sync::{AccountLinkConfig, normalize_steam32_id, save_account_config};
 use truesight_adapters::vision::BoundedVisionWorker;
-use truesight_core::domain::{Side, TEAM_SIZE};
+use truesight_core::domain::{Role, Side, TEAM_SIZE};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MatrixTab {
@@ -56,6 +56,7 @@ pub struct TrueSightGuiApp {
     status_banner: String,
     account_editor_open: bool,
     account_input: String,
+    pub(super) enemy_scout_role: Option<Role>,
 }
 
 impl TrueSightGuiApp {
@@ -86,7 +87,18 @@ impl TrueSightGuiApp {
                     .into(),
             account_editor_open: false,
             account_input,
+            enemy_scout_role: None,
         }
+    }
+
+    pub(super) fn active_enemy_scout_role(&self) -> Role {
+        if let Some(role) = self.enemy_scout_role {
+            return role;
+        }
+        (0..TEAM_SIZE)
+            .find(|&idx| self.session.draft.enemies[idx].is_none())
+            .and_then(|idx| Role::ALL.get(idx).copied())
+            .unwrap_or(Role::Carry)
     }
 
     fn configure_visuals(&mut self, ctx: &egui::Context) {
@@ -144,7 +156,7 @@ impl Default for SlotTelemetry {
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct LayoutRects {
     pub top_bar: Rect,
     pub allies: Rect,
@@ -154,6 +166,7 @@ pub struct LayoutRects {
     pub matrix: Rect,
     pub ally_slots: [SlotTelemetry; TEAM_SIZE],
     pub enemy_slots: [SlotTelemetry; TEAM_SIZE],
+    pub enemy_scout_cards: Vec<Rect>,
     pub matrix_cell_size: Vec2,
     pub matrix_h_gap: f32,
     pub matrix_v_gap: f32,
@@ -182,6 +195,7 @@ impl TrueSightGuiApp {
             matrix: Rect::NOTHING,
             ally_slots: [SlotTelemetry::default(); TEAM_SIZE],
             enemy_slots: [SlotTelemetry::default(); TEAM_SIZE],
+            enemy_scout_cards: Vec::new(),
             matrix_cell_size: Vec2::ZERO,
             matrix_h_gap: 0.0,
             matrix_v_gap: 0.0,
@@ -221,7 +235,11 @@ impl TrueSightGuiApp {
                         vec2(center_w, top_row_h),
                         Layout::top_down(Align::Min),
                         |ui| {
-                            rects.oracle = self.render_oracle_card(ui, &analysis);
+                            rects.oracle = self.render_oracle_card(
+                                ui,
+                                &analysis,
+                                &mut rects.enemy_scout_cards,
+                            );
                         },
                     );
                     ui.allocate_ui_with_layout(

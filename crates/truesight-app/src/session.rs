@@ -701,7 +701,11 @@ impl AppSession {
         enemy_draft.target_role = enemy_role;
         let mut enemy_weights = self.weights;
         enemy_weights.comfort_weight = 0.0;
-        recommend_heroes(&enemy_draft, &self.matrix, &enemy_weights, top_n)
+        let mut recs = recommend_heroes(&enemy_draft, &self.matrix, &enemy_weights, top_n);
+        for rec in &mut recs {
+            rec.comfort_delta = 0.0;
+        }
+        recs
     }
 
     pub fn evaluate(&self) -> (DraftAnalysis5v5, Vec<HeroRecommendation>) {
