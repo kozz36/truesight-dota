@@ -60,7 +60,7 @@ fn search_best_role_assignment(
     best_slots: &mut Vec<usize>,
 ) {
     if hero_idx == heroes.len() {
-        if current_score > *best_score {
+        if current_score > *best_score + 1e-4 {
             *best_score = current_score;
             *best_slots = current_slots.clone();
         }
@@ -683,8 +683,6 @@ impl AppSession {
         self.draft.ally_faction = faction;
         std::mem::swap(&mut self.draft.allies, &mut self.draft.enemies);
         std::mem::swap(&mut self.ally_locked_slots, &mut self.enemy_locked_slots);
-        self.rebalance_unlocked_side_roles(Side::Allies);
-        self.rebalance_unlocked_side_roles(Side::Enemies);
         self.sync_local_player_target_role();
     }
 
