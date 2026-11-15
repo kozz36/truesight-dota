@@ -1827,3 +1827,18 @@ fn vision_rejects_empty_pickphase_slots_and_dark_gradient_bars_that_matched_dark
     let ev4 = adapter.poll_events().unwrap();
     assert_eq!(ev4.len(), 2, "Valid InGame 1280x720 QoP + Axe frame must still detect both: {ev4:?}");
 }
+
+#[test]
+fn vision_x11_import_args_include_silent_flag_to_prevent_xbell() {
+    use crate::vision::build_x11_import_args;
+
+    let args = build_x11_import_args("0x620013d");
+    assert!(
+        args.contains(&"-silent"),
+        "ImageMagick import args must pass -silent to suppress XBell: {args:?}"
+    );
+    assert_eq!(
+        args,
+        ["-silent", "-window", "0x620013d", "-depth", "8", "-crop", "100%x8%+0+0", "ppm:-"]
+    );
+}

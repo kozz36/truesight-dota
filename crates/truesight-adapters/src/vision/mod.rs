@@ -1,7 +1,7 @@
 mod worker;
 pub use worker::{
     BoundedVisionWorker, ScreenFrameSource, VisionCaptureAdapter, X11TopBarFrameSource,
-    is_dota2_xprop_output,
+    build_x11_import_args, is_dota2_xprop_output,
 };
 
 use std::collections::HashMap;

@@ -24,6 +24,20 @@ pub fn is_dota2_xprop_output(props_str: &str) -> bool {
     })
 }
 
+/// Builds the ImageMagick `import` arguments for silent top-bar X11 capture.
+pub fn build_x11_import_args(window_id: &str) -> [&str; 8] {
+    [
+        "-silent",
+        "-window",
+        window_id,
+        "-depth",
+        "8",
+        "-crop",
+        "100%x8%+0+0",
+        "ppm:-",
+    ]
+}
+
 /// Live X11/XWayland top-bar frame source capturing the `"dota2"` window strip via `xprop` + `import`.
 #[derive(Debug, Default)]
 pub struct X11TopBarFrameSource {
@@ -76,7 +90,7 @@ impl ScreenFrameSource for X11TopBarFrameSource {
         };
 
         let output = Command::new("import")
-            .args(["-window", wid, "-depth", "8", "-crop", "100%x8%+0+0", "ppm:-"])
+            .args(build_x11_import_args(wid))
             .output();
 
         let Ok(out) = output else {
