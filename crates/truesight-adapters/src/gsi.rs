@@ -33,7 +33,9 @@ fn parse_gsi_events_from_root(root: &JsonVal) -> Vec<DraftEvent> {
         let clock = map_node.get("clock_time").and_then(JsonVal::as_i32).unwrap_or(0);
         if matches!(
             state,
-            "DOTA_GAMERULES_STATE_WAIT_FOR_PLAYERS_TO_LOAD"
+            "DOTA_GAMERULES_STATE_INIT"
+                | "DOTA_GAMERULES_STATE_WAIT_FOR_PLAYERS_TO_LOAD"
+                | "DOTA_GAMERULES_STATE_CUSTOM_GAME_SETUP"
                 | "DOTA_GAMERULES_STATE_HERO_SELECTION"
                 | "DOTA_GAMERULES_STATE_STRATEGY_TIME"
                 | "DOTA_GAMERULES_STATE_PRE_GAME"
