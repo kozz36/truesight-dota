@@ -1,7 +1,10 @@
 use crate::meta_repo::SeededMetaRepository;
+use crate::platform::{
+    PlatformEnv, detect_steam_vdf_in_candidates, resolve_cache_dir_for,
+    resolve_config_file_path_for, run_curl, steam_vdf_candidates_for,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -175,10 +178,7 @@ pub fn resolve_steam32_account_id(
 }
 
 fn config_file_path() -> PathBuf {
-    let base = std::env::var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/tmp"));
-    base.join(".config/truesight-dota/config.toml")
+    resolve_config_file_path_for(std::env::consts::OS, &PlatformEnv::from_process())
 }
 
 pub fn load_account_config() -> AccountLinkConfig {
@@ -236,18 +236,16 @@ pub fn save_account_config(mode: AccountLinkConfig) -> Result<(), PortError> {
 }
 
 pub fn detect_local_steam_vdf() -> Option<u64> {
-    let home = std::env::var("HOME").ok()?;
-    let home_path = PathBuf::from(home);
-    let candidates = [
-        home_path.join(".local/share/Steam/config/loginusers.vdf"),
-        home_path.join(".steam/steam/config/loginusers.vdf"),
-    ];
-    for candidate in candidates {
-        if let Ok(content) = fs::read_to_string(candidate) {
-            if let Some(steam32) = parse_loginusers_vdf(&content) {
-                return Some(steam32);
-            }
-        }
+    let env = PlatformEnv::from_process();
+    let candidates = steam_vdf_candidates_for(std::env::consts::OS, &env, None);
+    if let Some(steam32) = detect_steam_vdf_in_candidates(&candidates) {
+        return Some(steam32);
+    }
+    #[cfg(target_os = "windows")]
+    if let Some(reg_path) = crate::platform::query_windows_steam_path() {
+        return detect_steam_vdf_in_candidates(&[reg_path
+            .join("config")
+            .join("loginusers.vdf")]);
     }
     None
 }
@@ -301,7 +299,7 @@ impl Default for LocalCacheManager {
 
 impl LocalCacheManager {
     fn default_cache_dir() -> PathBuf {
-        PathBuf::from(std::env::var("HOME").as_deref().unwrap_or("/tmp")).join(".local/share/truesight-dota/cache")
+        resolve_cache_dir_for(std::env::consts::OS, &PlatformEnv::from_process())
     }
 
     pub fn new(player_account_id: u64) -> Self {
@@ -685,17 +683,7 @@ fn format_age(age_secs: u64) -> String {
 }
 
 fn fetch_url(url: &str) -> Result<String, PortError> {
-    let out = Command::new("curl")
-        .args(["-fsSL", "--max-time", "6", url])
-        .output()
-        .map_err(|e| PortError(format!("Failed to execute curl: {e}")))?;
-    if !out.status.success() {
-        return Err(PortError(format!(
-            "HTTP fetch failed for {url} (status {:?})",
-            out.status.code()
-        )));
-    }
-    String::from_utf8(out.stdout).map_err(|e| PortError(e.to_string()))
+    run_curl(url, &[], &format!("HTTP fetch for {url}"))
 }
 
 /// Lightweight parser for OpenDota `/api/players/{id}/heroes` JSON array.
@@ -898,26 +886,10 @@ pub fn parse_stratz_with_synergy_json(json: &str) -> Vec<(HeroId, HeroId, f32, u
 
 fn fetch_stratz_with_synergy_graphql(token: &str) -> Result<String, PortError> {
     let query = r#"{"query":"{ heroStats { heroVsHeroMatchup { advantage { heroId1 heroId2 with { heroId1 heroId2 matchCount synergy } } } } }"}"#;
-    let out = Command::new("curl")
-        .args([
-            "-fsSL",
-            "--max-time",
-            "6",
-            "-H",
-            "Content-Type: application/json",
-            "-H",
-            &format!("Authorization: Bearer {token}"),
-            "-d",
-            query,
-            "https://api.stratz.com/graphql",
-        ])
-        .output()
-        .map_err(|e| PortError(format!("Failed to execute STRATZ curl: {e}")))?;
-    if !out.status.success() {
-        return Err(PortError(format!(
-            "STRATZ GraphQL fetch failed (status {:?})",
-            out.status.code()
-        )));
-    }
-    String::from_utf8(out.stdout).map_err(|e| PortError(e.to_string()))
+    let auth_header = format!("Authorization: Bearer {token}");
+    run_curl(
+        "https://api.stratz.com/graphql",
+        &["-H", "Content-Type: application/json", "-H", &auth_header, "-d", query],
+        "STRATZ GraphQL fetch",
+    )
 }

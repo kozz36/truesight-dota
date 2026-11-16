@@ -41,3 +41,4 @@ cargo test --workspace --no-default-features --locked
 
 - **Never commit personal data**: Do not add personal Steam32/Steam64 IDs, `player_*.json` match dumps, or API tokens to source files, tests, or docs. Use synthetic fixtures in tests.
 - **Conventional Commits**: Use structured prefixes (`feat:`, `fix:`, `refactor:`, `ci:`, `docs:`, `test:`).
+- **Rustdoc Standards**: Document important `pub` cross-crate APIs, invariants, and external I/O contracts with concise `///` comments, and add selective docs to internal helpers when precedence, fallbacks, or platform edge cases are non-obvious (see [`AGENTS.md`](AGENTS.md)).
