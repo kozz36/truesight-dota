@@ -2672,11 +2672,18 @@ fn platform_paths_and_steam_vdf_support_windows_without_home_and_preserve_linux(
     };
     assert_eq!(
         resolve_config_file_path_for("linux", &linux_env),
-        PathBuf::from("/home/tester/.config/truesight-dota/config.toml")
+        PathBuf::from("/home/tester")
+            .join(".config")
+            .join("truesight-dota")
+            .join("config.toml")
     );
     assert_eq!(
         resolve_cache_dir_for("linux", &linux_env),
-        PathBuf::from("/home/tester/.local/share/truesight-dota/cache")
+        PathBuf::from("/home/tester")
+            .join(".local")
+            .join("share")
+            .join("truesight-dota")
+            .join("cache")
     );
 
     let linux_no_home = PlatformEnv {
@@ -2685,11 +2692,18 @@ fn platform_paths_and_steam_vdf_support_windows_without_home_and_preserve_linux(
     };
     assert_eq!(
         resolve_config_file_path_for("linux", &linux_no_home),
-        PathBuf::from("/var/tmp/ts-headless/.config/truesight-dota/config.toml")
+        PathBuf::from("/var/tmp/ts-headless")
+            .join(".config")
+            .join("truesight-dota")
+            .join("config.toml")
     );
     assert_eq!(
         resolve_cache_dir_for("linux", &linux_no_home),
-        PathBuf::from("/var/tmp/ts-headless/.local/share/truesight-dota/cache")
+        PathBuf::from("/var/tmp/ts-headless")
+            .join(".local")
+            .join("share")
+            .join("truesight-dota")
+            .join("cache")
     );
 
     // 2. Windows ignores unset HOME, prefers APPDATA / LOCALAPPDATA, falls back to USERPROFILE or temp_dir, never /tmp.
