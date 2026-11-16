@@ -368,11 +368,17 @@ impl HeroVisionCatalog {
             height: 22.min(atlas.hero_height.saturating_sub(2)),
         };
 
-        let mut full_entries = Vec::with_capacity(atlas.heroes.len());
-        let mut inner_entries = Vec::with_capacity(atlas.heroes.len());
-        let mut upper_entries = Vec::with_capacity(atlas.heroes.len());
+        let alt_atlas = crate::hero_alt_atlas::parse_hero_alt_atlas()?;
+        if alt_atlas.width != atlas.hero_width || alt_atlas.height != atlas.hero_height {
+            return None;
+        }
+        let total_entries = atlas.heroes.len() + alt_atlas.entries.len();
 
-        for (hero_id, rgb) in atlas.heroes {
+        let mut full_entries = Vec::with_capacity(total_entries);
+        let mut inner_entries = Vec::with_capacity(total_entries);
+        let mut upper_entries = Vec::with_capacity(total_entries);
+
+        for (hero_id, rgb) in atlas.heroes.into_iter().chain(alt_atlas.entries) {
             if let Some((desc, _)) =
                 compute_descriptor_8x4(&rgb, atlas.hero_width, atlas.hero_height, full_rect)
             {
