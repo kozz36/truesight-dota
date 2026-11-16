@@ -1,7 +1,7 @@
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use truesight_adapters::gsi::BoundedGsiListener;
 use truesight_adapters::sync::LocalCacheManager;
-use truesight_adapters::vision::BoundedVisionWorker;
+use truesight_adapters::vision::{BoundedVisionWorker, VisionCaptureMode};
 use truesight_core::domain::{Bracket, DraftPick, DraftState, Faction, HeroId, Role, Side, TEAM_SIZE};
 use truesight_core::math::{
     DraftAnalysis5v5, HeroRecommendation, MatchupMatrix, ModelWeights, evaluate_draft_5v5,
@@ -694,11 +694,27 @@ impl AppSession {
                 self.vision_reset_pending = false;
                 changed = true;
             }
+            let capture_mode = match self.last_rules_state.as_deref() {
+                Some(
+                    "DOTA_GAMERULES_STATE_INIT"
+                    | "DOTA_GAMERULES_STATE_WAIT_FOR_PLAYERS_TO_LOAD"
+                    | "DOTA_GAMERULES_STATE_CUSTOM_GAME_SETUP"
+                    | "DOTA_GAMERULES_STATE_POST_GAME"
+                    | "DOTA_GAMERULES_STATE_DISCONNECT",
+                ) => VisionCaptureMode::Suppressed,
+                Some(
+                    "DOTA_GAMERULES_STATE_HERO_SELECTION" | "DOTA_GAMERULES_STATE_STRATEGY_TIME",
+                ) => VisionCaptureMode::DraftOnly,
+                _ => VisionCaptureMode::Any,
+            };
+            worker.set_capture_mode(capture_mode);
             worker.set_ally_faction(self.draft.ally_faction);
             if let Ok(events) = worker.poll_events() {
-                for ev in events {
-                    self.apply_event(ev);
-                    changed = true;
+                if capture_mode != VisionCaptureMode::Suppressed {
+                    for ev in events {
+                        self.apply_event(ev);
+                        changed = true;
+                    }
                 }
             }
         }

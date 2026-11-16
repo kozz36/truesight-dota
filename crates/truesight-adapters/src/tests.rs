@@ -1712,3 +1712,133 @@ fn gsi_parser_extracts_draft_bans_and_coalesces_duplicate_ban_events() {
         vec![DraftEvent::BanDetected { hero_id: HeroId(94) }]
     );
 }
+
+#[test]
+fn vision_rejects_empty_pickphase_slots_and_dark_gradient_bars_that_matched_dark_heroes() {
+    use crate::vision::{
+        HeroVisionCatalog, RgbFrame, ScreenFrameSource, VisionCaptureAdapter,
+        compute_ingame_topbar_slot_rects, compute_pickphase_topbar_slot_rects,
+        compute_topbar_slot_rects, parse_hero_atlas,
+    };
+    use std::collections::VecDeque;
+
+    struct QueueSource(VecDeque<RgbFrame>);
+    impl ScreenFrameSource for QueueSource {
+        fn capture_frame(&mut self) -> Result<Option<RgbFrame>, truesight_core::ports::PortError> {
+            Ok(self.0.pop_front())
+        }
+    }
+
+    let atlas = parse_hero_atlas().expect("embedded hero atlas must load");
+    let catalog = HeroVisionCatalog::from_embedded().expect("vision catalog must load");
+
+    // 1. Dark-slate / teal UI gradient frame (resembles match-start Hero Selection / client chrome
+    // that previously false-matched Shadow Fiend(11), Terrorblade(109), Largo(155), Abaddon(102))
+    let (w1, h1) = (1429_usize, 389_usize);
+    let vh1 = (w1 * 9) / 16;
+    let mut dark_gradient = vec![0_u8; w1 * h1 * 3];
+    for y in 0..h1 {
+        let t = (y as f32) / (h1 as f32);
+        for x in 0..w1 {
+            let xt = ((x % 165) as f32) / 165.0;
+            let idx = (y * w1 + x) * 3;
+            dark_gradient[idx] = (14.0 + xt * 8.0 + t * 6.0) as u8;
+            dark_gradient[idx + 1] = (24.0 + xt * 10.0 + t * 8.0) as u8;
+            dark_gradient[idx + 2] = (34.0 + xt * 12.0 + t * 10.0) as u8;
+        }
+    }
+
+    // 2. Empty PickPhase slots painted at 1280x720 with realistic dark hero-card slate/cyan-tinted
+    // borders (mimicking unpicked PickPhase cards where outer_sat ~ 16-24 and outer_var ~ 8-12)
+    let (w2, h2) = (1280_usize, 720_usize);
+    let mut empty_pick = vec![15_u8; w2 * h2 * 3];
+    let (rad_pick, dire_pick) = compute_pickphase_topbar_slot_rects(w2, h2);
+    for rect in rad_pick.iter().chain(dire_pick.iter()) {
+        for dy in 0..rect.height {
+            for dx in 0..rect.width {
+                let border = dy < 3 || dy + 3 >= rect.height || dx < 4 || dx + 4 >= rect.width;
+                let idx = ((rect.y + dy) * w2 + (rect.x + dx)) * 3;
+                if border {
+                    empty_pick[idx] = 32;
+                    empty_pick[idx + 1] = 48;
+                    empty_pick[idx + 2] = 66;
+                } else {
+                    empty_pick[idx] = 18;
+                    empty_pick[idx + 1] = 28;
+                    empty_pick[idx + 2] = 42;
+                }
+            }
+        }
+    }
+
+    // 3. Grayscale high-contrast text/button boxes across all 10 SyntheticExact & InGame slots
+    // (passes high outer_var, fails saturation gate once broken `&&` logic is fixed)
+    let (w3, h3) = (1920_usize, 1080_usize);
+    let mut gray_ui = vec![0_u8; w3 * h3 * 3];
+    let (rad_syn, dire_syn) = compute_topbar_slot_rects(w3, h3);
+    for rect in rad_syn.iter().chain(dire_syn.iter()) {
+        for dy in 0..rect.height {
+            let v = if (dy / 4) % 2 == 0 { 52 } else { 20 };
+            for dx in 0..rect.width {
+                let idx = ((rect.y + dy) * w3 + (rect.x + dx)) * 3;
+                gray_ui[idx] = v;
+                gray_ui[idx + 1] = v;
+                gray_ui[idx + 2] = v;
+            }
+        }
+    }
+
+    // 4. Positive control at 1280x720 InGame with Queen of Pain (39, lowest outer_var=8..10) + Axe (2)
+    let (w4, h4) = (1280_usize, 720_usize);
+    let mut valid_ingame_1280 = vec![12_u8; w4 * h4 * 3];
+    let (rad_game, dire_game) = compute_ingame_topbar_slot_rects(w4, h4);
+    for (rect, hid) in [(rad_game[0], 39_u16), (dire_game[0], 2_u16)] {
+        let hero_rgb = &atlas.heroes[&HeroId(hid)];
+        let (sx0, sw0, sy0, sh0) = (4_usize, atlas.hero_width - 8, 2_usize, atlas.hero_height - 4);
+        for dy in 0..rect.height {
+            let sy = sy0 + (dy * sh0) / rect.height;
+            for dx in 0..rect.width {
+                let sx = sx0 + (dx * sw0) / rect.width;
+                let si = (sy * atlas.hero_width + sx) * 3;
+                let di = ((rect.y + dy) * w4 + (rect.x + dx)) * 3;
+                valid_ingame_1280[di..di + 3].copy_from_slice(&hero_rgb[si..si + 3]);
+            }
+        }
+    }
+    let _ = vh1;
+
+    let source = QueueSource(VecDeque::from([
+        RgbFrame { width: w1, height: h1, rgb: dark_gradient },
+        RgbFrame { width: w2, height: h2, rgb: empty_pick },
+        RgbFrame { width: w3, height: h3, rgb: gray_ui },
+        RgbFrame { width: w4, height: h4, rgb: valid_ingame_1280 },
+    ]));
+    let mut adapter = VisionCaptureAdapter::new(source, catalog);
+
+    let ev1 = adapter.poll_events().unwrap();
+    assert!(ev1.is_empty(), "Dark gradient top-bar must emit 0 picks, got {ev1:?}");
+
+    let ev2 = adapter.poll_events().unwrap();
+    assert!(ev2.is_empty(), "Empty PickPhase slate slots must emit 0 picks, got {ev2:?}");
+
+    let ev3 = adapter.poll_events().unwrap();
+    assert!(ev3.is_empty(), "Grayscale high-contrast UI boxes must emit 0 picks, got {ev3:?}");
+
+    let ev4 = adapter.poll_events().unwrap();
+    assert_eq!(ev4.len(), 2, "Valid InGame 1280x720 QoP + Axe frame must still detect both: {ev4:?}");
+}
+
+#[test]
+fn vision_x11_import_args_include_silent_flag_to_prevent_xbell() {
+    use crate::vision::build_x11_import_args;
+
+    let args = build_x11_import_args("0x620013d");
+    assert!(
+        args.contains(&"-silent"),
+        "ImageMagick import args must pass -silent to suppress XBell: {args:?}"
+    );
+    assert_eq!(
+        args,
+        ["-silent", "-window", "0x620013d", "-depth", "8", "-crop", "100%x8%+0+0", "ppm:-"]
+    );
+}

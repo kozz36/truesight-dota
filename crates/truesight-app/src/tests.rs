@@ -815,3 +815,90 @@ fn sync_coordinator_serializes_generations_rejects_stale_writes_and_preserves_va
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+#[test]
+fn session_suppresses_vision_during_wait_for_players_and_resumes_in_hero_selection() {
+    use std::time::Duration;
+    use truesight_adapters::vision::{
+        BoundedVisionWorker, RgbFrame, ScreenFrameSource, TopBarSlotRect,
+        compute_topbar_slot_rects, parse_hero_atlas,
+    };
+    use truesight_core::domain::HeroId;
+    use truesight_core::ports::DraftEvent;
+
+    struct StationarySource(RgbFrame);
+    impl ScreenFrameSource for StationarySource {
+        fn capture_frame(&mut self) -> Result<Option<RgbFrame>, truesight_core::ports::PortError> {
+            Ok(Some(self.0.clone()))
+        }
+    }
+
+    fn paint_slot(
+        frame: &mut [u8],
+        frame_w: usize,
+        rect: TopBarSlotRect,
+        hero_rgb: &[u8],
+        src_w: usize,
+        src_h: usize,
+    ) {
+        for dy in 0..rect.height {
+            let sy = (dy * src_h) / rect.height;
+            for dx in 0..rect.width {
+                let sx = (dx * src_w) / rect.width;
+                let src_idx = (sy * src_w + sx) * 3;
+                let dst_idx = ((rect.y + dy) * frame_w + (rect.x + dx)) * 3;
+                frame[dst_idx..dst_idx + 3].copy_from_slice(&hero_rgb[src_idx..src_idx + 3]);
+            }
+        }
+    }
+
+    let atlas = parse_hero_atlas().unwrap();
+    let (w, h) = (1920usize, 1080usize);
+    let mut rgb = vec![0u8; w * h * 3];
+    let (rad_r, dire_r) = compute_topbar_slot_rects(w, h);
+    paint_slot(&mut rgb, w, rad_r[0], &atlas.heroes[&HeroId(1)], atlas.hero_width, atlas.hero_height);
+    paint_slot(&mut rgb, w, dire_r[0], &atlas.heroes[&HeroId(94)], atlas.hero_width, atlas.hero_height);
+
+    let mut worker = BoundedVisionWorker::spawn_with_source(StationarySource(RgbFrame {
+        width: w,
+        height: h,
+        rgb,
+    }))
+    .unwrap();
+
+    let mut session = AppSession::new().unwrap();
+    session.apply_event(DraftEvent::GameRulesStateChanged {
+        state_name: "DOTA_GAMERULES_STATE_WAIT_FOR_PLAYERS_TO_LOAD".into(),
+        game_time_secs: -90,
+    });
+    for _ in 0..8 {
+        session.poll_live_sources(None, Some(&mut worker));
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    assert_eq!(
+        session.draft.allies.iter().flatten().count(),
+        0,
+        "Vision must remain suppressed during WAIT_FOR_PLAYERS_TO_LOAD"
+    );
+    assert_eq!(
+        session.draft.enemies.iter().flatten().count(),
+        0,
+        "Vision must remain suppressed during WAIT_FOR_PLAYERS_TO_LOAD"
+    );
+
+    session.apply_event(DraftEvent::GameRulesStateChanged {
+        state_name: "DOTA_GAMERULES_STATE_HERO_SELECTION".into(),
+        game_time_secs: -60,
+    });
+    for _ in 0..40 {
+        session.poll_live_sources(None, Some(&mut worker));
+        if session.draft.allies.iter().flatten().count() == 1
+            && session.draft.enemies.iter().flatten().count() == 1
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(session.draft.allies.iter().flatten().count(), 1);
+    assert_eq!(session.draft.enemies.iter().flatten().count(), 1);
+}
