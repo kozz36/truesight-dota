@@ -42,7 +42,7 @@ High-performance, native Rust 5v5 live draft analyzer and probabilistic hero rec
 ## Supported Platforms
 
 - **Linux (`x86_64`)**: Supported for both native GUI and `--cli` / `--demo` / `--sync` modes. Live top-bar vision capture currently requires an X11 or XWayland session with `xprop` and ImageMagick (`import`) installed; manual pick assignment and GSI work even without X11 capture tools.
-- **Windows (`x86_64`)**: Supported via native Win32/GDI top-bar capture (`xcap` — **Borderless Window** or **Windowed** Dota 2 recommended so `PrintWindow` captures without yellow border overlays), `%APPDATA%`/`%LOCALAPPDATA%` persistence, Steam `loginusers.vdf` auto-detection, and `curl.exe` OpenDota/STRATZ sync. Release GUI builds use `windows_subsystem = "windows"` cleanly; pass `--no-default-features` if building a console-only CLI binary (`--cli` / `--demo` / `--sync`). Windows installers and release packaging remain tracked in `#20`.
+- **Windows (`x86_64`)**: Compiles and runs natively on Windows (`xcap` Win32/GDI top-bar capture for Borderless Window / Windowed Dota 2, `%APPDATA%`/`%LOCALAPPDATA%` persistence, Steam `loginusers.vdf` lookup, and `curl.exe` OpenDota/STRATZ sync). The default executable preserves console I/O for `--cli`, `--demo`, and `--sync`; live in-game Dota 2 validation (`#12`) and dedicated Windows installers/GUI launcher packaging (`#20`) remain tracked.
 - **Native Wayland**: Tracked on the issue backlog (`#13`).
 
 ## Interactive CLI Commands (`truesight-dota --cli`)

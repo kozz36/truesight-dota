@@ -1,8 +1,3 @@
-#![cfg_attr(
-    all(not(debug_assertions), feature = "gui", target_os = "windows"),
-    windows_subsystem = "windows"
-)]
-
 mod cli;
 #[cfg(feature = "gui")]
 mod gui;

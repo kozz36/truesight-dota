@@ -731,11 +731,13 @@ fn vision_capture_adapter_recognizes_topbar_10_slots_and_maps_radiant_dire_sides
             Some(RgbFrame {
                 width: w1,
                 height: h1,
+                source_height: None,
                 rgb: rgb1,
             }),
             Some(RgbFrame {
                 width: w2,
                 height: h2,
+                source_height: None,
                 rgb: rgb2,
             }),
         ]),
@@ -993,6 +995,7 @@ fn vision_catalog_matches_pickphase_upper_crop_and_rejects_flat_medal_slots() {
     let source = QueueSource(VecDeque::from([RgbFrame {
         width: frame_w,
         height: frame_h,
+        source_height: None,
         rgb: pick_rgb,
     }]));
     let mut adapter = VisionCaptureAdapter::new(source, catalog);
@@ -1111,26 +1114,31 @@ fn vision_guard_rejects_non_dota_wm_class_single_slot_noise_and_dead_hero_overwr
         RgbFrame {
             width: frame_w,
             height: frame_h,
+            source_height: None,
             rgb: single_slot_rgb,
         },
         RgbFrame {
             width: frame_w,
             height: frame_h,
+            source_height: None,
             rgb: valid_rgb,
         },
         RgbFrame {
             width: frame_w,
             height: frame_h,
+            source_height: None,
             rgb: dead_overwrite_rgb,
         },
         RgbFrame {
             width: frame_w,
             height: frame_h,
+            source_height: None,
             rgb: swap_rgb.clone(),
         },
         RgbFrame {
             width: frame_w,
             height: frame_h,
+            source_height: None,
             rgb: swap_rgb,
         },
     ]));
@@ -1439,6 +1447,7 @@ fn vision_reset_clears_detector_state_drains_stale_queue_and_repopulates_station
     let stationary = RgbFrame {
         width: w,
         height: h,
+        source_height: None,
         rgb,
     };
 
@@ -1799,6 +1808,7 @@ fn event_queues_coalesce_under_saturation_preserve_resets_and_recover_stationary
         StationarySource(RgbFrame {
             width: w,
             height: h,
+            source_height: None,
             rgb,
         }),
         8,
@@ -1982,21 +1992,25 @@ fn vision_rejects_empty_pickphase_slots_and_dark_gradient_bars_that_matched_dark
         RgbFrame {
             width: w1,
             height: h1,
+            source_height: None,
             rgb: dark_gradient,
         },
         RgbFrame {
             width: w2,
             height: h2,
+            source_height: None,
             rgb: empty_pick,
         },
         RgbFrame {
             width: w3,
             height: h3,
+            source_height: None,
             rgb: gray_ui,
         },
         RgbFrame {
             width: w4,
             height: h4,
+            source_height: None,
             rgb: valid_ingame_1280,
         },
     ]));
@@ -2211,6 +2225,7 @@ fn vision_catalog_matches_all_arcana_and_persona_portraits_across_layouts() {
         let source = SingleFrameSource(Some(RgbFrame {
             width: w,
             height: h,
+            source_height: None,
             rgb: frame_rgb,
         }));
         let mut adapter = VisionCaptureAdapter::new(source, catalog);
@@ -2364,6 +2379,7 @@ fn vision_pickphase_and_ingame_adapter_detect_all_49_arcana_and_persona_variants
                 SingleFrameSource(Some(RgbFrame {
                     width: fw,
                     height: fh,
+                    source_height: None,
                     rgb: frame_rgb,
                 })),
                 catalog.clone(),
@@ -2549,6 +2565,7 @@ fn vision_recalls_dark_low_contrast_heroes_and_rejects_empty_slots_across_resolu
             SingleFrame(Some(RgbFrame {
                 width: w,
                 height: fh,
+                source_height: None,
                 rgb,
             })),
             catalog.clone(),
@@ -2784,6 +2801,191 @@ fn windows_capture_filter_and_rgba_strip_reject_browsers_minimized_and_convert_t
         hero_id: HeroId(5),
         role: Some(truesight_core::domain::Role::Carry),
     }));
+}
+
+#[test]
+fn windows_non_16_9_crop_preserves_source_height_and_detects_4_3_pickphase() {
+    use crate::vision::{
+        HeroVisionCatalog, ScreenFrameSource, VisionCaptureAdapter,
+        compute_pickphase_topbar_slot_rects, parse_hero_atlas, rgba_to_topbar_rgb_frame,
+    };
+    use truesight_core::domain::{HeroId, Side};
+    use truesight_core::ports::{DraftEvent, DraftEventSource};
+
+    let w = 1024_usize;
+    let h = 768_usize;
+    let (rad_rects, dire_rects) = compute_pickphase_topbar_slot_rects(w, h);
+    assert_eq!(rad_rects[0].height, 30);
+
+    let atlas = parse_hero_atlas().unwrap();
+    let mut full_rgba = vec![14_u8; w * h * 4];
+    for px in full_rgba.chunks_exact_mut(4) {
+        px[3] = 255;
+    }
+
+    let paint_upper_crop = |rgba: &mut [u8], hero_id: u16, rect: crate::vision::TopBarSlotRect| {
+        let hero_rgb = atlas.heroes.get(&HeroId(hero_id)).unwrap();
+        let src_h = ((atlas.hero_height * 22) / 36).max(1);
+        let src_w = (atlas.hero_width * 56) / 64;
+        let src_x0 = (atlas.hero_width - src_w) / 2;
+        let src_y0 = 2;
+        for dy in 0..rect.height {
+            let sy = (src_y0 + (dy * src_h) / rect.height).min(atlas.hero_height - 1);
+            for dx in 0..rect.width {
+                let sx = (src_x0 + (dx * src_w) / rect.width).min(atlas.hero_width - 1);
+                let s_idx = (sy * atlas.hero_width + sx) * 3;
+                let d_idx = ((rect.y + dy) * w + (rect.x + dx)) * 4;
+                rgba[d_idx] = hero_rgb[s_idx];
+                rgba[d_idx + 1] = hero_rgb[s_idx + 1];
+                rgba[d_idx + 2] = hero_rgb[s_idx + 2];
+            }
+        }
+    };
+    paint_upper_crop(&mut full_rgba, 2, rad_rects[0]);
+    paint_upper_crop(&mut full_rgba, 5, dire_rects[0]);
+
+    let frame = rgba_to_topbar_rgb_frame(&full_rgba, w, h).expect("4:3 strip");
+    assert_eq!(frame.height, 62);
+    assert_eq!(frame.source_height, Some(768));
+
+    struct OnceSource(Option<crate::vision::RgbFrame>);
+    impl ScreenFrameSource for OnceSource {
+        fn capture_frame(
+            &mut self,
+        ) -> Result<Option<crate::vision::RgbFrame>, truesight_core::ports::PortError> {
+            Ok(self.0.take())
+        }
+    }
+
+    let mut adapter = VisionCaptureAdapter::new(
+        OnceSource(Some(frame)),
+        HeroVisionCatalog::from_embedded().unwrap(),
+    );
+    let events = adapter.poll_events().unwrap();
+    assert!(events.contains(&DraftEvent::PickDetected {
+        side: Side::Allies,
+        slot: 0,
+        hero_id: HeroId(2),
+        role: Some(truesight_core::domain::Role::Carry),
+    }));
+    assert!(events.contains(&DraftEvent::PickDetected {
+        side: Side::Enemies,
+        slot: 0,
+        hero_id: HeroId(5),
+        role: Some(truesight_core::domain::Role::Carry),
+    }));
+}
+
+#[test]
+fn vision_worker_tracks_runtime_health_errors_recovery_and_bounded_stalled_drop() {
+    use crate::vision::{
+        BoundedVisionWorker, CaptureRuntimeHealth, RgbFrame, ScreenFrameSource, VisionCaptureMode,
+    };
+    use std::sync::{Arc, Mutex, mpsc};
+    use std::time::{Duration, Instant};
+    use truesight_core::ports::PortError;
+
+    enum Step {
+        Wait,
+        Err(&'static str),
+        BlankFrame,
+    }
+
+    struct ScriptedSource(Arc<Mutex<std::collections::VecDeque<Step>>>);
+    impl ScreenFrameSource for ScriptedSource {
+        fn capture_frame(&mut self) -> Result<Option<RgbFrame>, PortError> {
+            let next = self
+                .0
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(Step::BlankFrame);
+            match next {
+                Step::Wait => Ok(None),
+                Step::Err(msg) => Err(PortError(msg.into())),
+                Step::BlankFrame => Ok(Some(RgbFrame::new(1280, 60, vec![0; 1280 * 60 * 3]))),
+            }
+        }
+    }
+
+    let script = Arc::new(Mutex::new(std::collections::VecDeque::from([Step::Wait])));
+    let mut worker = BoundedVisionWorker::spawn_with_source(ScriptedSource(Arc::clone(&script)))
+        .expect("spawn worker");
+
+    std::thread::sleep(Duration::from_millis(80));
+    assert_eq!(
+        worker.runtime_health(),
+        CaptureRuntimeHealth::WaitingForGame
+    );
+
+    script
+        .lock()
+        .unwrap()
+        .push_back(Step::Err("PrintWindow failed"));
+    worker.reset();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if matches!(
+            worker.runtime_health(),
+            CaptureRuntimeHealth::CaptureError(_)
+        ) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(matches!(
+        worker.runtime_health(),
+        CaptureRuntimeHealth::CaptureError(ref msg) if msg.contains("PrintWindow failed")
+    ));
+
+    // A blank valid frame with zero Hero picks marks Capturing (stationary/empty frame != capture error)
+    script.lock().unwrap().push_back(Step::BlankFrame);
+    worker.reset();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if worker.runtime_health() == CaptureRuntimeHealth::Capturing {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(worker.runtime_health(), CaptureRuntimeHealth::Capturing);
+
+    // Suppression transitions cleanly and drop completes promptly.
+    worker.set_capture_mode(VisionCaptureMode::Suppressed);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if worker.runtime_health() == CaptureRuntimeHealth::Suppressed {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(worker.runtime_health(), CaptureRuntimeHealth::Suppressed);
+    drop(worker);
+
+    // Stalled capture call on drop must not block shutdown indefinitely.
+    let (tx_started, rx_started) = mpsc::channel();
+    struct StalledSource(Option<mpsc::Sender<()>>);
+    impl ScreenFrameSource for StalledSource {
+        fn capture_frame(&mut self) -> Result<Option<RgbFrame>, PortError> {
+            if let Some(tx) = self.0.take() {
+                let _ = tx.send(());
+            }
+            std::thread::sleep(Duration::from_secs(2));
+            Ok(None)
+        }
+    }
+    let stalled_worker =
+        BoundedVisionWorker::spawn_with_source(StalledSource(Some(tx_started))).unwrap();
+    rx_started
+        .recv_timeout(Duration::from_secs(1))
+        .expect("capture entered");
+    let drop_start = Instant::now();
+    drop(stalled_worker);
+    assert!(
+        drop_start.elapsed() < Duration::from_millis(800),
+        "BoundedVisionWorker::drop blocked too long on stalled capture: {:?}",
+        drop_start.elapsed()
+    );
 }
 
 #[test]

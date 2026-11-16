@@ -116,3 +116,15 @@ jobs:
 
       - name: Run headless workspace tests on Windows (CLI zero-GUI)
         run: cargo test --workspace --no-default-features --locked
+
+      - name: Smoke-test Windows release CLI console output
+        shell: pwsh
+        run: |
+          cargo build --release --locked
+          $out = & .\target\release\truesight-dota.exe --demo --no-color
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $text = $out -join "`n"
+          if (-not ($text -match "TRUESIGHT-DOTA" -and $text -match "WIN PROBABILITY")) {
+            Write-Error "Unexpected --demo output on Windows release binary:`n$text"
+            exit 1
+          }

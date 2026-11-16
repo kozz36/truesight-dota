@@ -43,13 +43,16 @@ impl X11TopBarFrameSource {
         Self::default()
     }
 
-    fn find_dota_window() -> Option<String> {
+    fn find_dota_window() -> Result<Option<String>, PortError> {
         let root_out = Command::new("xprop")
             .args(["-root", "_NET_CLIENT_LIST"])
             .output()
-            .ok()?;
+            .map_err(|e| PortError(format!("Failed to execute xprop: {e}")))?;
         if !root_out.status.success() {
-            return None;
+            return Err(PortError(format!(
+                "X11 display unreachable via xprop (status {:?})",
+                root_out.status.code()
+            )));
         }
         let root_text = String::from_utf8_lossy(&root_out.stdout);
         for tok in root_text.split_whitespace() {
@@ -68,9 +71,9 @@ impl X11TopBarFrameSource {
             if !is_dota2_xprop_output(&props_str) {
                 continue;
             }
-            return Some(wid.to_string());
+            return Ok(Some(wid.to_string()));
         }
-        None
+        Ok(None)
     }
 }
 
@@ -78,7 +81,7 @@ impl X11TopBarFrameSource {
 impl ScreenFrameSource for X11TopBarFrameSource {
     fn capture_frame(&mut self) -> Result<Option<RgbFrame>, PortError> {
         if self.cached_window.is_none() {
-            self.cached_window = Self::find_dota_window();
+            self.cached_window = Self::find_dota_window()?;
         }
         let Some(ref wid) = self.cached_window else {
             return Ok(None);
@@ -86,20 +89,27 @@ impl ScreenFrameSource for X11TopBarFrameSource {
 
         let output = Command::new("import")
             .args(build_x11_import_args(wid))
-            .output();
+            .output()
+            .map_err(|e| PortError(format!("Failed to execute ImageMagick import: {e}")))?;
 
-        let Ok(out) = output else {
+        if !output.status.success() {
             self.cached_window = None;
-            return Ok(None);
-        };
-        if !out.status.success() {
-            self.cached_window = None;
-            return Ok(None);
+            // If Dota 2 window closed/minimized between lookup and import, wait cleanly;
+            // if a Dota 2 window is still open and import failed, surface the error.
+            if Self::find_dota_window()?.is_none() {
+                return Ok(None);
+            }
+            return Err(PortError(format!(
+                "ImageMagick import capture failed (status {:?})",
+                output.status.code()
+            )));
         }
 
-        let Some(frame) = parse_ppm_p6(&out.stdout) else {
+        let Some(frame) = parse_ppm_p6(&output.stdout) else {
             self.cached_window = None;
-            return Ok(None);
+            return Err(PortError(
+                "X11 capture returned malformed PPM P6 output.".into(),
+            ));
         };
         if frame.width < 640 || frame.height < 40 {
             return Ok(None);

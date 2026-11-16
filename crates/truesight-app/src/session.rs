@@ -25,8 +25,11 @@ pub struct AppSession {
     pub db_status: String,
     pub last_gsi_state: String,
     pub vision_available: bool,
+    pub vision_error: bool,
     pub vision_status: String,
     pub vision_detail: String,
+    vision_backend: Option<truesight_adapters::vision::CaptureBackendKind>,
+    last_runtime_health: Option<truesight_adapters::vision::CaptureRuntimeHealth>,
     pub ally_locked_slots: [bool; TEAM_SIZE],
     pub enemy_locked_slots: [bool; TEAM_SIZE],
     pub manually_dismissed: Vec<HeroId>,
@@ -107,8 +110,11 @@ impl AppSession {
             db_status,
             last_gsi_state: "IDLE (Waiting for Dota 2 GSI)".into(),
             vision_available: false,
+            vision_error: false,
             vision_status: "CAP: MANUAL".into(),
             vision_detail: "Manual pick mode (screen capture inactive).".into(),
+            vision_backend: None,
+            last_runtime_health: None,
             ally_locked_slots: [false; TEAM_SIZE],
             enemy_locked_slots: [false; TEAM_SIZE],
             manually_dismissed: Vec::new(),
@@ -145,8 +151,31 @@ impl AppSession {
     /// Updates UI/CLI capture capability indicators from the platform capture factory.
     pub fn set_vision_availability(&mut self, availability: &CaptureAvailability) {
         self.vision_available = availability.is_available();
+        self.vision_error = false;
         self.vision_status = availability.badge_label().to_string();
         self.vision_detail = availability.summary().to_string();
+        self.vision_backend = availability.is_available().then(|| availability.backend());
+        self.last_runtime_health = None;
+    }
+
+    fn apply_runtime_health(&mut self, health: truesight_adapters::vision::CaptureRuntimeHealth) {
+        if self.last_runtime_health.as_ref() == Some(&health) {
+            return;
+        }
+        let backend = self
+            .vision_backend
+            .unwrap_or(if cfg!(target_os = "windows") {
+                truesight_adapters::vision::CaptureBackendKind::WindowsNative
+            } else if cfg!(target_os = "linux") {
+                truesight_adapters::vision::CaptureBackendKind::X11
+            } else {
+                truesight_adapters::vision::CaptureBackendKind::Unsupported
+            });
+        self.vision_available = health.is_capturing();
+        self.vision_error = health.is_error();
+        self.vision_status = health.status_badge(backend);
+        self.vision_detail = health.summary();
+        self.last_runtime_health = Some(health);
     }
 
     pub fn reload_repository(&mut self) {
@@ -732,6 +761,11 @@ impl AppSession {
                         changed = true;
                     }
                 }
+            }
+            let prev_status = self.vision_status.clone();
+            self.apply_runtime_health(worker.runtime_health());
+            if self.vision_status != prev_status {
+                changed = true;
             }
         }
         changed

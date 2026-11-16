@@ -401,6 +401,7 @@ fn draft_reset_and_new_match_transition_reset_vision_worker_without_mid_draft_wi
     let mut worker = BoundedVisionWorker::spawn_with_source(StationarySource(RgbFrame {
         width: w,
         height: h,
+        source_height: None,
         rgb,
     }))
     .unwrap();
@@ -970,6 +971,7 @@ fn session_suppresses_vision_during_wait_for_players_and_resumes_in_hero_selecti
     let mut worker = BoundedVisionWorker::spawn_with_source(StationarySource(RgbFrame {
         width: w,
         height: h,
+        source_height: None,
         rgb,
     }))
     .unwrap();
@@ -1095,6 +1097,7 @@ fn live_gsi_init_and_custom_setup_suppress_vision_and_restore_across_match_trans
     let mut worker = BoundedVisionWorker::spawn_with_source(StationarySource(RgbFrame {
         width: w,
         height: h,
+        source_height: None,
         rgb,
     }))
     .unwrap();
@@ -1246,4 +1249,79 @@ fn session_and_cli_surface_capture_availability_and_allow_manual_picks_when_unav
     session.set_vision_availability(&available);
     assert_eq!(session.vision_status, "CAP: X11");
     assert!(session.vision_available);
+
+    type HealthStep =
+        Result<Option<truesight_adapters::vision::RgbFrame>, truesight_core::ports::PortError>;
+    type HealthQueue = std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<HealthStep>>>;
+
+    // Runtime worker health updates UI/CLI status from WaitingForGame -> ERR -> LIVE cleanly.
+    struct HealthSequence(HealthQueue);
+    impl truesight_adapters::vision::ScreenFrameSource for HealthSequence {
+        fn capture_frame(
+            &mut self,
+        ) -> Result<Option<truesight_adapters::vision::RgbFrame>, truesight_core::ports::PortError>
+        {
+            self.0.lock().unwrap().pop_front().unwrap_or_else(|| {
+                Ok(Some(truesight_adapters::vision::RgbFrame::new(
+                    1280,
+                    60,
+                    vec![0; 1280 * 60 * 3],
+                )))
+            })
+        }
+    }
+
+    let steps = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from([
+        Err(truesight_core::ports::PortError(
+            "Windows capture failed: handle lost".into(),
+        )),
+    ])));
+    let mut worker = truesight_adapters::vision::BoundedVisionWorker::spawn_with_source(
+        HealthSequence(std::sync::Arc::clone(&steps)),
+    )
+    .unwrap();
+    let win_avail = CaptureAvailability::Available {
+        backend: CaptureBackendKind::WindowsNative,
+        detail: "Windows Win32/GDI (xcap)".into(),
+    };
+    session.set_vision_availability(&win_avail);
+
+    let err_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while std::time::Instant::now() < err_deadline {
+        session.poll_live_sources(None, Some(&mut worker));
+        if session.vision_status == "WIN32: ERR" {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(session.vision_status, "WIN32: ERR");
+    assert!(!session.vision_available);
+    assert!(session.vision_detail.contains("handle lost"));
+    assert!(
+        session
+            .vision_detail
+            .to_ascii_lowercase()
+            .contains("manual")
+    );
+
+    steps
+        .lock()
+        .unwrap()
+        .push_back(Ok(Some(truesight_adapters::vision::RgbFrame::new(
+            1280,
+            60,
+            vec![0; 1280 * 60 * 3],
+        ))));
+    worker.reset();
+    let live_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while std::time::Instant::now() < live_deadline {
+        session.poll_live_sources(None, Some(&mut worker));
+        if session.vision_status == "WIN32: LIVE" {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(session.vision_status, "WIN32: LIVE");
+    assert!(session.vision_available);
+    assert!(crate::render_dashboard_string(&session, false).contains("Vision: WIN32: LIVE"));
 }

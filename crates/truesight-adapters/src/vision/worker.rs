@@ -1,9 +1,9 @@
 use super::*;
 use crate::gsi::{BoundedDraftQueue, EventQueueStats};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use truesight_core::domain::{Faction, HeroId, Role, Side};
 use truesight_core::ports::{DraftEvent, DraftEventSource, PortError};
 
@@ -205,22 +205,25 @@ fn dedup_layout_candidates(rad: &mut [SlotCandidate; 5], dire: &mut [SlotCandida
     }
 }
 
-impl<S: ScreenFrameSource> DraftEventSource for VisionCaptureAdapter<S> {
-    type Error = PortError;
-
-    fn poll_events(&mut self) -> Result<Vec<DraftEvent>, Self::Error> {
+impl<S: ScreenFrameSource> VisionCaptureAdapter<S> {
+    /// Polls one frame cycle and reports both detected draft events and live runtime capture health.
+    pub fn poll_events_with_health(
+        &mut self,
+    ) -> Result<(Vec<DraftEvent>, CaptureRuntimeHealth), PortError> {
         if self.capture_mode == VisionCaptureMode::Suppressed {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), CaptureRuntimeHealth::Suppressed));
         }
         let Some(frame) = self.source.capture_frame()? else {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), CaptureRuntimeHealth::WaitingForGame));
         };
 
-        let virtual_h = if frame.height * 4 < frame.width {
-            (frame.width * 9) / 16
-        } else {
-            frame.height
-        };
+        let virtual_h = frame.source_height.unwrap_or_else(|| {
+            if frame.height * 4 < frame.width {
+                (frame.width * 9) / 16
+            } else {
+                frame.height
+            }
+        });
 
         let mut best_score = 0.0_f32;
         let mut best_count = 0_usize;
@@ -245,7 +248,7 @@ impl<S: ScreenFrameSource> DraftEventSource for VisionCaptureAdapter<S> {
         }
 
         if best_count < MIN_DETECTED_SLOTS_QUORUM {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), CaptureRuntimeHealth::Capturing));
         }
 
         let (rad_side, dire_side) = match self.ally_faction {
@@ -277,18 +280,29 @@ impl<S: ScreenFrameSource> DraftEventSource for VisionCaptureAdapter<S> {
         }
 
         self.last_ally_faction = Some(self.ally_faction);
-        Ok(events)
+        Ok((events, CaptureRuntimeHealth::Capturing))
+    }
+}
+
+impl<S: ScreenFrameSource> DraftEventSource for VisionCaptureAdapter<S> {
+    type Error = PortError;
+
+    fn poll_events(&mut self) -> Result<Vec<DraftEvent>, Self::Error> {
+        self.poll_events_with_health().map(|(events, _)| events)
     }
 }
 
 const VISION_QUEUE_CAPACITY: usize = 32;
+const DROP_JOIN_TIMEOUT: Duration = Duration::from_millis(350);
 
 /// Bounded background worker polling Dota 2 top-bar frames at ~1 Hz.
 pub struct BoundedVisionWorker {
     queue: Arc<BoundedDraftQueue>,
     ally_faction_code: Arc<AtomicU8>,
     capture_mode_code: Arc<AtomicU8>,
+    runtime_health: Arc<Mutex<CaptureRuntimeHealth>>,
     shutdown: Arc<AtomicBool>,
+    shutdown_sync: Arc<(Mutex<bool>, Condvar)>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -312,10 +326,14 @@ impl BoundedVisionWorker {
         let queue_ref = Arc::clone(&queue);
         let ally_faction_code = Arc::new(AtomicU8::new(0));
         let capture_mode_code = Arc::new(AtomicU8::new(VisionCaptureMode::Any as u8));
+        let runtime_health = Arc::new(Mutex::new(CaptureRuntimeHealth::WaitingForGame));
         let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_sync = Arc::new((Mutex::new(false), Condvar::new()));
         let faction_ref = Arc::clone(&ally_faction_code);
         let mode_ref = Arc::clone(&capture_mode_code);
+        let health_ref = Arc::clone(&runtime_health);
         let shutdown_ref = Arc::clone(&shutdown);
+        let sync_ref = Arc::clone(&shutdown_sync);
 
         let worker = thread::Builder::new()
             .name("truesight-vision-worker".into())
@@ -326,7 +344,9 @@ impl BoundedVisionWorker {
                     queue_ref,
                     faction_ref,
                     mode_ref,
+                    health_ref,
                     shutdown_ref,
+                    sync_ref,
                 )
             })
             .ok()?;
@@ -335,9 +355,19 @@ impl BoundedVisionWorker {
             queue,
             ally_faction_code,
             capture_mode_code,
+            runtime_health,
             shutdown,
+            shutdown_sync,
             worker: Some(worker),
         })
+    }
+
+    /// Returns the most recent runtime capture health snapshot without blocking capture.
+    pub fn runtime_health(&self) -> CaptureRuntimeHealth {
+        self.runtime_health
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn set_ally_faction(&self, faction: Faction) {
@@ -379,19 +409,54 @@ impl Drop for BoundedVisionWorker {
         self.shutdown.store(true, Ordering::Release);
         self.queue.close();
         if let Some(handle) = self.worker.take() {
-            let _ = handle.join();
+            let (lock, cvar) = &*self.shutdown_sync;
+            let mut done = lock.lock().unwrap_or_else(|e| e.into_inner());
+            let deadline = Instant::now() + DROP_JOIN_TIMEOUT;
+            while !*done {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                let (guard, timeout) = cvar
+                    .wait_timeout(done, remaining)
+                    .unwrap_or_else(|e| e.into_inner());
+                done = guard;
+                if timeout.timed_out() {
+                    break;
+                }
+            }
+            // Join cleanly when the loop exited within the budget; if a native OS capture call is
+            // stalled inside PrintWindow/import, detach instead of blocking app exit forever.
+            if *done {
+                let _ = handle.join();
+            }
         }
     }
 }
 
+struct LoopCompletionSignal(Arc<(Mutex<bool>, Condvar)>);
+
+impl Drop for LoopCompletionSignal {
+    fn drop(&mut self) {
+        let (lock, cvar) = &*self.0;
+        let mut done = lock.lock().unwrap_or_else(|e| e.into_inner());
+        *done = true;
+        cvar.notify_all();
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_vision_loop<S: ScreenFrameSource>(
     source: S,
     catalog: HeroVisionCatalog,
     queue: Arc<BoundedDraftQueue>,
     ally_faction_code: Arc<AtomicU8>,
     capture_mode_code: Arc<AtomicU8>,
+    runtime_health: Arc<Mutex<CaptureRuntimeHealth>>,
     shutdown: Arc<AtomicBool>,
+    shutdown_sync: Arc<(Mutex<bool>, Condvar)>,
 ) {
+    let _completion = LoopCompletionSignal(shutdown_sync);
     let mut adapter = VisionCaptureAdapter::new(source, catalog);
     while !shutdown.load(Ordering::Acquire) {
         let (poll_seq, should_reset) = queue.begin_poll_cycle();
@@ -407,11 +472,21 @@ fn run_vision_loop<S: ScreenFrameSource>(
         let mode = VisionCaptureMode::from_code(capture_mode_code.load(Ordering::Acquire));
         adapter.set_capture_mode(mode);
 
-        if let Ok(events) = adapter.poll_events() {
-            for ev in events {
-                if !queue.push_for_epoch(poll_seq, ev) {
-                    return;
+        let next_health = match adapter.poll_events_with_health() {
+            Ok((events, health)) => {
+                for ev in events {
+                    if !queue.push_for_epoch(poll_seq, ev) {
+                        return;
+                    }
                 }
+                health
+            }
+            Err(err) => CaptureRuntimeHealth::CaptureError(err.to_string()),
+        };
+        {
+            let mut guard = runtime_health.lock().unwrap_or_else(|e| e.into_inner());
+            if *guard != next_health {
+                *guard = next_health;
             }
         }
 

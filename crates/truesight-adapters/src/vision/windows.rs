@@ -52,11 +52,7 @@ pub fn rgba_to_topbar_rgb_frame(rgba: &[u8], width: usize, height: usize) -> Opt
         rgb.push(px[1]);
         rgb.push(px[2]);
     }
-    Some(RgbFrame {
-        width,
-        height: strip_h,
-        rgb,
-    })
+    Some(RgbFrame::with_source_height(width, strip_h, height, rgb))
 }
 
 /// Live Windows Win32/GDI top-bar frame source capturing the `"Dota 2"` window via `xcap`
@@ -90,11 +86,10 @@ impl WindowsTopBarFrameSource {
         is_dota2_windows_window(&title, &app_name, minimized, width, height)
     }
 
-    fn find_dota_window() -> Option<Window> {
-        let Ok(windows) = Window::all() else {
-            return None;
-        };
-        windows.into_iter().find(Self::matches_dota_window)
+    fn find_dota_window() -> Result<Option<Window>, PortError> {
+        let windows = Window::all()
+            .map_err(|e| PortError(format!("Windows window enumeration failed: {e}")))?;
+        Ok(windows.into_iter().find(Self::matches_dota_window))
     }
 }
 
@@ -107,17 +102,34 @@ impl ScreenFrameSource for WindowsTopBarFrameSource {
             self.cached_window = None;
         }
         if self.cached_window.is_none() {
-            self.cached_window = Self::find_dota_window();
+            self.cached_window = Self::find_dota_window()?;
         }
         let Some(ref win) = self.cached_window else {
             return Ok(None);
         };
-        let Ok(img) = win.capture_image() else {
-            self.cached_window = None;
-            return Ok(None);
+        let img = match win.capture_image() {
+            Ok(img) => img,
+            Err(err) => {
+                // Closing or minimizing Dota 2 mid-poll transitions to WaitingForGame (`Ok(None)`),
+                // whereas capture failures on an open visible window surface as `CaptureError`.
+                let still_visible = Self::matches_dota_window(win);
+                self.cached_window = None;
+                if !still_visible {
+                    return Ok(None);
+                }
+                return Err(PortError(format!("Windows capture failed: {err}")));
+            }
         };
         let width = img.width() as usize;
         let height = img.height() as usize;
-        Ok(rgba_to_topbar_rgb_frame(img.as_raw(), width, height))
+        if width < 640 || height < 360 {
+            self.cached_window = None;
+            return Ok(None);
+        }
+        rgba_to_topbar_rgb_frame(img.as_raw(), width, height)
+            .map(Some)
+            .ok_or_else(|| {
+                PortError("Windows capture returned an invalid RGBA frame buffer.".into())
+            })
     }
 }
