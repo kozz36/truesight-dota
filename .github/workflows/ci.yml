@@ -128,3 +128,78 @@ jobs:
             Write-Error "Unexpected --demo output on Windows release binary:`n$text"
             exit 1
           }
+
+      - name: Smoke-test Windows GSI installer & MSI/ZIP packaging
+        shell: pwsh
+        run: |
+          $tmpDota = Join-Path $env:RUNNER_TEMP "ts_gsi_smoke"
+          New-Item -ItemType Directory -Path (Join-Path $tmpDota "game\dota\cfg") -Force | Out-Null
+          .\packaging\windows\install-gsi.ps1 -DotaDir $tmpDota
+          $installedCfg = Join-Path $tmpDota "game\dota\cfg\gamestate_integration\gamestate_integration_truesight.cfg"
+          if (-not (Test-Path -LiteralPath $installedCfg)) {
+            Write-Error "install-gsi.ps1 did not create $installedCfg"
+            exit 1
+          }
+          dotnet tool install --global wix --version 5.0.2
+          $pkgOut = Join-Path $env:RUNNER_TEMP "ts_pkg_out"
+          .\packaging\windows\build-release-packages.ps1 `
+            -ExePath ".\target\release\truesight-dota.exe" `
+            -Version "0.1.0" `
+            -OutDir $pkgOut
+          $msiV1 = Join-Path $pkgOut "truesight-dota-windows-x86_64.msi"
+          $zipV1 = Join-Path $pkgOut "truesight-dota-windows-x86_64.zip"
+          if (-not (Test-Path -LiteralPath $msiV1) -or -not (Test-Path -LiteralPath $zipV1)) {
+            Write-Error "Missing expected Windows release package output in $pkgOut"
+            exit 1
+          }
+
+          function Invoke-MsiExec {
+            param([string[]]$MsiArgs, [string]$LogPath)
+            $p = Start-Process -FilePath "msiexec.exe" -ArgumentList $MsiArgs -Wait -PassThru -NoNewWindow
+            if ($p.ExitCode -ne 0) {
+              if (Test-Path -LiteralPath $LogPath) {
+                Get-Content -LiteralPath $LogPath -Tail 80
+              }
+              throw "msiexec failed with exit code $($p.ExitCode)"
+            }
+          }
+
+          $installDir = Join-Path $env:LOCALAPPDATA "Programs\TrueSight Dota"
+          $shortcutPath = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\TrueSight Dota\TrueSight Dota.lnk"
+          $installLog = Join-Path $env:RUNNER_TEMP "msi_install.log"
+          Invoke-MsiExec -MsiArgs @("/i", "`"$msiV1`"", "/qn", "/norestart", "/l*v", "`"$installLog`"") -LogPath $installLog
+
+          foreach ($rel in @("truesight-dota.exe", "gamestate_integration_truesight.cfg", "install-gsi.ps1", "LICENSE", "README.md")) {
+            $p = Join-Path $installDir $rel
+            if (-not (Test-Path -LiteralPath $p)) {
+              throw "MSI install missing expected payload file: $p"
+            }
+          }
+          if (-not (Test-Path -LiteralPath $shortcutPath)) {
+            throw "MSI install missing Start Menu shortcut: $shortcutPath"
+          }
+          $installedOut = & (Join-Path $installDir "truesight-dota.exe") --demo --no-color
+          if ($LASTEXITCODE -ne 0 -or -not (($installedOut -join "`n") -match "WIN PROBABILITY")) {
+            throw "Installed truesight-dota.exe failed --demo smoke test"
+          }
+
+          $pkgUpgradeOut = Join-Path $env:RUNNER_TEMP "ts_pkg_upgrade"
+          .\packaging\windows\build-release-packages.ps1 `
+            -ExePath ".\target\release\truesight-dota.exe" `
+            -Version "0.1.1" `
+            -OutDir $pkgUpgradeOut
+          $msiV2 = Join-Path $pkgUpgradeOut "truesight-dota-windows-x86_64.msi"
+          $upgradeLog = Join-Path $env:RUNNER_TEMP "msi_upgrade.log"
+          Invoke-MsiExec -MsiArgs @("/i", "`"$msiV2`"", "/qn", "/norestart", "/l*v", "`"$upgradeLog`"") -LogPath $upgradeLog
+          if (-not (Test-Path -LiteralPath (Join-Path $installDir "truesight-dota.exe"))) {
+            throw "MSI upgrade removed installed executable"
+          }
+
+          $uninstallLog = Join-Path $env:RUNNER_TEMP "msi_uninstall.log"
+          Invoke-MsiExec -MsiArgs @("/x", "`"$msiV2`"", "/qn", "/norestart", "/l*v", "`"$uninstallLog`"") -LogPath $uninstallLog
+          if (Test-Path -LiteralPath $installDir) {
+            throw "MSI uninstall left behind install directory: $installDir"
+          }
+          if (Test-Path -LiteralPath $shortcutPath) {
+            throw "MSI uninstall left behind Start Menu shortcut: $shortcutPath"
+          }

@@ -39,11 +39,13 @@ High-performance, native Rust 5v5 live draft analyzer and probabilistic hero rec
 | **Auto-Sync & Account Linking** | 3-tier Steam32 resolver (`Explicit GUI/--account-id/config.toml` $\to$ `GSI player.steamid` $\to$ local Steam `loginusers.vdf`), isolating OpenDota player caches under `~/.local/share/truesight-dota/cache/players/{account_id}/` (`24h` Meta TTL, `1h` Player TTL) plus optional `STRATZ_API_TOKEN` GraphQL `with` synergy and a clickable **`[Sync DB]`** / Account modal in the GUI. |
 | **Hands-Free Slot Picker & Vision Port** | Click any Ally (`A1..A5`) or Enemy (`E1..E5`) slot button once, type the hero name directly with auto-focus, and press `Enter` to assign. Includes `VisionCaptureAdapter` (`truesight-adapters::vision`) for 10-slot Radiant/Dire top-bar matching (base + Arcana/Persona skins) via X11/XWayland (`xprop` + ImageMagick `import`), phase-aware GSI suppression, and `player.team_name` faction routing. |
 
-## Supported Platforms
+## Supported Platforms & Installers
 
-- **Linux (`x86_64`)**: Supported for both native GUI and `--cli` / `--demo` / `--sync` modes. Live top-bar vision capture currently requires an X11 or XWayland session with `xprop` and ImageMagick (`import`) installed; manual pick assignment and GSI work even without X11 capture tools.
-- **Windows (`x86_64`)**: Compiles and runs natively on Windows (`xcap` Win32/GDI top-bar capture for Borderless Window / Windowed Dota 2, `%APPDATA%`/`%LOCALAPPDATA%` persistence, Steam `loginusers.vdf` lookup, and `curl.exe` OpenDota/STRATZ sync). The default executable preserves console I/O for `--cli`, `--demo`, and `--sync`; live in-game Dota 2 validation (`#12`) and dedicated Windows installers/GUI launcher packaging (`#20`) remain tracked.
-- **Native Wayland**: Tracked on the issue backlog (`#13`).
+Full per-OS requirements, dependencies, GSI setup, and verification steps live in [`docs/platforms-and-assets.md`](docs/platforms-and-assets.md).
+
+- **Linux (`x86_64`)**: Release archive `truesight-dota-linux-x86_64.tar.gz` (binary, `gamestate_integration_truesight.cfg`, `LICENSE`, `README.md`). Live top-bar vision capture requires an X11/XWayland session with `xprop` and ImageMagick (`import`); manual pick entry and GSI remain active without them.
+- **Windows (`x86_64`)**: Release packages `truesight-dota-windows-x86_64.msi` (per-user Start Menu installer) and `truesight-dota-windows-x86_64.zip`, both bundling `gamestate_integration_truesight.cfg` and `install-gsi.ps1`. Uses Win32/GDI top-bar capture (`xcap` — **Borderless Window** / **Windowed** Dota 2 recommended), built-in Windows `curl.exe` & `System32\tasklist.exe`, and `%APPDATA%`/`%LOCALAPPDATA%` storage. Windows binaries are currently **unsigned** (Windows SmartScreen warning expected; verify `SHA256SUMS`), preserve console I/O for `--cli`/`--demo`/`--sync`, and keep live in-game Dota 2 validation tracked in `#12`.
+- **Native Wayland & Headless CLI**: Native Wayland capture is tracked in `#13` (`CAP: MANUAL` fallback today); headless CLI builds (`--no-default-features`) require zero GUI dependencies on both Linux and Windows.
 
 ## Interactive CLI Commands (`truesight-dota --cli`)
 
@@ -67,11 +69,12 @@ quit                    # Exit session
 - [`SECURITY.md`](SECURITY.md) — Security architecture (`#![forbid(unsafe_code)]`, loopback GSI bounds) and vulnerability reporting process.
 - [`skills/truesight-dota-domain/SKILL.md`](skills/truesight-dota-domain/SKILL.md) — Product domain skill and invariant reference for AI agents and contributors.
 - [`docs/architecture.md`](docs/architecture.md) — Hexagonal architecture, Engine v2 & Comfort v3 mathematical equations, and GSI / Vision / Account specifications.
+- [`docs/platforms-and-assets.md`](docs/platforms-and-assets.md) — Supported OS matrix, Windows/Linux installers, `gamestate_integration_truesight.cfg` setup, and third-party asset provenance.
 - [`docs/roadmap-and-tasks.md`](docs/roadmap-and-tasks.md) — Formal engineering task plan (`T1`–`T22`), TDD verification gates, and data sync schedule.
 - [`.github/workflows/ci.yml`](.github/workflows/ci.yml), [`.github/workflows/release.yml`](.github/workflows/release.yml), and [`.github/dependabot.yml`](.github/dependabot.yml) — Automated dual-feature CI, `v*` binary release packaging, and weekly dependency updates.
 
 ## License & Third-Party Assets
 
 - Source code in this repository is licensed under the [Apache License, Version 2.0](LICENSE) (`Apache-2.0`).
-- **Third-Party Game Assets**: Embedded hero portrait textures and icons ([`hero_atlas.bin`](crates/truesight-adapters/assets/hero_atlas.bin), [`hero_alt_atlas.bin`](crates/truesight-adapters/assets/hero_alt_atlas.bin)), the Gem artwork, and Dota 2 hero names/identifiers are the intellectual property of **Valve Corporation** and are **not** covered by the repository's `Apache-2.0` license. TrueSight Dota is an independent open-source project and is not affiliated with or endorsed by Valve Corporation.
+- **Third-Party Game Assets**: Embedded hero portrait textures and icons ([`hero_atlas.bin`](crates/truesight-adapters/assets/hero_atlas.bin): 127 base `64x36` portraits + Gem icon; [`hero_alt_atlas.bin`](crates/truesight-adapters/assets/hero_alt_atlas.bin): 49 VPK Arcana & Persona portraits across 30 heroes), the Gem artwork, and Dota 2 hero names/identifiers/GSI schema are the intellectual property of **Valve Corporation** and are **not** covered by the repository's `Apache-2.0` license. TrueSight Dota is an independent open-source project and is not affiliated with or endorsed by Valve Corporation (see [`docs/platforms-and-assets.md`](docs/platforms-and-assets.md)).
 - **Third-Party Matchup Data**: Embedded and synced hero matchup/player statistics are sourced from the public **OpenDota** API (and optionally **STRATZ** GraphQL API when `STRATZ_API_TOKEN` is configured by the user).
