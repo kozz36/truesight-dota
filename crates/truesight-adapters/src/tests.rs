@@ -2684,11 +2684,13 @@ fn capture_factory_detects_platform_capabilities_and_reports_actionable_degradat
 #[test]
 fn windows_capture_filter_and_rgba_strip_reject_browsers_minimized_and_convert_topbar() {
     use crate::vision::{
-        HeroVisionCatalog, ScreenFrameSource, VisionCaptureAdapter, is_dota2_windows_window,
-        parse_hero_atlas, parse_tasklist_exe_for_pid, rgba_to_topbar_rgb_frame,
+        HeroVisionCatalog, ScreenFrameSource, VisionCaptureAdapter, evaluate_pid_lookup_output,
+        is_dota2_windows_window, parse_hero_atlas, parse_tasklist_exe_for_pid,
+        resolve_windows_system32_exe, rgba_to_topbar_rgb_frame, verify_dota_candidate_with,
     };
+    use std::path::PathBuf;
     use truesight_core::domain::{HeroId, Side};
-    use truesight_core::ports::{DraftEvent, DraftEventSource};
+    use truesight_core::ports::{DraftEvent, DraftEventSource, PortError};
 
     assert!(is_dota2_windows_window(
         "Dota 2",
@@ -2777,6 +2779,74 @@ fn windows_capture_filter_and_rgba_strip_reject_browsers_minimized_and_convert_t
             4210
         ),
         None
+    );
+
+    // Windows system binary resolution rejects relative overrides and uses System32.
+    assert_eq!(
+        resolve_windows_system32_exe(Some(r"D:\WinOS"), None, "tasklist.exe"),
+        PathBuf::from(r"D:\WinOS")
+            .join("System32")
+            .join("tasklist.exe")
+    );
+    assert_eq!(
+        resolve_windows_system32_exe(Some(r"relative\win"), Some(r"E:\Windows"), "tasklist.exe"),
+        PathBuf::from(r"E:\Windows")
+            .join("System32")
+            .join("tasklist.exe")
+    );
+    assert_eq!(
+        resolve_windows_system32_exe(Some(""), None, "tasklist.exe"),
+        PathBuf::from(r"C:\Windows")
+            .join("System32")
+            .join("tasklist.exe")
+    );
+
+    // Lookup exit failures must return Err(PortError) instead of collapsing into Ok(None) / WAIT.
+    assert_eq!(
+        evaluate_pid_lookup_output(
+            true,
+            Some(0),
+            "\"dota2.exe\",\"4210\",\"Console\",\"1\",\"2,100,000 K\"\r\n",
+            4210
+        )
+        .unwrap(),
+        Some("dota2.exe".to_string())
+    );
+    assert_eq!(
+        evaluate_pid_lookup_output(
+            true,
+            Some(0),
+            "INFO: No tasks are running which match the specified criteria.\r\n",
+            4210
+        )
+        .unwrap(),
+        None
+    );
+    assert!(evaluate_pid_lookup_output(false, Some(1), "", 4210).is_err());
+
+    assert!(
+        verify_dota_candidate_with("Dota 2", 4210, false, 1920, 1080, |_| Err(PortError(
+            "spawn denied".into()
+        )))
+        .is_err()
+    );
+    assert_eq!(
+        verify_dota_candidate_with("Dota 2", 4210, false, 1920, 1080, |_| Ok(None)).unwrap(),
+        None
+    );
+    assert_eq!(
+        verify_dota_candidate_with("Dota 2", 4210, false, 1920, 1080, |_| Ok(Some(
+            "notepad.exe".into()
+        )))
+        .unwrap(),
+        None
+    );
+    assert_eq!(
+        verify_dota_candidate_with("Dota 2", 4210, false, 1920, 1080, |_| Ok(Some(
+            "dota2.exe".into()
+        )))
+        .unwrap(),
+        Some(4210)
     );
 
     // Full RGBA window conversion strips alpha, crops top 8% strip, and rejects invalid buffers.

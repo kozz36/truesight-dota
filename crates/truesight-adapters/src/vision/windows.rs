@@ -1,7 +1,7 @@
 use super::RgbFrame;
 #[cfg(target_os = "windows")]
 use super::ScreenFrameSource;
-#[cfg(target_os = "windows")]
+use std::path::PathBuf;
 use truesight_core::ports::PortError;
 #[cfg(target_os = "windows")]
 use xcap::Window;
@@ -9,6 +9,31 @@ use xcap::Window;
 fn is_dota2_title(title: &str) -> bool {
     let title_norm = title.trim();
     title_norm.eq_ignore_ascii_case("dota 2") || title_norm.eq_ignore_ascii_case("dota2")
+}
+
+fn is_windows_abs_root(raw: &str) -> bool {
+    let bytes = raw.as_bytes();
+    let drive_rooted = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/');
+    drive_rooted || raw.starts_with(r"\\")
+}
+
+/// Resolves an absolute path inside Windows `System32` (`%SystemRoot%` -> `%WINDIR%` ->
+/// `C:\Windows`) so `Command::new` never resolves helper executables from CWD or the app dir.
+pub fn resolve_windows_system32_exe(
+    system_root: Option<&str>,
+    windir: Option<&str>,
+    exe_name: &str,
+) -> PathBuf {
+    let root = [system_root, windir]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|cand| !cand.is_empty() && is_windows_abs_root(cand))
+        .unwrap_or(r"C:\Windows");
+    PathBuf::from(root).join("System32").join(exe_name)
 }
 
 /// Validates Windows window metadata and verified PID executable identity so minimized windows,
@@ -53,6 +78,47 @@ pub fn parse_tasklist_exe_for_pid(csv_output: &str, expected_pid: u32) -> Option
     None
 }
 
+/// Distinguishes a `tasklist.exe` process failure (`Err`) from a clean query where the PID
+/// already exited (`Ok(None)`), preventing failed PID lookups from silently showing `WAIT`.
+pub fn evaluate_pid_lookup_output(
+    success: bool,
+    status_code: Option<i32>,
+    stdout: &str,
+    expected_pid: u32,
+) -> Result<Option<String>, PortError> {
+    if !success {
+        return Err(PortError(format!(
+            "Windows process lookup failed (tasklist status {status_code:?})"
+        )));
+    }
+    Ok(parse_tasklist_exe_for_pid(stdout, expected_pid))
+}
+
+/// Evaluates one Windows candidate window using an injected PID executable resolver, propagating
+/// lookup failures while skipping minimized, non-matching, or exited targets cleanly.
+pub fn verify_dota_candidate_with<F>(
+    title: &str,
+    pid: u32,
+    minimized: bool,
+    width: u32,
+    height: u32,
+    lookup_exe: F,
+) -> Result<Option<u32>, PortError>
+where
+    F: FnOnce(u32) -> Result<Option<String>, PortError>,
+{
+    if minimized || width < 640 || height < 360 || !is_dota2_title(title) {
+        return Ok(None);
+    }
+    if pid == 0 {
+        return Err(PortError(
+            "Windows process lookup failed: candidate window reported PID 0.".into(),
+        ));
+    }
+    let exe = lookup_exe(pid)?;
+    Ok(is_dota2_windows_window(title, exe.as_deref(), minimized, width, height).then_some(pid))
+}
+
 /// Extracts the top 8% Dota 2 hero top-bar strip from a full-window RGBA buffer (`width x height`),
 /// matching X11 capture geometry while avoiding full-frame RGB copies.
 pub fn rgba_to_topbar_rgb_frame(rgba: &[u8], width: usize, height: usize) -> Option<RgbFrame> {
@@ -78,20 +144,28 @@ pub fn rgba_to_topbar_rgb_frame(rgba: &[u8], width: usize, height: usize) -> Opt
 }
 
 #[cfg(target_os = "windows")]
-fn resolve_windows_pid_exe(pid: u32) -> Option<String> {
-    if pid == 0 {
-        return None;
-    }
-    let mut cmd = std::process::Command::new("tasklist");
+fn resolve_windows_pid_exe(pid: u32) -> Result<Option<String>, PortError> {
+    let sys_root = std::env::var("SystemRoot").ok();
+    let windir = std::env::var("WINDIR").ok();
+    let tasklist_path =
+        resolve_windows_system32_exe(sys_root.as_deref(), windir.as_deref(), "tasklist.exe");
+    let mut cmd = std::process::Command::new(&tasklist_path);
     crate::platform::configure_background_command(&mut cmd);
     let out = cmd
         .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
         .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    parse_tasklist_exe_for_pid(&String::from_utf8_lossy(&out.stdout), pid)
+        .map_err(|e| {
+            PortError(format!(
+                "Failed to execute {} for PID lookup: {e}",
+                tasklist_path.display()
+            ))
+        })?;
+    evaluate_pid_lookup_output(
+        out.status.success(),
+        out.status.code(),
+        &String::from_utf8_lossy(&out.stdout),
+        pid,
+    )
 }
 
 /// Live Windows Win32/GDI top-bar frame source capturing the `"Dota 2"` window (`dota2.exe`) via
@@ -120,19 +194,37 @@ impl WindowsTopBarFrameSource {
         Some((title, minimized, width, height, pid))
     }
 
-    fn verify_dota_window(win: &Window) -> Option<u32> {
-        let (title, minimized, width, height, pid) = Self::inspect_candidate(win)?;
-        let exe = resolve_windows_pid_exe(pid);
-        is_dota2_windows_window(&title, exe.as_deref(), minimized, width, height).then_some(pid)
+    fn verify_dota_window(win: &Window) -> Result<Option<u32>, PortError> {
+        let Some((title, minimized, width, height, pid)) = Self::inspect_candidate(win) else {
+            return Ok(None);
+        };
+        verify_dota_candidate_with(
+            &title,
+            pid,
+            minimized,
+            width,
+            height,
+            resolve_windows_pid_exe,
+        )
     }
 
     fn find_dota_window() -> Result<Option<(Window, u32)>, PortError> {
         let windows = Window::all()
             .map_err(|e| PortError(format!("Windows window enumeration failed: {e}")))?;
+        let mut first_lookup_err: Option<PortError> = None;
         for win in windows {
-            if let Some(pid) = Self::verify_dota_window(&win) {
-                return Ok(Some((win, pid)));
+            match Self::verify_dota_window(&win) {
+                Ok(Some(pid)) => return Ok(Some((win, pid))),
+                Ok(None) => {}
+                Err(err) => {
+                    if first_lookup_err.is_none() {
+                        first_lookup_err = Some(err);
+                    }
+                }
             }
+        }
+        if let Some(err) = first_lookup_err {
+            return Err(err);
         }
         Ok(None)
     }

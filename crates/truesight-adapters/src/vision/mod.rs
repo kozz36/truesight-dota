@@ -9,7 +9,10 @@ pub use capture::{
 };
 #[cfg(target_os = "windows")]
 pub use windows::WindowsTopBarFrameSource;
-pub use windows::{is_dota2_windows_window, parse_tasklist_exe_for_pid, rgba_to_topbar_rgb_frame};
+pub use windows::{
+    evaluate_pid_lookup_output, is_dota2_windows_window, parse_tasklist_exe_for_pid,
+    resolve_windows_system32_exe, rgba_to_topbar_rgb_frame, verify_dota_candidate_with,
+};
 pub use worker::{BoundedVisionWorker, ScreenFrameSource, VisionCaptureAdapter};
 #[cfg(target_os = "linux")]
 pub use x11::X11TopBarFrameSource;
