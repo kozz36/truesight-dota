@@ -36,21 +36,31 @@ resolve_exec_target() {
   fi
 }
 
-# Serialize Exec= per the freedesktop Desktop Entry specification (quoting spaces/&/reserved chars).
+# Serialize Exec= across both Desktop Entry layers:
+# 1) Exec argument quoting/escaping (\, ", `, $, and %% for literal %),
+# 2) Desktop Entry `string` value escaping (\ -> \\).
 format_desktop_exec() {
   local raw="$1"
-  local escaped="$raw"
-  escaped="${escaped//\\/\\\\}"
-  escaped="${escaped//\"/\\\"}"
-  escaped="${escaped//\`/\\\`}"
-  escaped="${escaped//\$/\\\$}"
-  escaped="${escaped//%/%%}"
+  if [[ "$raw" == *$'\n'* || "$raw" == *$'\r'* ]]; then
+    echo "Unsupported newline/carriage-return in Exec target path" >&2
+    return 1
+  fi
+
+  local exec_encoded="$raw"
   local reserved_re='[[:space:]"'\''<>~|&;$*?#()`\\]'
   if [[ "$raw" == */* || "$raw" =~ $reserved_re ]]; then
-    printf '"%s"' "$escaped"
+    exec_encoded="${exec_encoded//\\/\\\\}"
+    exec_encoded="${exec_encoded//\"/\\\"}"
+    exec_encoded="${exec_encoded//\`/\\\`}"
+    exec_encoded="${exec_encoded//\$/\\\$}"
+    exec_encoded="${exec_encoded//%/%%}"
+    exec_encoded="\"$exec_encoded\""
   else
-    printf '%s' "$escaped"
+    exec_encoded="${exec_encoded//%/%%}"
   fi
+
+  # Layer 2: escape backslashes for the .desktop string parser before writing Exec=.
+  printf '%s' "${exec_encoded//\\/\\\\}"
 }
 
 BIN_EXEC="$(resolve_exec_target "${1:-}")"

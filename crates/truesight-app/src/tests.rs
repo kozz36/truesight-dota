@@ -1427,8 +1427,9 @@ fn linux_install_desktop_prefers_sibling_binary_and_escapes_ampersand_and_spaces
             .exists()
     );
 
-    // Explicit argument with spaces, `&`, `$`, and `%` must escape per Desktop Entry Exec rules.
-    let tricky_arg = extract_dir.join("ts & $100%");
+    // Explicit argument with spaces, `&`, literal `\`, `"`, `$`, and `%` must satisfy both
+    // the Desktop Entry `string` escaping layer and `Exec` double-quoted escaping rules.
+    let tricky_arg = extract_dir.join(r#"ts\dir & "$100%"#);
     std::fs::write(&tricky_arg, "#!/bin/sh\nexit 0\n").unwrap();
     let out2 = std::process::Command::new(&script_path)
         .arg(&tricky_arg)
@@ -1437,12 +1438,50 @@ fn linux_install_desktop_prefers_sibling_binary_and_escapes_ampersand_and_spaces
         .env("PATH", "/usr/bin:/bin")
         .output()
         .expect("run install-desktop.sh with explicit tricky path");
-    assert!(out2.status.success());
+    assert!(
+        out2.status.success(),
+        "install-desktop.sh tricky path failed: {}",
+        String::from_utf8_lossy(&out2.stderr)
+    );
     let desktop2 = std::fs::read_to_string(&desktop_path).unwrap();
-    let expected_escaped = format!("Exec=\"{}/ts & \\$100%%\"", extract_dir.display());
+    let expected_escaped = format!(
+        r#"Exec="{}/ts\\\\dir & \\"\\$100%%""#,
+        extract_dir.display()
+    );
     assert!(
         desktop2.lines().any(|l| l == expected_escaped),
         "Expected escaped line `{expected_escaped}`, got:\n{desktop2}"
+    );
+    if std::path::Path::new("/usr/bin/desktop-file-validate").exists() {
+        let val = std::process::Command::new("/usr/bin/desktop-file-validate")
+            .arg(&desktop_path)
+            .output()
+            .expect("run desktop-file-validate");
+        assert!(
+            val.status.success(),
+            "desktop-file-validate rejected generated .desktop:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&val.stdout),
+            String::from_utf8_lossy(&val.stderr)
+        );
+    }
+
+    // Literal newline in target path must fail cleanly before modifying the existing .desktop file.
+    let newline_arg = format!("{}/bad\npath", extract_dir.display());
+    let out3 = std::process::Command::new(&script_path)
+        .arg(&newline_arg)
+        .env("HOME", &fake_home)
+        .env("XDG_DATA_HOME", &fake_xdg)
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .expect("run install-desktop.sh with newline path");
+    assert!(
+        !out3.status.success(),
+        "install-desktop.sh must reject newline in Exec path"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&desktop_path).unwrap(),
+        desktop2,
+        "Rejected newline path must not corrupt existing .desktop file"
     );
 
     let _ = std::fs::remove_dir_all(&base_tmp);
