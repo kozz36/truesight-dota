@@ -4,6 +4,8 @@ use std::process::Command;
 
 use truesight_core::ports::PortError;
 
+/// Snapshot of OS environment variables and temp directory used for pure path resolution tests
+/// without mutating process-global environment variables across parallel test threads.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct PlatformEnv {
     pub home: Option<PathBuf>,
@@ -24,6 +26,8 @@ fn non_empty_env_path(key: &str) -> Option<PathBuf> {
 }
 
 impl PlatformEnv {
+    /// Captures process environment paths, discarding empty env vars and anchoring fallbacks on
+    /// `std::env::temp_dir()`.
     pub(crate) fn from_process() -> Self {
         Self {
             home: non_empty_env_path("HOME"),
@@ -37,6 +41,8 @@ impl PlatformEnv {
     }
 }
 
+/// Applies platform-specific background execution flags so helper processes (`curl`, `reg`)
+/// do not flash transient console windows when launched from the Windows GUI subsystem build.
 pub(crate) fn configure_background_command(cmd: &mut Command) {
     #[cfg(target_os = "windows")]
     {
@@ -48,6 +54,11 @@ pub(crate) fn configure_background_command(cmd: &mut Command) {
     let _ = cmd;
 }
 
+/// Resolves the persisted account-link `config.toml` path for the target OS.
+///
+/// Precedence on Windows avoids `$HOME` and `/tmp`: `%APPDATA%` -> `%LOCALAPPDATA%` ->
+/// `%USERPROFILE%\AppData\Roaming` -> `temp_dir`, always under `truesight-dota\config.toml`.
+/// Non-Windows targets preserve `$HOME/.config/truesight-dota/config.toml` (or `temp_dir`).
 pub(crate) fn resolve_config_file_path_for(os: &str, env: &PlatformEnv) -> PathBuf {
     if os == "windows" {
         if let Some(base) = env.appdata.as_deref().or(env.localappdata.as_deref()) {
@@ -68,6 +79,11 @@ pub(crate) fn resolve_config_file_path_for(os: &str, env: &PlatformEnv) -> PathB
         .join("config.toml")
 }
 
+/// Resolves the local OpenDota/STRATZ cache directory for the target OS.
+///
+/// Precedence on Windows avoids `$HOME` and `/tmp`: `%LOCALAPPDATA%` -> `%APPDATA%` ->
+/// `%USERPROFILE%\AppData\Local` -> `temp_dir`. If only `temp_dir` is available, cache TTL
+/// persistence across reboots is degraded until local AppData paths exist.
 pub(crate) fn resolve_cache_dir_for(os: &str, env: &PlatformEnv) -> PathBuf {
     if os == "windows" {
         if let Some(base) = env.localappdata.as_deref().or(env.appdata.as_deref()) {
@@ -114,6 +130,11 @@ pub(crate) fn parse_windows_reg_steam_path(output: &str) -> Option<PathBuf> {
     None
 }
 
+/// Builds ordered `loginusers.vdf` lookup paths for the target OS without touching the registry.
+///
+/// On Windows, standard filesystem directories (`%ProgramFiles(x86)%`, `%ProgramFiles%`,
+/// `%LOCALAPPDATA%`) precede any `reg_steam_path` override so the common case avoids spawning
+/// `reg.exe`. Deduplicates identical paths while preserving priority order.
 pub(crate) fn steam_vdf_candidates_for(
     os: &str,
     env: &PlatformEnv,
@@ -168,6 +189,10 @@ pub(crate) fn detect_steam_vdf_in_candidates(candidates: &[PathBuf]) -> Option<u
     None
 }
 
+/// Fallback Steam install discovery via `HKCU\Software\Valve\Steam\SteamPath` (`reg.exe`).
+///
+/// Note: `reg query` emits bytes in the active Windows console OEM code page rather than UTF-8,
+/// so `from_utf8_lossy` can corrupt non-ASCII install directories if env-var candidates missed.
 #[cfg(target_os = "windows")]
 pub(crate) fn query_windows_steam_path() -> Option<PathBuf> {
     let mut cmd = Command::new("reg");
@@ -191,6 +216,8 @@ pub(crate) fn build_curl_args<'a>(url: &'a str, extra_args: &'a [&'a str]) -> Ve
     args
 }
 
+/// Executes external `curl` (`curl.exe` on Windows `PATH` / `System32`) with a 6s timeout
+/// and `CREATE_NO_WINDOW` applied on Windows to prevent GUI console flashes.
 pub(crate) fn run_curl(url: &str, extra_args: &[&str], context: &str) -> Result<String, PortError> {
     let mut cmd = Command::new("curl");
     configure_background_command(&mut cmd);

@@ -24,6 +24,7 @@ This file defines the mandatory implementation, architectural, statistical, and 
 | **`crates/truesight-adapters`** | **Driven & Driving Infrastructure**: owns `SeededMetaRepository`, `LocalCacheManager` (`24h`/`1h` TTL), and `BoundedGsiListener` (`MAX_GSI_PAYLOAD_BYTES = 64 KiB`, `sync_channel(16)`). |
 | **`crates/truesight-app`** | **Presentation & Composition Root**: owns `AppSession`, native `eframe`/`egui` desktop GUI (default `gui` feature), and TrueColor CLI/TUI (`--cli`, `--demo`, `--sync`). |
 | **Module Cohesion & Test Separation** | No production source file (excluding generated seed data `snapshot_pairs.rs`) may exceed ~800–900 lines or mix unrelated layers. All unit and regression test suites MUST reside in dedicated `tests.rs` files wired via `#[cfg(test)] mod tests;`, never inline inside `lib.rs`, `main.rs`, or UI panel files. |
+| **Rustdoc & Documentation** | Public (`pub`) APIs defining cross-crate contracts, domain invariants, concurrency/state bounds, or external I/O side effects MUST carry concise `///` Rustdoc comments. Internal (`pub(crate)` / private) helpers require `///` or `//` comments selectively only when precedence, fallbacks, platform `#[cfg]` assumptions, or non-obvious invariants would otherwise require reading the body — never add boilerplate docs to trivial getters/wrappers. |
 
 ---
 
