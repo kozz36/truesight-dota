@@ -459,7 +459,10 @@ impl HeroVisionCatalog {
             TopBarLayout::PickPhase => (
                 &[&self.upper_entries, &self.inner_entries, &self.full_entries],
                 PICKPHASE_L1_THRESHOLD,
-                tv >= 13.5 && (ov >= 13.5 || (ov >= 7.5 && os >= 35.0)),
+                tv >= 13.5
+                    && (ov >= 13.5
+                        || (ov >= 12.5 && tv >= 18.0 && os >= 20.0)
+                        || (ov >= 7.5 && os >= 35.0)),
             ),
             TopBarLayout::InGame => (
                 &[&self.inner_entries],

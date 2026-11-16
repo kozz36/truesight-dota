@@ -2069,23 +2069,22 @@ fn vision_pickphase_and_ingame_adapter_detect_all_49_arcana_and_persona_variants
 
     let mut failures = Vec::new();
     for (idx, (expected_id, rgb)) in alt_atlas.entries.iter().enumerate() {
-        let mut cases = vec![
-            (true, full_src, compute_pickphase_topbar_slot_rects(w, h)),
-            (false, full_src, compute_ingame_topbar_slot_rects(w, h)),
+        let cases = [
+            (w, 160usize, true, full_src, compute_pickphase_topbar_slot_rects(w, h)),
+            (w, 160usize, true, upper_src, compute_pickphase_topbar_slot_rects(w, h)),
+            (2560usize, 160usize, true, upper_src, compute_pickphase_topbar_slot_rects(2560, 1440)),
+            (w, 160usize, false, full_src, compute_ingame_topbar_slot_rects(w, h)),
         ];
-        if matches!(idx, 9 | 13 | 18 | 23 | 28 | 30) {
-            cases.push((true, upper_src, compute_pickphase_topbar_slot_rects(w, h)));
-        }
-        for (is_pickphase, crop, (rad_r, dire_r)) in cases {
-            let mut frame_rgb = vec![0u8; w * h * 3];
-            paint_rgb_crop(&mut frame_rgb, w, rad_r[0], rgb, alt_atlas.width, crop);
-            paint_rgb_crop(&mut frame_rgb, w, rad_r[1], magnus, base_atlas.hero_width, full_src);
-            paint_rgb_crop(&mut frame_rgb, w, dire_r[0], medusa, base_atlas.hero_width, full_src);
+        for (fw, fh, is_pickphase, crop, (rad_r, dire_r)) in cases {
+            let mut frame_rgb = vec![0u8; fw * fh * 3];
+            paint_rgb_crop(&mut frame_rgb, fw, rad_r[0], rgb, alt_atlas.width, crop);
+            paint_rgb_crop(&mut frame_rgb, fw, rad_r[1], magnus, base_atlas.hero_width, full_src);
+            paint_rgb_crop(&mut frame_rgb, fw, dire_r[0], medusa, base_atlas.hero_width, full_src);
 
             let mut adapter = VisionCaptureAdapter::new(
                 SingleFrameSource(Some(RgbFrame {
-                    width: w,
-                    height: h,
+                    width: fw,
+                    height: fh,
                     rgb: frame_rgb,
                 })),
                 catalog.clone(),
@@ -2108,7 +2107,7 @@ fn vision_pickphase_and_ingame_adapter_detect_all_49_arcana_and_persona_variants
             });
             if slot0_pick != Some(*expected_id) || events.len() != 3 {
                 failures.push(format!(
-                    "idx={idx} pickphase={is_pickphase} crop={}x{} expected={expected_id:?} got_slot0={slot0_pick:?} events={events:?}",
+                    "idx={idx} {fw}x{fh} pickphase={is_pickphase} crop={}x{} expected={expected_id:?} got_slot0={slot0_pick:?} events={events:?}",
                     crop.width, crop.height
                 ));
             }
