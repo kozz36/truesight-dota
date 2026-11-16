@@ -9,5 +9,8 @@ description = "Driven and driving adapters for truesight-dota (meta repository, 
 [dependencies]
 truesight-core = { path = "../truesight-core" }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+xcap = "0.9"
+
 [lints]
 workspace = true

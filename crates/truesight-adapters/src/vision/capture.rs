@@ -64,6 +64,63 @@ impl CaptureAvailability {
     }
 }
 
+/// Live runtime health of an active capture backend, separated from startup capability.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CaptureRuntimeHealth {
+    /// Capture worker is running and waiting for a visible Dota 2 window.
+    WaitingForGame,
+    /// At least one valid top-bar frame was captured in the active poll cycle.
+    Capturing,
+    /// Capture is intentionally paused for match-lifecycle states (loading/lobby/post-game).
+    Suppressed,
+    /// Window enumeration, X11 display access, or Win32 capture reported an error.
+    CaptureError(String),
+}
+
+impl CaptureRuntimeHealth {
+    /// Formats the compact UI/CLI runtime badge for an active backend without masking failures.
+    pub fn status_badge(&self, backend: CaptureBackendKind) -> String {
+        let tag = match backend {
+            CaptureBackendKind::X11 => "X11",
+            CaptureBackendKind::WaylandPortal => "WAYLAND",
+            CaptureBackendKind::WindowsNative => "WIN32",
+            CaptureBackendKind::Unsupported => "CAP",
+        };
+        let state = match self {
+            Self::WaitingForGame => "WAIT",
+            Self::Capturing => "LIVE",
+            Self::Suppressed => "PAUSED",
+            Self::CaptureError(_) => "ERR",
+        };
+        format!("{tag}: {state}")
+    }
+
+    /// Returns an actionable user-facing summary preserving manual pick fallback notice.
+    pub fn summary(&self) -> String {
+        match self {
+            Self::WaitingForGame => {
+                "Waiting for visible Dota 2 window; manual pick mode & GSI remain active.".into()
+            }
+            Self::Capturing => "Actively capturing Dota 2 top-bar slots.".into(),
+            Self::Suppressed => {
+                "Capture paused for current game state (lobby/loading/post-game); draft preserved."
+                    .into()
+            }
+            Self::CaptureError(reason) => {
+                format!("{reason} (manual pick mode & GSI remain active).")
+            }
+        }
+    }
+
+    pub fn is_capturing(&self) -> bool {
+        matches!(self, Self::Capturing)
+    }
+
+    pub fn is_error(&self) -> bool {
+        matches!(self, Self::CaptureError(_))
+    }
+}
+
 fn command_on_path(bin: &str) -> bool {
     std::env::var_os("PATH")
         .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(bin).is_file()))
@@ -102,9 +159,9 @@ pub fn detect_capture_availability_for(
                 reason: format!("X11 capture unavailable (missing {}); manual pick mode & GSI remain active.", missing.join(", ")),
             }
         }
-        "windows" => CaptureAvailability::Unavailable {
+        "windows" => CaptureAvailability::Available {
             backend: CaptureBackendKind::WindowsNative,
-            reason: "Native Windows capture backend is not implemented yet (#12); manual pick mode & GSI remain active.".into(),
+            detail: "Windows Win32/GDI (xcap)".into(),
         },
         other => CaptureAvailability::Unavailable {
             backend: CaptureBackendKind::Unsupported,
@@ -137,6 +194,25 @@ pub fn spawn_platform_worker() -> (Option<BoundedVisionWorker>, CaptureAvailabil
     spawn_platform_worker_for(&availability)
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn spawn_with_fallback<S: super::ScreenFrameSource + Send + 'static>(
+    backend: CaptureBackendKind,
+    source: S,
+    availability: &CaptureAvailability,
+    fail_msg: &str,
+) -> (Option<BoundedVisionWorker>, CaptureAvailability) {
+    if let Some(worker) = BoundedVisionWorker::spawn_with_source(source) {
+        return (Some(worker), availability.clone());
+    }
+    (
+        None,
+        CaptureAvailability::Unavailable {
+            backend,
+            reason: fail_msg.into(),
+        },
+    )
+}
+
 /// Spawns a platform worker matching `availability`; downgrades unimplemented backends to `Unavailable`.
 pub fn spawn_platform_worker_for(
     availability: &CaptureAvailability,
@@ -149,19 +225,26 @@ pub fn spawn_platform_worker_for(
             ..
         }
     ) {
-        if let Some(worker) =
-            BoundedVisionWorker::spawn_with_source(super::X11TopBarFrameSource::new())
-        {
-            return (Some(worker), availability.clone());
+        return spawn_with_fallback(
+            CaptureBackendKind::X11,
+            super::X11TopBarFrameSource::new(),
+            availability,
+            "Failed to initialize X11 vision worker; manual pick mode & GSI remain active.",
+        );
+    }
+    #[cfg(target_os = "windows")]
+    if matches!(
+        availability,
+        CaptureAvailability::Available {
+            backend: CaptureBackendKind::WindowsNative,
+            ..
         }
-        return (
-            None,
-            CaptureAvailability::Unavailable {
-                backend: CaptureBackendKind::X11,
-                reason:
-                    "Failed to initialize X11 vision worker; manual pick mode & GSI remain active."
-                        .into(),
-            },
+    ) {
+        return spawn_with_fallback(
+            CaptureBackendKind::WindowsNative,
+            super::WindowsTopBarFrameSource::new(),
+            availability,
+            "Failed to initialize Windows Win32 vision worker; manual pick mode & GSI remain active.",
         );
     }
     match availability {

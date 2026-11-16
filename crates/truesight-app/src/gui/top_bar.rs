@@ -48,8 +48,10 @@ impl TrueSightGuiApp {
                         });
                     });
 
-                // Vision Capture Capability Pill
-                let cap_dot = if self.session.vision_available {
+                // Vision Capture Capability & Runtime Health Pill
+                let cap_dot = if self.session.vision_error {
+                    P_DIRE
+                } else if self.session.vision_available {
                     P_GEM
                 } else {
                     P_NEUTRAL

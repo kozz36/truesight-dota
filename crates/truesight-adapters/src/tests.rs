@@ -731,11 +731,13 @@ fn vision_capture_adapter_recognizes_topbar_10_slots_and_maps_radiant_dire_sides
             Some(RgbFrame {
                 width: w1,
                 height: h1,
+                source_height: None,
                 rgb: rgb1,
             }),
             Some(RgbFrame {
                 width: w2,
                 height: h2,
+                source_height: None,
                 rgb: rgb2,
             }),
         ]),
@@ -993,6 +995,7 @@ fn vision_catalog_matches_pickphase_upper_crop_and_rejects_flat_medal_slots() {
     let source = QueueSource(VecDeque::from([RgbFrame {
         width: frame_w,
         height: frame_h,
+        source_height: None,
         rgb: pick_rgb,
     }]));
     let mut adapter = VisionCaptureAdapter::new(source, catalog);
@@ -1111,26 +1114,31 @@ fn vision_guard_rejects_non_dota_wm_class_single_slot_noise_and_dead_hero_overwr
         RgbFrame {
             width: frame_w,
             height: frame_h,
+            source_height: None,
             rgb: single_slot_rgb,
         },
         RgbFrame {
             width: frame_w,
             height: frame_h,
+            source_height: None,
             rgb: valid_rgb,
         },
         RgbFrame {
             width: frame_w,
             height: frame_h,
+            source_height: None,
             rgb: dead_overwrite_rgb,
         },
         RgbFrame {
             width: frame_w,
             height: frame_h,
+            source_height: None,
             rgb: swap_rgb.clone(),
         },
         RgbFrame {
             width: frame_w,
             height: frame_h,
+            source_height: None,
             rgb: swap_rgb,
         },
     ]));
@@ -1439,6 +1447,7 @@ fn vision_reset_clears_detector_state_drains_stale_queue_and_repopulates_station
     let stationary = RgbFrame {
         width: w,
         height: h,
+        source_height: None,
         rgb,
     };
 
@@ -1799,6 +1808,7 @@ fn event_queues_coalesce_under_saturation_preserve_resets_and_recover_stationary
         StationarySource(RgbFrame {
             width: w,
             height: h,
+            source_height: None,
             rgb,
         }),
         8,
@@ -1982,21 +1992,25 @@ fn vision_rejects_empty_pickphase_slots_and_dark_gradient_bars_that_matched_dark
         RgbFrame {
             width: w1,
             height: h1,
+            source_height: None,
             rgb: dark_gradient,
         },
         RgbFrame {
             width: w2,
             height: h2,
+            source_height: None,
             rgb: empty_pick,
         },
         RgbFrame {
             width: w3,
             height: h3,
+            source_height: None,
             rgb: gray_ui,
         },
         RgbFrame {
             width: w4,
             height: h4,
+            source_height: None,
             rgb: valid_ingame_1280,
         },
     ]));
@@ -2211,6 +2225,7 @@ fn vision_catalog_matches_all_arcana_and_persona_portraits_across_layouts() {
         let source = SingleFrameSource(Some(RgbFrame {
             width: w,
             height: h,
+            source_height: None,
             rgb: frame_rgb,
         }));
         let mut adapter = VisionCaptureAdapter::new(source, catalog);
@@ -2364,6 +2379,7 @@ fn vision_pickphase_and_ingame_adapter_detect_all_49_arcana_and_persona_variants
                 SingleFrameSource(Some(RgbFrame {
                     width: fw,
                     height: fh,
+                    source_height: None,
                     rgb: frame_rgb,
                 })),
                 catalog.clone(),
@@ -2549,6 +2565,7 @@ fn vision_recalls_dark_low_contrast_heroes_and_rejects_empty_slots_across_resolu
             SingleFrame(Some(RgbFrame {
                 width: w,
                 height: fh,
+                source_height: None,
                 rgb,
             })),
             catalog.clone(),
@@ -2621,13 +2638,15 @@ fn capture_factory_detects_platform_capabilities_and_reports_actionable_degradat
     ));
 
     let win = detect_capture_availability_for("windows", false, false, false, false);
-    assert!(matches!(
+    assert_eq!(
         win,
-        CaptureAvailability::Unavailable {
+        CaptureAvailability::Available {
             backend: CaptureBackendKind::WindowsNative,
-            ref reason,
-        } if reason.contains("Windows") && reason.contains("#12")
-    ));
+            detail: "Windows Win32/GDI (xcap)".into(),
+        }
+    );
+    assert_eq!(win.badge_label(), "CAP: WIN32");
+    assert!(win.is_available());
 
     let other = detect_capture_availability_for("macos", false, false, false, false);
     assert!(matches!(
@@ -2638,22 +2657,446 @@ fn capture_factory_detects_platform_capabilities_and_reports_actionable_degradat
         }
     ));
 
-    // When backend is unavailable (or marked Available for an unimplemented backend),
-    // factory spawns no background worker and guarantees !avail.is_available().
+    // When backend matches host OS (`windows`), worker spawns cleanly; otherwise factory
+    // safely degrades to `Unavailable` (`CAP: MANUAL`) with no background thread.
     let (worker, avail) = spawn_platform_worker_for(&win);
-    assert!(worker.is_none());
-    assert_eq!(avail, win);
-    assert_eq!(avail.badge_label(), "CAP: MANUAL");
-    assert!(!avail.is_available());
+    if cfg!(target_os = "windows") {
+        assert!(worker.is_some());
+        assert_eq!(avail, win);
+        assert_eq!(avail.badge_label(), "CAP: WIN32");
+        assert!(avail.is_available());
+    } else {
+        assert!(worker.is_none());
+        assert_eq!(avail.badge_label(), "CAP: MANUAL");
+        assert!(!avail.is_available());
+    }
 
     let unimplemented_avail = CaptureAvailability::Available {
-        backend: CaptureBackendKind::WindowsNative,
-        detail: "Win32 stub".into(),
+        backend: CaptureBackendKind::WaylandPortal,
+        detail: "Wayland stub".into(),
     };
     let (w2, a2) = spawn_platform_worker_for(&unimplemented_avail);
     assert!(w2.is_none());
     assert!(!a2.is_available());
     assert_eq!(a2.badge_label(), "CAP: MANUAL");
+}
+
+#[test]
+fn windows_capture_filter_and_rgba_strip_reject_browsers_minimized_and_convert_topbar() {
+    use crate::vision::{
+        HeroVisionCatalog, ScreenFrameSource, VisionCaptureAdapter, evaluate_pid_lookup_output,
+        is_dota2_windows_window, parse_hero_atlas, parse_tasklist_exe_for_pid,
+        resolve_windows_system32_exe, rgba_to_topbar_rgb_frame, verify_dota_candidate_with,
+    };
+    use std::path::PathBuf;
+    use truesight_core::domain::{HeroId, Side};
+    use truesight_core::ports::{DraftEvent, DraftEventSource, PortError};
+
+    assert!(is_dota2_windows_window(
+        "Dota 2",
+        Some("dota2.exe"),
+        false,
+        1920,
+        1080
+    ));
+    assert!(is_dota2_windows_window(
+        "dota2",
+        Some(r"C:\Steam\steamapps\common\dota 2 beta\game\bin\win64\dota2.exe"),
+        false,
+        2560,
+        1440
+    ));
+
+    // Reject unverified PID lookups, non-dota2 executables with same title, minimized, or tiny windows.
+    assert!(!is_dota2_windows_window("Dota 2", None, false, 1280, 720));
+    assert!(!is_dota2_windows_window(
+        "Dota 2",
+        Some(""),
+        false,
+        1920,
+        1080
+    ));
+    assert!(!is_dota2_windows_window(
+        "Dota 2",
+        Some("notepad.exe"),
+        false,
+        1920,
+        1080
+    ));
+    assert!(!is_dota2_windows_window(
+        "Dota 2",
+        Some("Dota 2"),
+        false,
+        1920,
+        1080
+    ));
+    assert!(!is_dota2_windows_window(
+        "Dota 2",
+        Some("dota2.exe"),
+        true,
+        1920,
+        1080
+    ));
+    assert!(!is_dota2_windows_window(
+        "Dota 2",
+        Some("dota2.exe"),
+        false,
+        639,
+        1080
+    ));
+    assert!(!is_dota2_windows_window(
+        "Dota 2",
+        Some("dota2.exe"),
+        false,
+        1920,
+        359
+    ));
+    assert!(!is_dota2_windows_window(
+        "Dota 2 - Google Chrome",
+        Some("chrome.exe"),
+        false,
+        1920,
+        1080
+    ));
+
+    assert_eq!(
+        parse_tasklist_exe_for_pid(
+            "\"dota2.exe\",\"4210\",\"Console\",\"1\",\"2,100,000 K\"\r\n",
+            4210
+        ),
+        Some("dota2.exe".to_string())
+    );
+    assert_eq!(
+        parse_tasklist_exe_for_pid(
+            "\"notepad.exe\",\"4210\",\"Console\",\"1\",\"12,000 K\"\r\n",
+            9999
+        ),
+        None
+    );
+    assert_eq!(
+        parse_tasklist_exe_for_pid(
+            "INFO: No tasks are running which match the specified criteria.\r\n",
+            4210
+        ),
+        None
+    );
+
+    // Windows system binary resolution rejects relative overrides and uses System32.
+    assert_eq!(
+        resolve_windows_system32_exe(Some(r"D:\WinOS"), None, "tasklist.exe"),
+        PathBuf::from(r"D:\WinOS")
+            .join("System32")
+            .join("tasklist.exe")
+    );
+    assert_eq!(
+        resolve_windows_system32_exe(Some(r"relative\win"), Some(r"E:\Windows"), "tasklist.exe"),
+        PathBuf::from(r"E:\Windows")
+            .join("System32")
+            .join("tasklist.exe")
+    );
+    assert_eq!(
+        resolve_windows_system32_exe(Some(""), None, "tasklist.exe"),
+        PathBuf::from(r"C:\Windows")
+            .join("System32")
+            .join("tasklist.exe")
+    );
+
+    // Lookup exit failures must return Err(PortError) instead of collapsing into Ok(None) / WAIT.
+    assert_eq!(
+        evaluate_pid_lookup_output(
+            true,
+            Some(0),
+            "\"dota2.exe\",\"4210\",\"Console\",\"1\",\"2,100,000 K\"\r\n",
+            4210
+        )
+        .unwrap(),
+        Some("dota2.exe".to_string())
+    );
+    assert_eq!(
+        evaluate_pid_lookup_output(
+            true,
+            Some(0),
+            "INFO: No tasks are running which match the specified criteria.\r\n",
+            4210
+        )
+        .unwrap(),
+        None
+    );
+    assert!(evaluate_pid_lookup_output(false, Some(1), "", 4210).is_err());
+
+    assert!(
+        verify_dota_candidate_with("Dota 2", 4210, false, 1920, 1080, |_| Err(PortError(
+            "spawn denied".into()
+        )))
+        .is_err()
+    );
+    assert_eq!(
+        verify_dota_candidate_with("Dota 2", 4210, false, 1920, 1080, |_| Ok(None)).unwrap(),
+        None
+    );
+    assert_eq!(
+        verify_dota_candidate_with("Dota 2", 4210, false, 1920, 1080, |_| Ok(Some(
+            "notepad.exe".into()
+        )))
+        .unwrap(),
+        None
+    );
+    assert_eq!(
+        verify_dota_candidate_with("Dota 2", 4210, false, 1920, 1080, |_| Ok(Some(
+            "dota2.exe".into()
+        )))
+        .unwrap(),
+        Some(4210)
+    );
+
+    // Full RGBA window conversion strips alpha, crops top 8% strip, and rejects invalid buffers.
+    assert!(rgba_to_topbar_rgb_frame(&[0u8; 400], 639, 720).is_none());
+    assert!(rgba_to_topbar_rgb_frame(&[0u8; 1280 * 359 * 4], 1280, 359).is_none());
+    assert!(rgba_to_topbar_rgb_frame(&[0u8; 1280 * 720 * 4 - 4], 1280, 720).is_none());
+
+    let atlas = parse_hero_atlas().unwrap();
+    let w = 1280_usize;
+    let h = 720_usize;
+    let mut full_rgba = vec![14_u8; w * h * 4];
+    for px in full_rgba.chunks_exact_mut(4) {
+        px[3] = 255;
+    }
+
+    let paint_rgba_slot = |rgba: &mut [u8], hero_id: u16, rect: crate::vision::TopBarSlotRect| {
+        let hero_rgb = atlas.heroes.get(&HeroId(hero_id)).unwrap();
+        for dy in 0..rect.height {
+            let sy = (dy * atlas.hero_height) / rect.height;
+            for dx in 0..rect.width {
+                let sx = (dx * atlas.hero_width) / rect.width;
+                let s_idx = (sy * atlas.hero_width + sx) * 3;
+                let d_idx = ((rect.y + dy) * w + (rect.x + dx)) * 4;
+                rgba[d_idx] = hero_rgb[s_idx];
+                rgba[d_idx + 1] = hero_rgb[s_idx + 1];
+                rgba[d_idx + 2] = hero_rgb[s_idx + 2];
+                rgba[d_idx + 3] = 128;
+            }
+        }
+    };
+    let (rad_rects, dire_rects) = crate::vision::compute_topbar_slot_rects(w, h);
+    paint_rgba_slot(&mut full_rgba, 1, rad_rects[0]);
+    paint_rgba_slot(&mut full_rgba, 5, dire_rects[0]);
+
+    let frame = rgba_to_topbar_rgb_frame(&full_rgba, w, h).expect("valid topbar strip");
+    assert_eq!(frame.width, 1280);
+    assert_eq!(frame.height, 60);
+    assert_eq!(frame.rgb.len(), 1280 * 60 * 3);
+
+    struct SingleRgbaFrame(Option<crate::vision::RgbFrame>);
+    impl ScreenFrameSource for SingleRgbaFrame {
+        fn capture_frame(
+            &mut self,
+        ) -> Result<Option<crate::vision::RgbFrame>, truesight_core::ports::PortError> {
+            Ok(self.0.take())
+        }
+    }
+
+    let mut adapter = VisionCaptureAdapter::new(
+        SingleRgbaFrame(Some(frame)),
+        HeroVisionCatalog::from_embedded().unwrap(),
+    );
+    let events = adapter.poll_events().unwrap();
+    assert!(events.contains(&DraftEvent::PickDetected {
+        side: Side::Allies,
+        slot: 0,
+        hero_id: HeroId(1),
+        role: Some(truesight_core::domain::Role::Carry),
+    }));
+    assert!(events.contains(&DraftEvent::PickDetected {
+        side: Side::Enemies,
+        slot: 0,
+        hero_id: HeroId(5),
+        role: Some(truesight_core::domain::Role::Carry),
+    }));
+}
+
+#[test]
+fn windows_non_16_9_crop_preserves_source_height_and_detects_4_3_pickphase() {
+    use crate::vision::{
+        HeroVisionCatalog, ScreenFrameSource, VisionCaptureAdapter,
+        compute_pickphase_topbar_slot_rects, parse_hero_atlas, rgba_to_topbar_rgb_frame,
+    };
+    use truesight_core::domain::{HeroId, Side};
+    use truesight_core::ports::{DraftEvent, DraftEventSource};
+
+    let w = 1024_usize;
+    let h = 768_usize;
+    let (rad_rects, dire_rects) = compute_pickphase_topbar_slot_rects(w, h);
+    assert_eq!(rad_rects[0].height, 30);
+
+    let atlas = parse_hero_atlas().unwrap();
+    let mut full_rgba = vec![14_u8; w * h * 4];
+    for px in full_rgba.chunks_exact_mut(4) {
+        px[3] = 255;
+    }
+
+    let paint_upper_crop = |rgba: &mut [u8], hero_id: u16, rect: crate::vision::TopBarSlotRect| {
+        let hero_rgb = atlas.heroes.get(&HeroId(hero_id)).unwrap();
+        let src_h = ((atlas.hero_height * 22) / 36).max(1);
+        let src_w = (atlas.hero_width * 56) / 64;
+        let src_x0 = (atlas.hero_width - src_w) / 2;
+        let src_y0 = 2;
+        for dy in 0..rect.height {
+            let sy = (src_y0 + (dy * src_h) / rect.height).min(atlas.hero_height - 1);
+            for dx in 0..rect.width {
+                let sx = (src_x0 + (dx * src_w) / rect.width).min(atlas.hero_width - 1);
+                let s_idx = (sy * atlas.hero_width + sx) * 3;
+                let d_idx = ((rect.y + dy) * w + (rect.x + dx)) * 4;
+                rgba[d_idx] = hero_rgb[s_idx];
+                rgba[d_idx + 1] = hero_rgb[s_idx + 1];
+                rgba[d_idx + 2] = hero_rgb[s_idx + 2];
+            }
+        }
+    };
+    paint_upper_crop(&mut full_rgba, 2, rad_rects[0]);
+    paint_upper_crop(&mut full_rgba, 5, dire_rects[0]);
+
+    let frame = rgba_to_topbar_rgb_frame(&full_rgba, w, h).expect("4:3 strip");
+    assert_eq!(frame.height, 62);
+    assert_eq!(frame.source_height, Some(768));
+
+    struct OnceSource(Option<crate::vision::RgbFrame>);
+    impl ScreenFrameSource for OnceSource {
+        fn capture_frame(
+            &mut self,
+        ) -> Result<Option<crate::vision::RgbFrame>, truesight_core::ports::PortError> {
+            Ok(self.0.take())
+        }
+    }
+
+    let mut adapter = VisionCaptureAdapter::new(
+        OnceSource(Some(frame)),
+        HeroVisionCatalog::from_embedded().unwrap(),
+    );
+    let events = adapter.poll_events().unwrap();
+    assert!(events.contains(&DraftEvent::PickDetected {
+        side: Side::Allies,
+        slot: 0,
+        hero_id: HeroId(2),
+        role: Some(truesight_core::domain::Role::Carry),
+    }));
+    assert!(events.contains(&DraftEvent::PickDetected {
+        side: Side::Enemies,
+        slot: 0,
+        hero_id: HeroId(5),
+        role: Some(truesight_core::domain::Role::Carry),
+    }));
+}
+
+#[test]
+fn vision_worker_tracks_runtime_health_errors_recovery_and_bounded_stalled_drop() {
+    use crate::vision::{
+        BoundedVisionWorker, CaptureRuntimeHealth, RgbFrame, ScreenFrameSource, VisionCaptureMode,
+    };
+    use std::sync::{Arc, Mutex, mpsc};
+    use std::time::{Duration, Instant};
+    use truesight_core::ports::PortError;
+
+    enum Step {
+        Wait,
+        Err(&'static str),
+        BlankFrame,
+    }
+
+    struct ScriptedSource(Arc<Mutex<std::collections::VecDeque<Step>>>);
+    impl ScreenFrameSource for ScriptedSource {
+        fn capture_frame(&mut self) -> Result<Option<RgbFrame>, PortError> {
+            let next = self
+                .0
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(Step::BlankFrame);
+            match next {
+                Step::Wait => Ok(None),
+                Step::Err(msg) => Err(PortError(msg.into())),
+                Step::BlankFrame => Ok(Some(RgbFrame::new(1280, 60, vec![0; 1280 * 60 * 3]))),
+            }
+        }
+    }
+
+    let script = Arc::new(Mutex::new(std::collections::VecDeque::from([Step::Wait])));
+    let mut worker = BoundedVisionWorker::spawn_with_source(ScriptedSource(Arc::clone(&script)))
+        .expect("spawn worker");
+
+    std::thread::sleep(Duration::from_millis(80));
+    assert_eq!(
+        worker.runtime_health(),
+        CaptureRuntimeHealth::WaitingForGame
+    );
+
+    script
+        .lock()
+        .unwrap()
+        .push_back(Step::Err("PrintWindow failed"));
+    worker.reset();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if matches!(
+            worker.runtime_health(),
+            CaptureRuntimeHealth::CaptureError(_)
+        ) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(matches!(
+        worker.runtime_health(),
+        CaptureRuntimeHealth::CaptureError(ref msg) if msg.contains("PrintWindow failed")
+    ));
+
+    // A blank valid frame with zero Hero picks marks Capturing (stationary/empty frame != capture error)
+    script.lock().unwrap().push_back(Step::BlankFrame);
+    worker.reset();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if worker.runtime_health() == CaptureRuntimeHealth::Capturing {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(worker.runtime_health(), CaptureRuntimeHealth::Capturing);
+
+    // Suppression transitions cleanly and drop completes promptly.
+    worker.set_capture_mode(VisionCaptureMode::Suppressed);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if worker.runtime_health() == CaptureRuntimeHealth::Suppressed {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(worker.runtime_health(), CaptureRuntimeHealth::Suppressed);
+    drop(worker);
+
+    // Stalled capture call on drop must not block shutdown indefinitely.
+    let (tx_started, rx_started) = mpsc::channel();
+    struct StalledSource(Option<mpsc::Sender<()>>);
+    impl ScreenFrameSource for StalledSource {
+        fn capture_frame(&mut self) -> Result<Option<RgbFrame>, PortError> {
+            if let Some(tx) = self.0.take() {
+                let _ = tx.send(());
+            }
+            std::thread::sleep(Duration::from_secs(2));
+            Ok(None)
+        }
+    }
+    let stalled_worker =
+        BoundedVisionWorker::spawn_with_source(StalledSource(Some(tx_started))).unwrap();
+    rx_started
+        .recv_timeout(Duration::from_secs(1))
+        .expect("capture entered");
+    let drop_start = Instant::now();
+    drop(stalled_worker);
+    assert!(
+        drop_start.elapsed() < Duration::from_millis(800),
+        "BoundedVisionWorker::drop blocked too long on stalled capture: {:?}",
+        drop_start.elapsed()
+    );
 }
 
 #[test]

@@ -45,6 +45,12 @@ pub fn render_dashboard_string(session: &AppSession, color: bool) -> String {
         " GSI State: {d}{}{r}   |   Vision: {d}{}{r}   |   {d}{}{r}\n",
         session.last_gsi_state, session.vision_status, session.db_status
     ));
+    if session.vision_error {
+        out.push_str(&format!(
+            " {rd}Vision Alert:{r} {}\n",
+            session.vision_detail
+        ));
+    }
     out.push_str(&format!(
         "{b}----------------------------------------------------------------------------------------{r}\n"
     ));

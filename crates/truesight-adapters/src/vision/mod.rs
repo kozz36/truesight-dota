@@ -1,10 +1,17 @@
 mod capture;
+mod windows;
 mod worker;
 mod x11;
 
 pub use capture::{
-    CaptureAvailability, CaptureBackendKind, detect_capture_availability,
+    CaptureAvailability, CaptureBackendKind, CaptureRuntimeHealth, detect_capture_availability,
     detect_capture_availability_for, spawn_platform_worker, spawn_platform_worker_for,
+};
+#[cfg(target_os = "windows")]
+pub use windows::WindowsTopBarFrameSource;
+pub use windows::{
+    evaluate_pid_lookup_output, is_dota2_windows_window, parse_tasklist_exe_for_pid,
+    resolve_windows_system32_exe, rgba_to_topbar_rgb_frame, verify_dota_candidate_with,
 };
 pub use worker::{BoundedVisionWorker, ScreenFrameSource, VisionCaptureAdapter};
 #[cfg(target_os = "linux")]
@@ -533,7 +540,36 @@ impl VisionCaptureMode {
 pub struct RgbFrame {
     pub width: usize,
     pub height: usize,
+    /// Full pre-crop window height in pixels when `height` only carries the top-bar strip.
+    pub source_height: Option<usize>,
     pub rgb: Vec<u8>,
+}
+
+impl RgbFrame {
+    /// Creates an `RgbFrame` without an explicit pre-crop window height.
+    pub fn new(width: usize, height: usize, rgb: Vec<u8>) -> Self {
+        Self {
+            width,
+            height,
+            source_height: None,
+            rgb,
+        }
+    }
+
+    /// Creates a top-bar cropped `RgbFrame` preserving the original window height for layout scaling.
+    pub fn with_source_height(
+        width: usize,
+        height: usize,
+        source_height: usize,
+        rgb: Vec<u8>,
+    ) -> Self {
+        Self {
+            width,
+            height,
+            source_height: Some(source_height),
+            rgb,
+        }
+    }
 }
 
 /// Parses binary PPM (`P6`) image bytes into an `RgbFrame`.
@@ -595,9 +631,5 @@ pub fn parse_ppm_p6(bytes: &[u8]) -> Option<RgbFrame> {
         return None;
     }
 
-    Some(RgbFrame {
-        width,
-        height,
-        rgb: bytes[pos..end].to_vec(),
-    })
+    Some(RgbFrame::new(width, height, bytes[pos..end].to_vec()))
 }

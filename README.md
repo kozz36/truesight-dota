@@ -39,10 +39,11 @@ High-performance, native Rust 5v5 live draft analyzer and probabilistic hero rec
 | **Auto-Sync & Account Linking** | 3-tier Steam32 resolver (`Explicit GUI/--account-id/config.toml` $\to$ `GSI player.steamid` $\to$ local Steam `loginusers.vdf`), isolating OpenDota player caches under `~/.local/share/truesight-dota/cache/players/{account_id}/` (`24h` Meta TTL, `1h` Player TTL) plus optional `STRATZ_API_TOKEN` GraphQL `with` synergy and a clickable **`[Sync DB]`** / Account modal in the GUI. |
 | **Hands-Free Slot Picker & Vision Port** | Click any Ally (`A1..A5`) or Enemy (`E1..E5`) slot button once, type the hero name directly with auto-focus, and press `Enter` to assign. Includes `VisionCaptureAdapter` (`truesight-adapters::vision`) for 10-slot Radiant/Dire top-bar matching (base + Arcana/Persona skins) via X11/XWayland (`xprop` + ImageMagick `import`), phase-aware GSI suppression, and `player.team_name` faction routing. |
 
-## Supported Platforms (`v0.1.0`)
+## Supported Platforms
 
 - **Linux (`x86_64`)**: Supported for both native GUI and `--cli` / `--demo` / `--sync` modes. Live top-bar vision capture currently requires an X11 or XWayland session with `xprop` and ImageMagick (`import`) installed; manual pick assignment and GSI work even without X11 capture tools.
-- **Native Wayland & Windows**: Tracked on the issue backlog (cross-platform capture abstraction `#11`, Win32 backend `#12`, Windows OS paths `#29`, native Wayland `#13`).
+- **Windows (`x86_64`)**: Compiles and runs natively on Windows (`xcap` Win32/GDI top-bar capture for Borderless Window / Windowed Dota 2, `%APPDATA%`/`%LOCALAPPDATA%` persistence, Steam `loginusers.vdf` lookup, and `curl.exe` OpenDota/STRATZ sync). The default executable preserves console I/O for `--cli`, `--demo`, and `--sync`; live in-game Dota 2 validation (`#12`) and dedicated Windows installers/GUI launcher packaging (`#20`) remain tracked.
+- **Native Wayland**: Tracked on the issue backlog (`#13`).
 
 ## Interactive CLI Commands (`truesight-dota --cli`)
 
