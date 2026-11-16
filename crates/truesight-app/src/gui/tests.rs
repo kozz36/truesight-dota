@@ -510,8 +510,8 @@ fn viewport_sets_low_res_bounds_wayland_app_id_and_gem_icon() {
     );
 
     let vb = build_viewport_builder();
-    assert_eq!(vb.min_inner_size, Some(vec2(960.0, 680.0)));
-    assert_eq!(vb.inner_size, Some(vec2(1366.0, 820.0)));
+    assert_eq!(vb.min_inner_size, Some(vec2(640.0, 440.0)));
+    assert_eq!(vb.inner_size, Some(vec2(1180.0, 700.0)));
     assert_eq!(vb.app_id.as_deref(), Some("truesight-dota"));
     assert!(vb.icon.is_some(), "viewport must carry the Gem window icon");
 }
@@ -797,4 +797,41 @@ fn tall_window_docks_symmetrical_composition_below_matrix() {
         "docked COMP ENEMIES header must align flush right: hdr={:?} docked={docked:?}",
         r_tall.comp_enemies_hdr
     );
+}
+
+#[test]
+fn dpi_scaled_low_resolution_viewport_uses_scrollable_fallback_without_overlap() {
+    let mut app = TrueSightGuiApp::new(make_5v5_gui_session(), None, None);
+
+    // Non-scaled 960x680 must NOT trigger outer scrollable fallback.
+    let ctx_1x = egui::Context::default();
+    let r_full = render_at_viewport(&mut app, &ctx_1x, vec2(960.0, 680.0));
+    assert!(!r_full.scrollable_fallback);
+
+    // Simulate 720p @ 125% (1024x576 logical), 768p @ 150% (910x512 logical), and min_inner_size (640x440).
+    for (ppp, logical_vp) in [
+        (1.25_f32, vec2(1024.0, 576.0)),
+        (1.5_f32, vec2(910.0, 512.0)),
+        (1.5_f32, vec2(640.0, 440.0)),
+    ] {
+        let ctx = egui::Context::default();
+        ctx.set_pixels_per_point(ppp);
+        let r = render_at_viewport(&mut app, &ctx, logical_vp);
+        assert!(
+            r.scrollable_fallback,
+            "ppp={ppp} logical={logical_vp:?} must activate scrollable fallback"
+        );
+        assert!(
+            r.allies.max.x < r.oracle.min.x
+                && r.oracle.max.x < r.enemies.min.x
+                && r.suggested.max.x < r.matrix.min.x,
+            "ppp={ppp} logical={logical_vp:?} cards overlapped under fallback"
+        );
+        assert!(
+            !r.suggested_row_rects.is_empty()
+                && (r.suggested_pick_rects[0].center().y - r.suggested_row_rects[0].center().y)
+                    .abs()
+                    <= 1.2
+        );
+    }
 }

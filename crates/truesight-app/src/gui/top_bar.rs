@@ -290,11 +290,13 @@ impl TrueSightGuiApp {
             !self.account_editor_open && ctx.input(|i| i.key_pressed(egui::Key::Escape));
         let mut demo_btn_rect = None;
 
+        let max_opt_w = (ctx.screen_rect().width() - 24.0).clamp(260.0, 370.0);
         let resp = egui::Window::new("OPTIONS · DEV & TELEMETRY")
             .collapsible(false)
             .resizable(false)
             .anchor(Align2::RIGHT_TOP, vec2(-12.0, 56.0))
-            .default_width(370.0)
+            .default_width(max_opt_w)
+            .max_width(max_opt_w)
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing.y = 6.0;
 
