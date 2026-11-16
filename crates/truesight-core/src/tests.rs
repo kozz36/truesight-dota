@@ -1,7 +1,7 @@
 use crate::domain::{AttackType, DraftPick, DraftState, HeroId, HeroProfile, PairStats, Role};
 use crate::math::{
-    MatchupMatrix, ModelWeights, bayesian_winrate, evaluate_draft_5v5,
-    expected_head_to_head_wr, recommend_heroes,
+    MatchupMatrix, ModelWeights, bayesian_winrate, evaluate_draft_5v5, expected_head_to_head_wr,
+    recommend_heroes,
 };
 
 fn sample_matrix() -> MatchupMatrix {
@@ -136,7 +136,10 @@ fn bayesian_shrinkage_dampens_small_sample_extremes() {
     let small = bayesian_winrate(2, 2, 0.50, 50.0);
     let large = bayesian_winrate(600, 1000, 0.50, 50.0);
     assert!(small < 0.53, "2/2 games should shrink near 50%: {small}");
-    assert!(large > 0.58, "600/1000 games should retain strong signal: {large}");
+    assert!(
+        large > 0.58,
+        "600/1000 games should retain strong signal: {large}"
+    );
 }
 
 #[test]
@@ -198,9 +201,18 @@ fn draft_5v5_populates_green_and_red_counter_and_synergy_cells() {
     let am_vs_axe = analysis.counter_grid[0][2].expect("AM vs Axe cell populated");
     let am_with_mag = analysis.ally_synergy_grid[0][2].expect("AM + Magnus synergy populated");
 
-    assert!(am_vs_storm > 0.05, "AM vs Storm should be positive (green): {am_vs_storm}");
-    assert!(am_vs_axe < -0.05, "AM vs Axe should be negative (red): {am_vs_axe}");
-    assert!(am_with_mag > 0.04, "AM + Magnus should have positive synergy: {am_with_mag}");
+    assert!(
+        am_vs_storm > 0.05,
+        "AM vs Storm should be positive (green): {am_vs_storm}"
+    );
+    assert!(
+        am_vs_axe < -0.05,
+        "AM vs Axe should be negative (red): {am_vs_axe}"
+    );
+    assert!(
+        am_with_mag > 0.04,
+        "AM + Magnus should have positive synergy: {am_with_mag}"
+    );
     assert!(analysis.ally_win_probability > 0.50);
 }
 
@@ -284,7 +296,13 @@ fn statistical_engine_v2_applies_trend_comfort_decay_and_composition_balance() {
             id: HeroId(id),
             slug: format!("melee_{id}"),
             display_name: format!("Melee {id}"),
-            primary_roles: vec![Role::Carry, Role::Mid, Role::Offlane, Role::SoftSupport, Role::HardSupport],
+            primary_roles: vec![
+                Role::Carry,
+                Role::Mid,
+                Role::Offlane,
+                Role::SoftSupport,
+                Role::HardSupport,
+            ],
             role_winrates: [0.50; 5],
             personal_matches: 40,
             personal_wins: 28,
@@ -303,11 +321,21 @@ fn statistical_engine_v2_applies_trend_comfort_decay_and_composition_balance() {
             id: HeroId(id),
             slug: format!("bal_{id}"),
             display_name: format!("Balanced {id}"),
-            primary_roles: vec![Role::Carry, Role::Mid, Role::Offlane, Role::SoftSupport, Role::HardSupport],
+            primary_roles: vec![
+                Role::Carry,
+                Role::Mid,
+                Role::Offlane,
+                Role::SoftSupport,
+                Role::HardSupport,
+            ],
             role_winrates: [0.50; 5],
             personal_matches: 0,
             personal_wins: 0,
-            attack_type: if is_melee { AttackType::Melee } else { AttackType::Ranged },
+            attack_type: if is_melee {
+                AttackType::Melee
+            } else {
+                AttackType::Ranged
+            },
             has_disable: true,
             has_initiation: is_melee,
             trend_delta: 0.0,

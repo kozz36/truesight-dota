@@ -1,8 +1,8 @@
 use super::*;
+use crate::execute_command;
 use eframe::egui::pos2;
 use truesight_adapters::vision::parse_hero_atlas;
 use truesight_core::domain::{HeroId, Role};
-use crate::execute_command;
 
 #[test]
 fn embedded_hero_atlas_decodes_all_127_heroes_and_gem_icon() {
@@ -131,7 +131,10 @@ fn v4_layout_rects_fit_viewport_and_align_cards() {
     });
 
     let mut app = TrueSightGuiApp::new(session, None, None);
-    assert!(app.status_banner.contains("#12"), "Unavailable capture must explain fallback in banner");
+    assert!(
+        app.status_banner.contains("#12"),
+        "Unavailable capture must explain fallback in banner"
+    );
     app.picker_target = Some(PickerTarget::Slot(Side::Allies, 1));
 
     for viewport in [
@@ -145,7 +148,9 @@ fn v4_layout_rects_fit_viewport_and_align_cards() {
             let r = render_at_viewport(&mut app, &ctx, viewport);
 
             assert!(
-                r.top_bar.height() > 24.0 && r.top_bar.height() < 65.0 && r.top_bar.max.x <= viewport.x,
+                r.top_bar.height() > 24.0
+                    && r.top_bar.height() < 65.0
+                    && r.top_bar.max.x <= viewport.x,
                 "viewport={viewport:?} tab={tab:?} top_bar out of range: {:?}",
                 r.top_bar
             );
@@ -387,7 +392,10 @@ fn v4_inline_picker_and_matrix_tabs_update_session_and_preserve_geometry() {
     let puck_id = HeroId(13);
     let am_id = HeroId(1);
     app.apply_picker_choice(PickerTarget::Slot(Side::Allies, 1), puck_id, "Puck");
-    assert_eq!(app.session.draft.allies[1].map(|p| p.hero_id), Some(puck_id));
+    assert_eq!(
+        app.session.draft.allies[1].map(|p| p.hero_id),
+        Some(puck_id)
+    );
     assert!(app.session.ally_locked_slots[1]);
     assert_eq!(app.picker_target, None);
 

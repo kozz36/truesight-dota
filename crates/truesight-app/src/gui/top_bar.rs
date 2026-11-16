@@ -1,6 +1,8 @@
 use super::theme::*;
 use super::{PickerTarget, TrueSightGuiApp};
-use eframe::egui::{self, Align, Color32, Layout, Margin, Rect, RichText, Sense, Stroke, StrokeKind, vec2};
+use eframe::egui::{
+    self, Align, Color32, Layout, Margin, Rect, RichText, Sense, Stroke, StrokeKind, vec2,
+};
 use truesight_core::domain::{Bracket, Faction, Role, Side, TEAM_SIZE};
 
 impl TrueSightGuiApp {
@@ -10,7 +12,8 @@ impl TrueSightGuiApp {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 if let Some(ref gem_tex) = self.textures.gem {
                     let (rect, _) = ui.allocate_exact_size(vec2(28.0, 21.0), Sense::hover());
-                    ui.painter().image(gem_tex.id(), rect, uv_full(), Color32::WHITE);
+                    ui.painter()
+                        .image(gem_tex.id(), rect, uv_full(), Color32::WHITE);
                     ui.painter().rect_stroke(
                         rect,
                         0.0,
@@ -18,19 +21,9 @@ impl TrueSightGuiApp {
                         StrokeKind::Inside,
                     );
                 }
-                ui.label(
-                    RichText::new("TRUE")
-                        .size(14.0)
-                        .strong()
-                        .color(P_GLINT),
-                );
+                ui.label(RichText::new("TRUE").size(14.0).strong().color(P_GLINT));
                 ui.add_space(-6.0);
-                ui.label(
-                    RichText::new("SIGHT")
-                        .size(14.0)
-                        .strong()
-                        .color(P_GEM),
-                );
+                ui.label(RichText::new("SIGHT").size(14.0).strong().color(P_GEM));
                 ui.label(
                     RichText::new("· DRAFT ORACLE")
                         .size(13.0)
@@ -85,10 +78,13 @@ impl TrueSightGuiApp {
                     Faction::Dire => P_DIRE,
                 };
                 let fac_btn = egui::Button::new(
-                    RichText::new(format!("YOU: {} <->", self.session.draft.ally_faction.label()))
-                        .size(10.5)
-                        .strong()
-                        .color(fac_col),
+                    RichText::new(format!(
+                        "YOU: {} <->",
+                        self.session.draft.ally_faction.label()
+                    ))
+                    .size(10.5)
+                    .strong()
+                    .color(fac_col),
                 )
                 .fill(P_INDIGO_2)
                 .stroke(Stroke::new(1.0_f32, P_GEM_DEEP));
@@ -208,5 +204,4 @@ impl TrueSightGuiApp {
             });
         })
     }
-
 }

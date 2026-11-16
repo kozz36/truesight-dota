@@ -1,5 +1,5 @@
-use super::theme::*;
 use super::TrueSightGuiApp;
+use super::theme::*;
 use eframe::egui::{self, Align, Layout, Rect, RichText, Sense, Stroke, StrokeKind, pos2, vec2};
 use truesight_core::domain::{Role, Side, TEAM_SIZE};
 
@@ -194,7 +194,8 @@ impl TrueSightGuiApp {
                                 );
 
                                 // 6. 7d Trend
-                                let trend_pct = profile.map(|h| h.trend_delta * 100.0).unwrap_or(0.0);
+                                let trend_pct =
+                                    profile.map(|h| h.trend_delta * 100.0).unwrap_or(0.0);
                                 if trend_pct.abs() >= EPS_PCT {
                                     paint_trend_badge(ui, trend_pct);
                                 } else {
@@ -261,8 +262,7 @@ impl TrueSightGuiApp {
                                             .strong()
                                             .color(tone_for_user(com, 1.0).color()),
                                     );
-                                    let pips =
-                                        ((com.max(0.0) / 0.5).round() as usize).clamp(0, 5);
+                                    let pips = ((com.max(0.0) / 0.5).round() as usize).clamp(0, 5);
                                     ui.horizontal(|ui| {
                                         ui.spacing_mut().item_spacing.x = 2.0;
                                         for k in 0..5 {
@@ -281,10 +281,7 @@ impl TrueSightGuiApp {
 
                                 // 11. PICK button
                                 let pick_btn = egui::Button::new(
-                                    RichText::new("PICK")
-                                        .size(10.0)
-                                        .strong()
-                                        .color(P_GEM),
+                                    RichText::new("PICK").size(10.0).strong().color(P_GEM),
                                 )
                                 .fill(P_INDIGO_1)
                                 .stroke(Stroke::new(1.0_f32, P_GEM));
@@ -310,5 +307,4 @@ impl TrueSightGuiApp {
         });
         (card_rect, last_col_max_x)
     }
-
 }

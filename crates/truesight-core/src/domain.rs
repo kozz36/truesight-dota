@@ -176,15 +176,8 @@ impl Default for DraftState {
 
 impl DraftState {
     pub fn is_unavailable(&self, hero_id: HeroId) -> bool {
-        self.allies
-            .iter()
-            .flatten()
-            .any(|p| p.hero_id == hero_id)
-            || self
-                .enemies
-                .iter()
-                .flatten()
-                .any(|p| p.hero_id == hero_id)
+        self.allies.iter().flatten().any(|p| p.hero_id == hero_id)
+            || self.enemies.iter().flatten().any(|p| p.hero_id == hero_id)
             || self.bans.iter().flatten().any(|&b| b == hero_id)
     }
 

@@ -97,12 +97,17 @@ impl MatchupMatrix {
         let wr_b = self.hero_best_wr(hero_b);
 
         let expected_vs = expected_head_to_head_wr(wr_a, wr_b);
-        let smoothed_vs = bayesian_winrate(stats.vs_wins, stats.vs_matches, expected_vs, prior_matches);
+        let smoothed_vs =
+            bayesian_winrate(stats.vs_wins, stats.vs_matches, expected_vs, prior_matches);
         let counter_delta = smoothed_vs - expected_vs;
 
         let expected_with = expected_synergy_wr(wr_a, wr_b);
-        let smoothed_with =
-            bayesian_winrate(stats.with_wins, stats.with_matches, expected_with, prior_matches);
+        let smoothed_with = bayesian_winrate(
+            stats.with_wins,
+            stats.with_matches,
+            expected_with,
+            prior_matches,
+        );
         let synergy_delta = smoothed_with - expected_with;
 
         self.cells[ia][ib] = MatchupCell {
@@ -153,11 +158,7 @@ impl MatchupMatrix {
                         .fold(0.50_f32, f32::max)
                         .clamp(0.05, 0.95)
                 } else {
-                    let sum: f32 = h
-                        .primary_roles
-                        .iter()
-                        .map(|&r| h.meta_winrate(r))
-                        .sum();
+                    let sum: f32 = h.primary_roles.iter().map(|&r| h.meta_winrate(r)).sum();
                     (sum / h.primary_roles.len() as f32).clamp(0.05, 0.95)
                 }
             })
@@ -182,7 +183,11 @@ pub fn expected_synergy_wr(wr_a: f32, wr_b: f32) -> f32 {
     let b = wr_b.clamp(0.05, 0.95);
     let prod = a * b;
     let den = prod + (1.0 - a) * (1.0 - b);
-    if den <= f32::EPSILON { 0.50 } else { prod / den }
+    if den <= f32::EPSILON {
+        0.50
+    } else {
+        prod / den
+    }
 }
 
 /// Empirical Bayes shrinkage toward `prior_wr`.
@@ -332,9 +337,13 @@ pub fn evaluate_draft_5v5(
     let mut ally_syn_row_cnt = [0_u32; TEAM_SIZE];
 
     for i in 0..TEAM_SIZE {
-        let Some(ally_a) = draft.allies[i] else { continue };
+        let Some(ally_a) = draft.allies[i] else {
+            continue;
+        };
         for k in (i + 1)..TEAM_SIZE {
-            let Some(ally_b) = draft.allies[k] else { continue };
+            let Some(ally_b) = draft.allies[k] else {
+                continue;
+            };
             let syn = matrix.cell(ally_a.hero_id, ally_b.hero_id).synergy_delta;
             ally_synergy_grid[i][k] = Some(syn);
             ally_synergy_grid[k][i] = Some(syn);
@@ -360,9 +369,13 @@ pub fn evaluate_draft_5v5(
 
     // 4. Enemy Synergy Subtraction
     for j in 0..TEAM_SIZE {
-        let Some(enemy_a) = draft.enemies[j] else { continue };
+        let Some(enemy_a) = draft.enemies[j] else {
+            continue;
+        };
         for l in (j + 1)..TEAM_SIZE {
-            let Some(enemy_b) = draft.enemies[l] else { continue };
+            let Some(enemy_b) = draft.enemies[l] else {
+                continue;
+            };
             let syn = matrix.cell(enemy_a.hero_id, enemy_b.hero_id).synergy_delta;
             raw_enemy_synergy_sum += syn;
             enemy_synergy_count += 1;

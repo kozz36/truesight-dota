@@ -2,11 +2,11 @@ mod matrix_card;
 mod oracle_card;
 mod suggested_table;
 mod team_card;
+#[cfg(test)]
+mod tests;
 pub mod theme;
 mod top_bar;
 pub mod viewmodel;
-#[cfg(test)]
-mod tests;
 
 #[cfg(test)]
 pub use theme::{Tone, fmt_pct, fmt_val, tone_for_user};
@@ -17,7 +17,10 @@ use crate::AppSession;
 use eframe::egui::{
     self, Align, Align2, CornerRadius, Layout, Margin, Rect, RichText, Stroke, Vec2, vec2,
 };
-use theme::{GuiTextureCache, P_GEM, P_GEM_DEEP, P_INDIGO_1, P_INDIGO_2, P_INDIGO_3, P_LINE, P_SILVER, P_VOID};
+use theme::{
+    GuiTextureCache, P_GEM, P_GEM_DEEP, P_INDIGO_1, P_INDIGO_2, P_INDIGO_3, P_LINE, P_SILVER,
+    P_VOID,
+};
 use truesight_adapters::gsi::BoundedGsiListener;
 use truesight_adapters::sync::{AccountLinkConfig, normalize_steam32_id, save_account_config};
 use truesight_adapters::vision::BoundedVisionWorker;
@@ -35,7 +38,6 @@ enum PickerTarget {
     Slot(Side, usize),
     Ban,
 }
-
 
 // =============================================================================
 // Main Application State & eframe::App Implementation
@@ -134,7 +136,6 @@ impl TrueSightGuiApp {
         visuals.selection.stroke = Stroke::new(1.0_f32, P_VOID);
         ctx.set_visuals(visuals);
     }
-
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -208,7 +209,11 @@ impl TrueSightGuiApp {
         };
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(P_VOID).inner_margin(Margin::same(10)))
+            .frame(
+                egui::Frame::NONE
+                    .fill(P_VOID)
+                    .inner_margin(Margin::same(10)),
+            )
             .show(ctx, |ui| {
                 // 1. Top Bar
                 rects.top_bar = self.render_top_bar(ui);
@@ -312,9 +317,11 @@ impl TrueSightGuiApp {
                 .anchor(Align2::CENTER_TOP, vec2(0.0, 62.0))
                 .show(ctx, |ui| {
                     ui.label(
-                        RichText::new("Enter Steam32 or Steam64 ID (leave Auto for GSI + Steam VDF):")
-                            .size(11.0)
-                            .color(P_SILVER),
+                        RichText::new(
+                            "Enter Steam32 or Steam64 ID (leave Auto for GSI + Steam VDF):",
+                        )
+                        .size(11.0)
+                        .color(P_SILVER),
                     );
                     ui.add_space(4.0);
                     let enter_pressed = ui
@@ -335,16 +342,19 @@ impl TrueSightGuiApp {
                                     self.status_banner = format!("Linked Steam32 account #{s32}.");
                                     close_modal = true;
                                 } else {
-                                    self.status_banner = "Invalid Steam32/Steam64 account ID.".into();
+                                    self.status_banner =
+                                        "Invalid Steam32/Steam64 account ID.".into();
                                 }
                             } else {
-                                self.status_banner = "Enter a numeric Steam32 or Steam64 ID.".into();
+                                self.status_banner =
+                                    "Enter a numeric Steam32 or Steam64 ID.".into();
                             }
                         }
                         if ui.button("AUTO (VDF)").clicked() {
                             self.session.set_account_auto();
                             let _ = save_account_config(AccountLinkConfig::Auto);
-                            self.status_banner = format!("Auto account mode: {}.", self.session.db_status);
+                            self.status_banner =
+                                format!("Auto account mode: {}.", self.session.db_status);
                             close_modal = true;
                         }
                         if ui.button("UNLINK").clicked() {
@@ -398,4 +408,3 @@ pub fn run_gui(
     )
     .map_err(|e| e.to_string())
 }
-

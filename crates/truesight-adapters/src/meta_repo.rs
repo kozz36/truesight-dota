@@ -46,8 +46,7 @@ impl StatsRepository for SeededMetaRepository {
         let b_idx = bracket_index(bracket);
 
         // Medal execution sharpness factor (Legend = 1.00 reference; Herald..Immortal = 0.86..1.12)
-        const BRACKET_EXECUTION_SCALE: [f32; 8] =
-            [0.86, 0.90, 0.94, 0.97, 1.00, 1.03, 1.07, 1.12];
+        const BRACKET_EXECUTION_SCALE: [f32; 8] = [0.86, 0.90, 0.94, 0.97, 1.00, 1.03, 1.07, 1.12];
         let tau = BRACKET_EXECUTION_SCALE[b_idx];
 
         let mut hero_bracket_shift = [0.0_f32; truesight_core::domain::MAX_HEROES];
@@ -68,8 +67,7 @@ impl StatsRepository for SeededMetaRepository {
                 .unwrap_or(row.trend_delta);
 
             let base_wr = bracket_wrs[b_idx];
-            let mean_wr =
-                bracket_wrs.iter().copied().sum::<f32>() / (bracket_wrs.len() as f32);
+            let mean_wr = bracket_wrs.iter().copied().sum::<f32>() / (bracket_wrs.len() as f32);
             let shift = base_wr - mean_wr;
             if (row.id as usize) < truesight_core::domain::MAX_HEROES {
                 hero_bracket_shift[row.id as usize] = shift;

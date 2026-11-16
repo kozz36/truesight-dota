@@ -13,8 +13,14 @@ pub enum CaptureBackendKind {
 /// Startup capability state returned by the cross-platform capture factory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CaptureAvailability {
-    Available { backend: CaptureBackendKind, detail: String },
-    Unavailable { backend: CaptureBackendKind, reason: String },
+    Available {
+        backend: CaptureBackendKind,
+        detail: String,
+    },
+    Unavailable {
+        backend: CaptureBackendKind,
+        reason: String,
+    },
 }
 
 impl CaptureAvailability {
@@ -30,10 +36,22 @@ impl CaptureAvailability {
 
     pub fn badge_label(&self) -> &'static str {
         match self {
-            Self::Available { backend: CaptureBackendKind::X11, .. } => "CAP: X11",
-            Self::Available { backend: CaptureBackendKind::WaylandPortal, .. } => "CAP: WAYLAND",
-            Self::Available { backend: CaptureBackendKind::WindowsNative, .. } => "CAP: WIN32",
-            Self::Available { backend: CaptureBackendKind::Unsupported, .. }
+            Self::Available {
+                backend: CaptureBackendKind::X11,
+                ..
+            } => "CAP: X11",
+            Self::Available {
+                backend: CaptureBackendKind::WaylandPortal,
+                ..
+            } => "CAP: WAYLAND",
+            Self::Available {
+                backend: CaptureBackendKind::WindowsNative,
+                ..
+            } => "CAP: WIN32",
+            Self::Available {
+                backend: CaptureBackendKind::Unsupported,
+                ..
+            }
             | Self::Unavailable { .. } => "CAP: MANUAL",
         }
     }
@@ -47,7 +65,8 @@ impl CaptureAvailability {
 }
 
 fn command_on_path(bin: &str) -> bool {
-    std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(bin).is_file()))
+    std::env::var_os("PATH")
+        .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(bin).is_file()))
 }
 
 /// Pure OS/capability classifier used by `detect_capture_availability` and unit tests.
@@ -103,7 +122,13 @@ pub fn detect_capture_availability() -> CaptureAvailability {
     let has_display = std::env::var_os("DISPLAY").is_some_and(|v| !v.is_empty());
     let has_xprop = cfg!(target_os = "linux") && command_on_path("xprop");
     let has_import = cfg!(target_os = "linux") && command_on_path("import");
-    detect_capture_availability_for(std::env::consts::OS, wayland, has_display, has_xprop, has_import)
+    detect_capture_availability_for(
+        std::env::consts::OS,
+        wayland,
+        has_display,
+        has_xprop,
+        has_import,
+    )
 }
 
 /// Spawns the OS-appropriate capture worker when supported, returning `(None, availability)` otherwise.
@@ -117,15 +142,25 @@ pub fn spawn_platform_worker_for(
     availability: &CaptureAvailability,
 ) -> (Option<BoundedVisionWorker>, CaptureAvailability) {
     #[cfg(target_os = "linux")]
-    if matches!(availability, CaptureAvailability::Available { backend: CaptureBackendKind::X11, .. }) {
-        if let Some(worker) = BoundedVisionWorker::spawn_with_source(super::X11TopBarFrameSource::new()) {
+    if matches!(
+        availability,
+        CaptureAvailability::Available {
+            backend: CaptureBackendKind::X11,
+            ..
+        }
+    ) {
+        if let Some(worker) =
+            BoundedVisionWorker::spawn_with_source(super::X11TopBarFrameSource::new())
+        {
             return (Some(worker), availability.clone());
         }
         return (
             None,
             CaptureAvailability::Unavailable {
                 backend: CaptureBackendKind::X11,
-                reason: "Failed to initialize X11 vision worker; manual pick mode & GSI remain active.".into(),
+                reason:
+                    "Failed to initialize X11 vision worker; manual pick mode & GSI remain active."
+                        .into(),
             },
         );
     }

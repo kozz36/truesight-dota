@@ -205,7 +205,8 @@ pub fn load_account_config() -> AccountLinkConfig {
         if let Some((k, v)) = line.split_once('=') {
             if k.trim() == "account_id" {
                 let cleaned = v.trim().trim_matches('"');
-                if cleaned.eq_ignore_ascii_case("none") || cleaned.eq_ignore_ascii_case("unlinked") {
+                if cleaned.eq_ignore_ascii_case("none") || cleaned.eq_ignore_ascii_case("unlinked")
+                {
                     return AccountLinkConfig::Unlinked;
                 }
                 if cleaned.eq_ignore_ascii_case("auto") {
@@ -243,9 +244,7 @@ pub fn detect_local_steam_vdf() -> Option<u64> {
     }
     #[cfg(target_os = "windows")]
     if let Some(reg_path) = crate::platform::query_windows_steam_path() {
-        return detect_steam_vdf_in_candidates(&[reg_path
-            .join("config")
-            .join("loginusers.vdf")]);
+        return detect_steam_vdf_in_candidates(&[reg_path.join("config").join("loginusers.vdf")]);
     }
     None
 }
@@ -256,8 +255,10 @@ struct CacheSyncState {
     latest_committed_meta_gen: u64,
 }
 
+type CacheCoordinatorEntry = (PathBuf, Arc<Mutex<CacheSyncState>>);
+
 fn coordinator_for_dir(dir: &Path) -> Arc<Mutex<CacheSyncState>> {
-    static REGISTRY: OnceLock<Mutex<Vec<(PathBuf, Arc<Mutex<CacheSyncState>>)>>> = OnceLock::new();
+    static REGISTRY: OnceLock<Mutex<Vec<CacheCoordinatorEntry>>> = OnceLock::new();
     let reg = REGISTRY.get_or_init(|| Mutex::new(Vec::new()));
     let mut list = reg.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((_, coord)) = list.iter().find(|(p, _)| p == dir) {
@@ -303,14 +304,27 @@ impl LocalCacheManager {
     }
 
     pub fn new(player_account_id: u64) -> Self {
-        Self { explicit_override: true, ..Self::with_optional_account(Self::default_cache_dir(), normalize_steam32_id(player_account_id)) }
+        Self {
+            explicit_override: true,
+            ..Self::with_optional_account(
+                Self::default_cache_dir(),
+                normalize_steam32_id(player_account_id),
+            )
+        }
     }
 
     pub fn auto_detected() -> Self {
         let dir = Self::default_cache_dir();
         match load_account_config() {
-            AccountLinkConfig::Explicit(id) => Self { explicit_override: true, ..Self::with_optional_account(dir, Some(id)) },
-            AccountLinkConfig::Unlinked => Self { explicit_override: true, explicitly_unlinked: true, ..Self::with_optional_account(dir, None) },
+            AccountLinkConfig::Explicit(id) => Self {
+                explicit_override: true,
+                ..Self::with_optional_account(dir, Some(id))
+            },
+            AccountLinkConfig::Unlinked => Self {
+                explicit_override: true,
+                explicitly_unlinked: true,
+                ..Self::with_optional_account(dir, None)
+            },
             AccountLinkConfig::Auto => Self::with_optional_account(dir, detect_local_steam_vdf()),
         }
     }
@@ -423,7 +437,9 @@ impl LocalCacheManager {
     pub fn is_meta_stale(&self, now_unix: u64) -> bool {
         let (meta_ts, _) = self.read_timestamps();
         match meta_ts {
-            Some(ts) if self.meta_json_path().exists() => now_unix.saturating_sub(ts) > META_TTL_SECS,
+            Some(ts) if self.meta_json_path().exists() => {
+                now_unix.saturating_sub(ts) > META_TTL_SECS
+            }
             _ => true,
         }
     }
@@ -447,24 +463,40 @@ impl LocalCacheManager {
         player_matches_json: Option<&str>,
         now_unix: u64,
     ) -> Result<(), PortError> {
-        let is_arr = |s: &str| { let t = s.trim(); t.starts_with('[') && t.ends_with(']') };
+        let is_arr = |s: &str| {
+            let t = s.trim();
+            t.starts_with('[') && t.ends_with(']')
+        };
         if let Some(m) = meta_json.filter(|m| !is_arr(m) || parse_hero_stats_json(m).is_empty()) {
             let _ = m;
-            return Err(PortError("Invalid or truncated heroStats JSON payload".into()));
+            return Err(PortError(
+                "Invalid or truncated heroStats JSON payload".into(),
+            ));
         }
         if stratz_json.is_some_and(|s| parse_stratz_with_synergy_json(s).is_empty()) {
-            return Err(PortError("Invalid or truncated STRATZ synergy JSON payload".into()));
+            return Err(PortError(
+                "Invalid or truncated STRATZ synergy JSON payload".into(),
+            ));
         }
-        if player_json.is_some_and(|p| self.player_account_id.is_none() || !is_arr(p) || (p.trim() != "[]" && parse_player_comfort_json(p).is_empty())) {
-            return Err(PortError("Invalid or truncated player comfort JSON payload".into()));
+        if player_json.is_some_and(|p| {
+            self.player_account_id.is_none()
+                || !is_arr(p)
+                || (p.trim() != "[]" && parse_player_comfort_json(p).is_empty())
+        }) {
+            return Err(PortError(
+                "Invalid or truncated player comfort JSON payload".into(),
+            ));
         }
         if player_matches_json.is_some_and(|pm| self.player_account_id.is_none() || !is_arr(pm)) {
-            return Err(PortError("Invalid or truncated player matches JSON payload".into()));
+            return Err(PortError(
+                "Invalid or truncated player matches JSON payload".into(),
+            ));
         }
 
         let mut state = self.coordinator.lock().unwrap_or_else(|e| e.into_inner());
         let superseded = self.sync_generation > 0
-            && (self.sync_generation < state.latest_started_gen || self.sync_generation < state.latest_committed_meta_gen);
+            && (self.sync_generation < state.latest_started_gen
+                || self.sync_generation < state.latest_committed_meta_gen);
         if self.is_cancelled() || superseded {
             return Err(PortError("Sync superseded by newer generation".into()));
         }
@@ -474,19 +506,29 @@ impl LocalCacheManager {
         }
         if let Some(m_body) = meta_json {
             atomic_write_file(&self.meta_json_path(), m_body)?;
-            atomic_write_file(&self.metadata_path(), &format!("meta_sync_unix={now_unix}\n"))?;
-            state.latest_committed_meta_gen = state.latest_committed_meta_gen.max(self.sync_generation);
+            atomic_write_file(
+                &self.metadata_path(),
+                &format!("meta_sync_unix={now_unix}\n"),
+            )?;
+            state.latest_committed_meta_gen =
+                state.latest_committed_meta_gen.max(self.sync_generation);
         }
         if let Some(s_body) = stratz_json {
             atomic_write_file(&self.stratz_synergy_json_path(), s_body)?;
-            state.latest_committed_meta_gen = state.latest_committed_meta_gen.max(self.sync_generation);
+            state.latest_committed_meta_gen =
+                state.latest_committed_meta_gen.max(self.sync_generation);
         }
         if player_json.is_some() || player_matches_json.is_some() {
-            if let (Some(p_dir), Some(p_path), Some(pm_meta), Some(m_path)) =
-                (self.player_dir(), self.player_json_path(), self.player_metadata_path(), self.player_matches_json_path())
-            {
+            if let (Some(p_dir), Some(p_path), Some(pm_meta), Some(m_path)) = (
+                self.player_dir(),
+                self.player_json_path(),
+                self.player_metadata_path(),
+                self.player_matches_json_path(),
+            ) {
                 fs::create_dir_all(&p_dir).map_err(|e| PortError(e.to_string()))?;
-                if let Some(pm_body) = player_matches_json { atomic_write_file(&m_path, pm_body)?; }
+                if let Some(pm_body) = player_matches_json {
+                    atomic_write_file(&m_path, pm_body)?;
+                }
                 if let Some(p_body) = player_json {
                     atomic_write_file(&p_path, p_body)?;
                     atomic_write_file(&pm_meta, &format!("player_sync_unix={now_unix}\n"))?;
@@ -496,7 +538,12 @@ impl LocalCacheManager {
         Ok(())
     }
 
-    pub fn write_cached_files(&self, meta_json: Option<&str>, player_json: Option<&str>, now_unix: u64) -> Result<(), PortError> {
+    pub fn write_cached_files(
+        &self,
+        meta_json: Option<&str>,
+        player_json: Option<&str>,
+        now_unix: u64,
+    ) -> Result<(), PortError> {
         self.publish_staged_cache(meta_json, None, player_json, None, now_unix)
     }
 
@@ -512,8 +559,12 @@ impl LocalCacheManager {
             return Ok("DB cache is already fresh (Meta <24h, Player <1h).".into());
         }
 
-        let is_arr = |s: &str| { let t = s.trim(); t.starts_with('[') && t.ends_with(']') };
-        let (mut fetched_meta, mut fetched_stratz, mut fetched_player, mut fetched_matches) = (None, None, None, None);
+        let is_arr = |s: &str| {
+            let t = s.trim();
+            t.starts_with('[') && t.ends_with(']')
+        };
+        let (mut fetched_meta, mut fetched_stratz, mut fetched_player, mut fetched_matches) =
+            (None, None, None, None);
         let mut updated_parts = Vec::new();
 
         if need_meta {
@@ -523,8 +574,14 @@ impl LocalCacheManager {
                 updated_parts.push("heroStats (24h TTL)");
             }
             if !self.is_cancelled() {
-                if let Some(token) = std::env::var("STRATZ_API_TOKEN").ok().filter(|t| !t.trim().is_empty()) {
-                    if let Some(sb) = fetch_stratz_with_synergy_graphql(token.trim()).ok().filter(|s| !parse_stratz_with_synergy_json(s).is_empty()) {
+                if let Some(token) = std::env::var("STRATZ_API_TOKEN")
+                    .ok()
+                    .filter(|t| !t.trim().is_empty())
+                {
+                    if let Some(sb) = fetch_stratz_with_synergy_graphql(token.trim())
+                        .ok()
+                        .filter(|s| !parse_stratz_with_synergy_json(s).is_empty())
+                    {
                         fetched_stratz = Some(sb);
                         updated_parts.push("STRATZ synergy");
                     }
@@ -533,21 +590,38 @@ impl LocalCacheManager {
         }
         if need_player && !self.is_cancelled() {
             if let Some(account_id) = self.player_account_id {
-                let body = fetch_url(&format!("https://api.opendota.com/api/players/{account_id}/heroes"))?;
+                let body = fetch_url(&format!(
+                    "https://api.opendota.com/api/players/{account_id}/heroes"
+                ))?;
                 if is_arr(&body) {
                     fetched_player = Some(body);
                     updated_parts.push("player comfort (1h TTL)");
                 }
                 if !self.is_cancelled() {
-                    if let Some(mb) = fetch_url(&format!("https://api.opendota.com/api/players/{account_id}/matches?limit=500")).ok().filter(|m| is_arr(m)) {
+                    if let Some(mb) = fetch_url(&format!(
+                        "https://api.opendota.com/api/players/{account_id}/matches?limit=500"
+                    ))
+                    .ok()
+                    .filter(|m| is_arr(m))
+                    {
                         fetched_matches = Some(mb);
                     }
                 }
             }
         }
 
-        self.publish_staged_cache(fetched_meta.as_deref(), fetched_stratz.as_deref(), fetched_player.as_deref(), fetched_matches.as_deref(), now)?;
-        if updated_parts.is_empty() { Ok("Synced OpenDota cache.".into()) } else { Ok(format!("Synced OpenDota: {}.", updated_parts.join(" + "))) }
+        self.publish_staged_cache(
+            fetched_meta.as_deref(),
+            fetched_stratz.as_deref(),
+            fetched_player.as_deref(),
+            fetched_matches.as_deref(),
+            now,
+        )?;
+        if updated_parts.is_empty() {
+            Ok("Synced OpenDota cache.".into())
+        } else {
+            Ok(format!("Synced OpenDota: {}.", updated_parts.join(" + ")))
+        }
     }
 
     pub fn freshness_badge(&self, now_unix: u64) -> String {
@@ -612,7 +686,8 @@ pub fn parse_hero_stats_json(json: &str) -> Vec<(HeroId, [f32; 8], f32)> {
         for t in 1..=7 {
             let pk = format!("\"{t}_pick\"");
             let wk = format!("\"{t}_win\"");
-            if let (Some(p), Some(w)) = (extract_u64_field(block, &pk), extract_u64_field(block, &wk))
+            if let (Some(p), Some(w)) =
+                (extract_u64_field(block, &pk), extract_u64_field(block, &wk))
             {
                 if p > 0 {
                     wrs[t - 1] = ((w as f32 + 25.0 * 0.50) / (p as f32 + 25.0)).clamp(0.35, 0.65);
@@ -781,7 +856,11 @@ pub fn parse_player_comfort_with_matches_at_json(
             if cnt > 0 {
                 let decay = (g_eff / (games as f32)).clamp(0.0, 1.0);
                 let career_wr = (wins as f32) / (games as f32);
-                let rec_wr = if g_eff > 0.01 { w_eff / g_eff } else { career_wr };
+                let rec_wr = if g_eff > 0.01 {
+                    w_eff / g_eff
+                } else {
+                    career_wr
+                };
                 let career_weight = 0.35 * decay;
                 let blended_wr = (1.0 - career_weight) * rec_wr + career_weight * career_wr;
                 let eff_wins = ((games as f32) * blended_wr).round() as u32;
@@ -889,7 +968,14 @@ fn fetch_stratz_with_synergy_graphql(token: &str) -> Result<String, PortError> {
     let auth_header = format!("Authorization: Bearer {token}");
     run_curl(
         "https://api.stratz.com/graphql",
-        &["-H", "Content-Type: application/json", "-H", &auth_header, "-d", query],
+        &[
+            "-H",
+            "Content-Type: application/json",
+            "-H",
+            &auth_header,
+            "-d",
+            query,
+        ],
         "STRATZ GraphQL fetch",
     )
 }

@@ -1,7 +1,10 @@
 use super::theme::*;
 use super::viewmodel::*;
 use super::{PickerTarget, TrueSightGuiApp};
-use eframe::egui::{self, Align, Align2, Color32, FontId, Layout, Margin, Rect, RichText, Sense, Stroke, StrokeKind, pos2, vec2};
+use eframe::egui::{
+    self, Align, Align2, Color32, FontId, Layout, Margin, Rect, RichText, Sense, Stroke,
+    StrokeKind, pos2, vec2,
+};
 use truesight_core::domain::{HeroId, Role, Side, TEAM_SIZE};
 use truesight_core::math::DraftAnalysis5v5;
 
@@ -21,11 +24,7 @@ impl TrueSightGuiApp {
         hud_card_fill(ui, |ui| {
             // 1. Score Row
             ui.columns(3, |cols| {
-                cols[0].label(
-                    RichText::new("ALLIES WIN")
-                        .size(10.0)
-                        .color(P_MUTED),
-                );
+                cols[0].label(RichText::new("ALLIES WIN").size(10.0).color(P_MUTED));
                 cols[0].label(
                     RichText::new(format!("{ally_pct:4.1}%"))
                         .size(40.0)
@@ -66,11 +65,7 @@ impl TrueSightGuiApp {
                 });
 
                 cols[2].with_layout(Layout::top_down(Align::Max), |ui| {
-                    ui.label(
-                        RichText::new("ENEMIES WIN")
-                            .size(10.0)
-                            .color(P_MUTED),
-                    );
+                    ui.label(RichText::new("ENEMIES WIN").size(10.0).color(P_MUTED));
                     ui.label(
                         RichText::new(format!("{enemy_pct:4.1}%"))
                             .size(40.0)
@@ -105,12 +100,7 @@ impl TrueSightGuiApp {
             ui.add_space(5.0);
 
             // 3. Four Edge Cards (Meta, Counter, Synergy, Composition)
-            let pair_cnt = analysis
-                .counter_grid
-                .iter()
-                .flatten()
-                .flatten()
-                .count();
+            let pair_cnt = analysis.counter_grid.iter().flatten().flatten().count();
             let mut ally_meta_sum = 0.0_f32;
             let mut enemy_meta_sum = 0.0_f32;
             for slot in 0..TEAM_SIZE {
@@ -229,11 +219,8 @@ impl TrueSightGuiApp {
                                 let h = (w * 9.0 / 16.0).round().min(thumb_row_h);
                                 for i in 0..TEAM_SIZE {
                                     if let Some(p) = self.session.draft.allies[i] {
-                                        let tex = self
-                                            .textures
-                                            .heroes
-                                            .get(&p.hero_id)
-                                            .map(|s| &s.color);
+                                        let tex =
+                                            self.textures.heroes.get(&p.hero_id).map(|s| &s.color);
                                         paint_portrait_16_9(ui, tex, vec2(w, h), P_GEM, 1.5);
                                     } else {
                                         let (r, _) =
@@ -253,11 +240,8 @@ impl TrueSightGuiApp {
                                         );
                                     }
                                     if let Some(p) = self.session.draft.enemies[i] {
-                                        let tex = self
-                                            .textures
-                                            .heroes
-                                            .get(&p.hero_id)
-                                            .map(|s| &s.color);
+                                        let tex =
+                                            self.textures.heroes.get(&p.hero_id).map(|s| &s.color);
                                         paint_portrait_16_9(ui, tex, vec2(w, h), P_DIRE, 1.5);
                                     } else {
                                         let (r, _) =
@@ -400,7 +384,7 @@ impl TrueSightGuiApp {
                     continue;
                 };
                 if let Some(s) = analysis.ally_synergy_grid[i][k] {
-                    if best_syn.map_or(true, |cur| s > cur.2) {
+                    if best_syn.is_none_or(|cur| s > cur.2) {
                         best_syn = Some((a.hero_id, b.hero_id, s));
                     }
                 }
@@ -417,7 +401,7 @@ impl TrueSightGuiApp {
                     continue;
                 };
                 if let Some(c) = analysis.counter_grid[i][j] {
-                    if worst_cnt.map_or(true, |cur| c < cur.3) {
+                    if worst_cnt.is_none_or(|cur| c < cur.3) {
                         worst_cnt = Some((a.hero_id, e.hero_id, i, c));
                     }
                 }
@@ -463,11 +447,7 @@ impl TrueSightGuiApp {
                             .color(P_MUTED),
                         );
                     } else {
-                        ui.label(
-                            RichText::new(&self.status_banner)
-                                .size(11.5)
-                                .color(P_MUTED),
-                        );
+                        ui.label(RichText::new(&self.status_banner).size(11.5).color(P_MUTED));
                     }
 
                     if let Some((_ally_id, enemy_id, slot_idx, cnt)) = worst_cnt {
@@ -478,9 +458,7 @@ impl TrueSightGuiApp {
                                 .hero(enemy_id)
                                 .map(|h| h.display_name.as_str())
                                 .unwrap_or("Enemy");
-                            ui.label(
-                                RichText::new(ne).size(11.5).strong().color(P_GLINT),
-                            );
+                            ui.label(RichText::new(ne).size(11.5).strong().color(P_GLINT));
                             ui.label(
                                 RichText::new(format!(
                                     "counters your Pos {} ({}).",
@@ -714,5 +692,4 @@ impl TrueSightGuiApp {
             }
         }
     }
-
 }

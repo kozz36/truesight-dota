@@ -55,7 +55,13 @@ fn main() {
         let _ = execute_command(&mut session, "enemy 3 axe");
         let _ = execute_command(&mut session, "role 1");
         let no_color = args.iter().any(|a| a == "--no-color");
-        if writeln!(io::stdout(), "{}", render_dashboard_string(&session, !no_color)).is_err() {
+        if writeln!(
+            io::stdout(),
+            "{}",
+            render_dashboard_string(&session, !no_color)
+        )
+        .is_err()
+        {
             std::process::exit(0);
         }
         return;

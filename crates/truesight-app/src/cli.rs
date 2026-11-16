@@ -86,8 +86,8 @@ pub fn render_dashboard_string(session: &AppSession, color: bool) -> String {
             .unwrap_or_else(|| format!("A{}: [Empty Slot]", i + 1));
         out.push_str(&format!(" {:<21}", ally_label));
 
-        for j in 0..TEAM_SIZE {
-            if let Some(delta) = analysis.counter_grid[i][j] {
+        for &cell in &analysis.counter_grid[i] {
+            if let Some(delta) = cell {
                 let pct = delta * 100.0;
                 let cell_color = if pct > 0.15 {
                     g
@@ -133,7 +133,9 @@ pub fn render_dashboard_string(session: &AppSession, color: bool) -> String {
         }
     }
     if !any_syn {
-        out.push_str(&format!("{d}Pick at least 2 allied heroes to see pairwise synergy deltas.{r}"));
+        out.push_str(&format!(
+            "{d}Pick at least 2 allied heroes to see pairwise synergy deltas.{r}"
+        ));
     }
     out.push_str("\n\n");
 
@@ -264,9 +266,7 @@ pub fn execute_command(session: &mut AppSession, line: &str) -> Result<bool, Str
                 "7" | "divine" => Bracket::Divine,
                 "8" | "immortal" => Bracket::Immortal,
                 _ => {
-                    return Err(
-                        "Bracket must be 1..8 or herald..immortal".into(),
-                    );
+                    return Err("Bracket must be 1..8 or herald..immortal".into());
                 }
             };
             session.set_bracket(bracket);
@@ -292,9 +292,9 @@ pub fn execute_command(session: &mut AppSession, line: &str) -> Result<bool, Str
             } else if lower == "none" || lower == "unlink" || lower == "unlinked" {
                 session.set_account_id(None, true);
             } else {
-                let raw = a_str
-                    .parse::<u64>()
-                    .map_err(|_| "Account ID must be a numeric Steam32/Steam64, 'auto', or 'none'".to_string())?;
+                let raw = a_str.parse::<u64>().map_err(|_| {
+                    "Account ID must be a numeric Steam32/Steam64, 'auto', or 'none'".to_string()
+                })?;
                 let s32 = normalize_steam32_id(raw)
                     .ok_or_else(|| "Invalid Steam32/Steam64 account ID".to_string())?;
                 session.set_account_id(Some(s32), true);
@@ -350,10 +350,8 @@ pub fn parse_account_id_arg(args: &[String]) -> Result<Option<Option<u64>>, Stri
     while i < args.len() {
         let val = if args[i] == "--account-id" {
             args.get(i + 1).map(String::as_str)
-        } else if let Some(rest) = args[i].strip_prefix("--account-id=") {
-            Some(rest)
         } else {
-            None
+            args[i].strip_prefix("--account-id=")
         };
         if let Some(raw_str) = val {
             let trimmed = raw_str.trim();
@@ -428,7 +426,7 @@ fn render_cli_frame<W: Write>(
     } else {
         ("", "", "")
     };
-    write!(out, "\x1b[2J\x1b[H{dashboard}\n")?;
+    writeln!(out, "\x1b[2J\x1b[H{dashboard}")?;
     if let Some(err) = last_error {
         writeln!(out, "{red}Error: {err}{reset}")?;
     }
