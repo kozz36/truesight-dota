@@ -2621,13 +2621,15 @@ fn capture_factory_detects_platform_capabilities_and_reports_actionable_degradat
     ));
 
     let win = detect_capture_availability_for("windows", false, false, false, false);
-    assert!(matches!(
+    assert_eq!(
         win,
-        CaptureAvailability::Unavailable {
+        CaptureAvailability::Available {
             backend: CaptureBackendKind::WindowsNative,
-            ref reason,
-        } if reason.contains("Windows") && reason.contains("#12")
-    ));
+            detail: "Windows Win32/GDI (xcap)".into(),
+        }
+    );
+    assert_eq!(win.badge_label(), "CAP: WIN32");
+    assert!(win.is_available());
 
     let other = detect_capture_availability_for("macos", false, false, false, false);
     assert!(matches!(
@@ -2638,22 +2640,150 @@ fn capture_factory_detects_platform_capabilities_and_reports_actionable_degradat
         }
     ));
 
-    // When backend is unavailable (or marked Available for an unimplemented backend),
-    // factory spawns no background worker and guarantees !avail.is_available().
+    // When backend matches host OS (`windows`), worker spawns cleanly; otherwise factory
+    // safely degrades to `Unavailable` (`CAP: MANUAL`) with no background thread.
     let (worker, avail) = spawn_platform_worker_for(&win);
-    assert!(worker.is_none());
-    assert_eq!(avail, win);
-    assert_eq!(avail.badge_label(), "CAP: MANUAL");
-    assert!(!avail.is_available());
+    if cfg!(target_os = "windows") {
+        assert!(worker.is_some());
+        assert_eq!(avail, win);
+        assert_eq!(avail.badge_label(), "CAP: WIN32");
+        assert!(avail.is_available());
+    } else {
+        assert!(worker.is_none());
+        assert_eq!(avail.badge_label(), "CAP: MANUAL");
+        assert!(!avail.is_available());
+    }
 
     let unimplemented_avail = CaptureAvailability::Available {
-        backend: CaptureBackendKind::WindowsNative,
-        detail: "Win32 stub".into(),
+        backend: CaptureBackendKind::WaylandPortal,
+        detail: "Wayland stub".into(),
     };
     let (w2, a2) = spawn_platform_worker_for(&unimplemented_avail);
     assert!(w2.is_none());
     assert!(!a2.is_available());
     assert_eq!(a2.badge_label(), "CAP: MANUAL");
+}
+
+#[test]
+fn windows_capture_filter_and_rgba_strip_reject_browsers_minimized_and_convert_topbar() {
+    use crate::vision::{
+        HeroVisionCatalog, ScreenFrameSource, VisionCaptureAdapter, is_dota2_windows_window,
+        parse_hero_atlas, rgba_to_topbar_rgb_frame,
+    };
+    use truesight_core::domain::{HeroId, Side};
+    use truesight_core::ports::{DraftEvent, DraftEventSource};
+
+    assert!(is_dota2_windows_window(
+        "Dota 2",
+        "dota2.exe",
+        false,
+        1920,
+        1080
+    ));
+    assert!(is_dota2_windows_window(
+        "Dota 2", "Dota 2", false, 2560, 1440
+    ));
+    assert!(is_dota2_windows_window("Dota 2", "", false, 1280, 720));
+
+    assert!(!is_dota2_windows_window(
+        "Dota 2",
+        "dota2.exe",
+        true,
+        1920,
+        1080
+    ));
+    assert!(!is_dota2_windows_window(
+        "Dota 2",
+        "dota2.exe",
+        false,
+        639,
+        1080
+    ));
+    assert!(!is_dota2_windows_window(
+        "Dota 2",
+        "dota2.exe",
+        false,
+        1920,
+        359
+    ));
+    assert!(!is_dota2_windows_window(
+        "Dota 2 - Google Chrome",
+        "Google Chrome",
+        false,
+        1920,
+        1080
+    ));
+    assert!(!is_dota2_windows_window(
+        "Dota 2",
+        "Windows Explorer",
+        false,
+        1920,
+        1080
+    ));
+
+    // Full RGBA window conversion strips alpha, crops top 8% strip, and rejects invalid buffers.
+    assert!(rgba_to_topbar_rgb_frame(&[0u8; 400], 639, 720).is_none());
+    assert!(rgba_to_topbar_rgb_frame(&[0u8; 1280 * 359 * 4], 1280, 359).is_none());
+    assert!(rgba_to_topbar_rgb_frame(&[0u8; 1280 * 720 * 4 - 4], 1280, 720).is_none());
+
+    let atlas = parse_hero_atlas().unwrap();
+    let w = 1280_usize;
+    let h = 720_usize;
+    let mut full_rgba = vec![14_u8; w * h * 4];
+    for px in full_rgba.chunks_exact_mut(4) {
+        px[3] = 255;
+    }
+
+    let paint_rgba_slot = |rgba: &mut [u8], hero_id: u16, rect: crate::vision::TopBarSlotRect| {
+        let hero_rgb = atlas.heroes.get(&HeroId(hero_id)).unwrap();
+        for dy in 0..rect.height {
+            let sy = (dy * atlas.hero_height) / rect.height;
+            for dx in 0..rect.width {
+                let sx = (dx * atlas.hero_width) / rect.width;
+                let s_idx = (sy * atlas.hero_width + sx) * 3;
+                let d_idx = ((rect.y + dy) * w + (rect.x + dx)) * 4;
+                rgba[d_idx] = hero_rgb[s_idx];
+                rgba[d_idx + 1] = hero_rgb[s_idx + 1];
+                rgba[d_idx + 2] = hero_rgb[s_idx + 2];
+                rgba[d_idx + 3] = 128;
+            }
+        }
+    };
+    let (rad_rects, dire_rects) = crate::vision::compute_topbar_slot_rects(w, h);
+    paint_rgba_slot(&mut full_rgba, 1, rad_rects[0]);
+    paint_rgba_slot(&mut full_rgba, 5, dire_rects[0]);
+
+    let frame = rgba_to_topbar_rgb_frame(&full_rgba, w, h).expect("valid topbar strip");
+    assert_eq!(frame.width, 1280);
+    assert_eq!(frame.height, 60);
+    assert_eq!(frame.rgb.len(), 1280 * 60 * 3);
+
+    struct SingleRgbaFrame(Option<crate::vision::RgbFrame>);
+    impl ScreenFrameSource for SingleRgbaFrame {
+        fn capture_frame(
+            &mut self,
+        ) -> Result<Option<crate::vision::RgbFrame>, truesight_core::ports::PortError> {
+            Ok(self.0.take())
+        }
+    }
+
+    let mut adapter = VisionCaptureAdapter::new(
+        SingleRgbaFrame(Some(frame)),
+        HeroVisionCatalog::from_embedded().unwrap(),
+    );
+    let events = adapter.poll_events().unwrap();
+    assert!(events.contains(&DraftEvent::PickDetected {
+        side: Side::Allies,
+        slot: 0,
+        hero_id: HeroId(1),
+        role: Some(truesight_core::domain::Role::Carry),
+    }));
+    assert!(events.contains(&DraftEvent::PickDetected {
+        side: Side::Enemies,
+        slot: 0,
+        hero_id: HeroId(5),
+        role: Some(truesight_core::domain::Role::Carry),
+    }));
 }
 
 #[test]
