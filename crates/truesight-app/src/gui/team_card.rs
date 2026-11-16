@@ -40,7 +40,21 @@ impl TrueSightGuiApp {
         ];
 
         hud_card_fill(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 8.0;
+            let card_w = ui.available_width();
+            let compact_w = card_w < 305.0;
+            let compact_h = ui.available_height() < 340.0;
+            let slot_h = if compact_h { 50.0 } else { 56.0 };
+            let slot_gap = if compact_h { 6.0 } else { 8.0 };
+            let portrait_sz = if compact_w {
+                vec2(48.0, 27.0)
+            } else if compact_h {
+                vec2(52.0, 29.25)
+            } else {
+                vec2(64.0, 36.0)
+            };
+            let net_col_w = if compact_w { 42.0 } else { 54.0 };
+
+            ui.spacing_mut().item_spacing.y = slot_gap;
             // Card Header
             ui.horizontal(|ui| {
                 ui.label(RichText::new(title).size(11.0).strong().color(accent));
@@ -57,7 +71,7 @@ impl TrueSightGuiApp {
                     paint_mini_badge(ui, faction.label(), fac_col, fac_col);
                 });
             });
-            ui.add_space(4.0);
+            ui.add_space(if compact_h { 1.0 } else { 4.0 });
 
             for slot in 0..TEAM_SIZE {
                 let is_picking = self.picker_target == Some(PickerTarget::Slot(side, slot))
@@ -93,7 +107,7 @@ impl TrueSightGuiApp {
                 };
 
                 let (r, _) =
-                    ui.allocate_exact_size(vec2(ui.available_width(), 56.0), Sense::hover());
+                    ui.allocate_exact_size(vec2(ui.available_width(), slot_h), Sense::hover());
                 ui.painter().rect_filled(r, 0.0, bg_fill);
                 ui.painter().rect_stroke(
                     r,
@@ -107,10 +121,10 @@ impl TrueSightGuiApp {
                     accent,
                 );
 
-                // 1. Portrait (64x36, exact 16:9) or dashed '?'
+                // 1. Portrait (exact 16:9) or dashed '?'
                 let portrait_rect = Rect::from_min_size(
-                    pos2(r.min.x + 8.0, (r.center().y - 18.0).round()),
-                    vec2(64.0, 36.0),
+                    pos2(r.min.x + 8.0, (r.center().y - portrait_sz.y * 0.5).round()),
+                    portrait_sz,
                 );
                 if let Some(pick) = current_pick {
                     if let Some(tex) = self.textures.heroes.get(&pick.hero_id).map(|s| &s.color) {
@@ -187,10 +201,10 @@ impl TrueSightGuiApp {
                 };
                 let net_rect = Rect::from_min_max(
                     pos2(
-                        (net_right - 54.0).max(portrait_rect.max.x + 12.0),
-                        r.min.y + 10.0,
+                        (net_right - net_col_w).max(portrait_rect.max.x + 12.0),
+                        r.min.y + 8.0,
                     ),
-                    pos2(net_right, r.max.y - 10.0),
+                    pos2(net_right, r.max.y - 8.0),
                 );
                 {
                     let mut child = ui.new_child(
@@ -205,16 +219,20 @@ impl TrueSightGuiApp {
                         let net_pct = b.net * 100.0;
                         ui.label(
                             RichText::new(fmt_pct(net_pct))
-                                .size(13.5)
+                                .size(if compact_w { 11.5 } else { 13.5 })
                                 .strong()
                                 .color(tone_for_user(net_pct, sign).color()),
                         );
-                        ui.label(RichText::new(net_caption).size(8.5).color(P_MUTED));
+                        ui.label(
+                            RichText::new(net_caption)
+                                .size(if compact_w { 7.5 } else { 8.5 })
+                                .color(P_MUTED),
+                        );
                     } else {
                         ui.add_space(6.0);
                         ui.label(
                             RichText::new("[Enter]")
-                                .size(11.0)
+                                .size(if compact_w { 9.5 } else { 11.0 })
                                 .strong()
                                 .color(if is_picking { P_GEM } else { P_MUTED }),
                         );
@@ -223,12 +241,17 @@ impl TrueSightGuiApp {
 
                 // 4. Clipped Middle 3-line Telemetry Column
                 let mid_rect = Rect::from_min_max(
-                    pos2(portrait_rect.max.x + 8.0, r.min.y + 4.0),
                     pos2(
-                        (net_rect.min.x - 6.0).max(portrait_rect.max.x + 24.0),
+                        portrait_rect.max.x + if compact_w { 6.0 } else { 8.0 },
+                        r.min.y + 4.0,
+                    ),
+                    pos2(
+                        (net_rect.min.x - if compact_w { 4.0 } else { 6.0 })
+                            .max(portrait_rect.max.x + 24.0),
                         r.max.y - 4.0,
                     ),
                 );
+                let tight_mid = mid_rect.width() < 165.0;
                 {
                     let mut child = ui.new_child(
                         egui::UiBuilder::new()
@@ -240,30 +263,72 @@ impl TrueSightGuiApp {
                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                     ui.spacing_mut().interact_size.y = 12.0;
                     ui.spacing_mut().item_spacing.y = 1.5;
+                    let badge_font = if tight_mid { 7.0 } else { 8.5 };
+                    let badge_pad = if tight_mid { 1 } else { 4 };
                     if let Some(pick) = current_pick {
                         let profile = self.session.matrix.hero(pick.hero_id);
                         ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 2.0;
-                            ui.label(RichText::new(role_short[slot]).size(9.0).color(P_MUTED));
+                            ui.spacing_mut().item_spacing.x = if tight_mid { 1.5 } else { 2.0 };
+                            let role_lbl = if tight_mid {
+                                match slot {
+                                    0 => "P1",
+                                    1 => "P2",
+                                    2 => "P3",
+                                    3 => "P4",
+                                    _ => "P5",
+                                }
+                            } else {
+                                role_short[slot]
+                            };
+                            ui.label(
+                                RichText::new(role_lbl)
+                                    .size(if tight_mid { 8.0 } else { 9.0 })
+                                    .color(P_MUTED),
+                            );
                             if let Some(h) = profile {
                                 let atk_lbl = match h.attack_type {
                                     AttackType::Melee => "M",
                                     AttackType::Ranged => "R",
                                 };
-                                paint_mini_badge(ui, atk_lbl, P_SILVER, P_LINE);
+                                paint_mini_badge_scaled(
+                                    ui, atk_lbl, P_SILVER, P_LINE, badge_font, badge_pad,
+                                );
                                 if h.has_disable {
-                                    paint_mini_badge(ui, "DIS", P_CYAN, P_CYAN);
+                                    paint_mini_badge_scaled(
+                                        ui, "DIS", P_CYAN, P_CYAN, badge_font, badge_pad,
+                                    );
                                 }
                                 if h.has_initiation {
-                                    paint_mini_badge(ui, "INIT", P_GEM, P_GEM_DEEP);
+                                    paint_mini_badge_scaled(
+                                        ui,
+                                        if tight_mid { "IN" } else { "INIT" },
+                                        P_GEM,
+                                        P_GEM_DEEP,
+                                        badge_font,
+                                        badge_pad,
+                                    );
                                 }
-                                paint_trend_badge(ui, h.trend_delta * 100.0);
+                                paint_trend_badge_scaled(
+                                    ui,
+                                    h.trend_delta * 100.0,
+                                    badge_font,
+                                    badge_pad,
+                                );
                             }
                             if is_local_you {
-                                paint_mini_badge(ui, "YOU", P_GEM, P_GEM);
+                                paint_mini_badge_scaled(
+                                    ui, "YOU", P_GEM, P_GEM, badge_font, badge_pad,
+                                );
                             }
                             if is_locked {
-                                paint_mini_badge(ui, "LOCK", P_SILVER, P_LINE);
+                                paint_mini_badge_scaled(
+                                    ui,
+                                    if tight_mid { "LCK" } else { "LOCK" },
+                                    P_SILVER,
+                                    P_LINE,
+                                    badge_font,
+                                    badge_pad,
+                                );
                             }
                         });
 
@@ -272,7 +337,10 @@ impl TrueSightGuiApp {
                             .unwrap_or("Unknown");
                         ui.add(
                             egui::Label::new(
-                                RichText::new(hero_name).size(12.5).strong().color(P_GLINT),
+                                RichText::new(hero_name)
+                                    .size(if tight_mid { 11.0 } else { 12.5 })
+                                    .strong()
+                                    .color(P_GLINT),
                             )
                             .truncate(),
                         );
@@ -281,28 +349,41 @@ impl TrueSightGuiApp {
                             let m_pct = b.meta * 100.0;
                             let c_pct = b.cnt * 100.0;
                             let s_pct = b.syn * 100.0;
+                            let stat_sz = if tight_mid { 8.0 } else { 9.5 };
                             ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 2.5;
-                                ui.label(RichText::new("Meta").size(9.5).color(P_MUTED));
+                                ui.spacing_mut().item_spacing.x = if tight_mid { 1.5 } else { 2.5 };
+                                ui.label(
+                                    RichText::new(if tight_mid { "M" } else { "Meta" })
+                                        .size(stat_sz)
+                                        .color(P_MUTED),
+                                );
                                 ui.label(
                                     RichText::new(fmt_val(m_pct))
-                                        .size(9.5)
+                                        .size(stat_sz)
                                         .strong()
                                         .color(tone_for_user(m_pct, sign).color()),
                                 );
-                                ui.label(RichText::new("·").size(9.5).color(P_MUTED));
-                                ui.label(RichText::new("Cnt").size(9.5).color(P_MUTED));
+                                ui.label(RichText::new("·").size(stat_sz).color(P_MUTED));
+                                ui.label(
+                                    RichText::new(if tight_mid { "C" } else { "Cnt" })
+                                        .size(stat_sz)
+                                        .color(P_MUTED),
+                                );
                                 ui.label(
                                     RichText::new(fmt_val(c_pct))
-                                        .size(9.5)
+                                        .size(stat_sz)
                                         .strong()
                                         .color(tone_for_user(c_pct, sign).color()),
                                 );
-                                ui.label(RichText::new("·").size(9.5).color(P_MUTED));
-                                ui.label(RichText::new("Syn").size(9.5).color(P_MUTED));
+                                ui.label(RichText::new("·").size(stat_sz).color(P_MUTED));
+                                ui.label(
+                                    RichText::new(if tight_mid { "S" } else { "Syn" })
+                                        .size(stat_sz)
+                                        .color(P_MUTED),
+                                );
                                 ui.label(
                                     RichText::new(fmt_val(s_pct))
-                                        .size(9.5)
+                                        .size(stat_sz)
                                         .strong()
                                         .color(tone_for_user(s_pct, sign).color()),
                                 );
@@ -312,24 +393,41 @@ impl TrueSightGuiApp {
                         ui.label(
                             RichText::new(format!(
                                 "{} · {}",
-                                role_short[slot],
+                                if tight_mid {
+                                    match slot {
+                                        0 => "P1",
+                                        1 => "P2",
+                                        2 => "P3",
+                                        3 => "P4",
+                                        _ => "P5",
+                                    }
+                                } else {
+                                    role_short[slot]
+                                },
                                 if is_picking { "PICKING" } else { "EMPTY" }
                             ))
-                            .size(9.0)
+                            .size(if tight_mid { 8.0 } else { 9.0 })
                             .color(if is_picking {
                                 P_GEM
                             } else {
                                 P_MUTED
                             }),
                         );
-                        ui.label(
-                            RichText::new("Click to pick hero...")
-                                .size(12.0)
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(if tight_mid {
+                                    "Click to pick..."
+                                } else {
+                                    "Click to pick hero..."
+                                })
+                                .size(if tight_mid { 10.5 } else { 12.0 })
                                 .color(P_MUTED),
+                            )
+                            .truncate(),
                         );
                         ui.label(
                             RichText::new(format!("Synced with Pos {}", slot + 1))
-                                .size(9.5)
+                                .size(if tight_mid { 8.0 } else { 9.5 })
                                 .color(P_MUTED),
                         );
                     }

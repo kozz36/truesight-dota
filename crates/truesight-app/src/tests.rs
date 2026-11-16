@@ -1357,3 +1357,140 @@ fn session_and_cli_surface_capture_availability_and_allow_manual_picks_when_unav
     assert!(session.vision_available);
     assert!(crate::render_dashboard_string(&session, false).contains("Vision: WIN32: LIVE"));
 }
+
+#[cfg(unix)]
+#[test]
+fn linux_install_desktop_prefers_sibling_binary_and_escapes_ampersand_and_spaces() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("workspace root");
+
+    let base_tmp = std::env::temp_dir().join(format!(
+        "ts_desktop_test_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let extract_dir = base_tmp.join("TrueSight & Dota");
+    let fake_home = base_tmp.join("home");
+    let fake_xdg = base_tmp.join("xdg_data");
+    std::fs::create_dir_all(&extract_dir).unwrap();
+    std::fs::create_dir_all(&fake_home).unwrap();
+    std::fs::create_dir_all(&fake_xdg).unwrap();
+
+    for (src_rel, dst_name) in [
+        ("packaging/linux/install-desktop.sh", "install-desktop.sh"),
+        (
+            "packaging/linux/truesight-dota.desktop",
+            "truesight-dota.desktop",
+        ),
+        ("packaging/icons/truesight-dota.png", "truesight-dota.png"),
+    ] {
+        std::fs::copy(repo_root.join(src_rel), extract_dir.join(dst_name)).unwrap();
+    }
+    let script_path = extract_dir.join("install-desktop.sh");
+    std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let sibling_bin = extract_dir.join("truesight-dota");
+    std::fs::write(&sibling_bin, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&sibling_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // Run without arguments and without truesight-dota on PATH: must resolve sibling binary intact.
+    let out = std::process::Command::new(&script_path)
+        .env("HOME", &fake_home)
+        .env("XDG_DATA_HOME", &fake_xdg)
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .expect("run install-desktop.sh");
+    assert!(
+        out.status.success(),
+        "install-desktop.sh failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let desktop_path = fake_xdg.join("applications/truesight-dota.desktop");
+    let desktop_content = std::fs::read_to_string(&desktop_path).unwrap();
+    let expected_sibling = format!("Exec=\"{}\"", sibling_bin.display());
+    assert!(
+        desktop_content.lines().any(|l| l == expected_sibling),
+        "Expected exact line `{expected_sibling}`, got:\n{desktop_content}"
+    );
+    assert!(
+        fake_xdg
+            .join("icons/hicolor/128x128/apps/truesight-dota.png")
+            .exists()
+    );
+
+    // Explicit argument with spaces, `&`, literal `\`, `"`, `$`, and `%` must satisfy both
+    // the Desktop Entry `string` escaping layer and `Exec` double-quoted escaping rules.
+    let tricky_arg = extract_dir.join(r#"ts\dir & "$100%"#);
+    std::fs::write(&tricky_arg, "#!/bin/sh\nexit 0\n").unwrap();
+    let out2 = std::process::Command::new(&script_path)
+        .arg(&tricky_arg)
+        .env("HOME", &fake_home)
+        .env("XDG_DATA_HOME", &fake_xdg)
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .expect("run install-desktop.sh with explicit tricky path");
+    assert!(
+        out2.status.success(),
+        "install-desktop.sh tricky path failed: {}",
+        String::from_utf8_lossy(&out2.stderr)
+    );
+    let desktop2 = std::fs::read_to_string(&desktop_path).unwrap();
+    let expected_escaped = format!(
+        r#"Exec="{}/ts\\\\dir & \\"\\$100%%""#,
+        extract_dir.display()
+    );
+    assert!(
+        desktop2.lines().any(|l| l == expected_escaped),
+        "Expected escaped line `{expected_escaped}`, got:\n{desktop2}"
+    );
+    if std::path::Path::new("/usr/bin/desktop-file-validate").exists() {
+        let val = std::process::Command::new("/usr/bin/desktop-file-validate")
+            .arg(&desktop_path)
+            .output()
+            .expect("run desktop-file-validate");
+        assert!(
+            val.status.success(),
+            "desktop-file-validate rejected generated .desktop:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&val.stdout),
+            String::from_utf8_lossy(&val.stderr)
+        );
+    }
+
+    // Embedded or trailing newline/CR in target path must fail before modifying existing launcher.
+    for (kind, bad_arg) in [
+        (
+            "embedded_lf",
+            format!("{}/bad\npath", extract_dir.display()),
+        ),
+        ("trailing_lf", "/tmp/app\n".to_string()),
+        ("trailing_cr", "/tmp/app\r".to_string()),
+    ] {
+        let out_bad = std::process::Command::new(&script_path)
+            .arg(&bad_arg)
+            .env("HOME", &fake_home)
+            .env("XDG_DATA_HOME", &fake_xdg)
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .expect("run install-desktop.sh with invalid CR/LF path");
+        assert!(
+            !out_bad.status.success(),
+            "install-desktop.sh must reject {kind} in Exec path"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&desktop_path).unwrap(),
+            desktop2,
+            "Rejected {kind} path must leave existing .desktop file unchanged"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&base_tmp);
+}

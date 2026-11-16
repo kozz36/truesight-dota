@@ -324,20 +324,22 @@ pub(super) fn paint_avg_square_cell(ui: &mut egui::Ui, size: Vec2, avg_pct: Opti
     painter.rect_filled(rect, 0.0, P_INDIGO_2);
     painter.rect_stroke(rect, 0.0, Stroke::new(1.0_f32, P_LINE), StrokeKind::Inside);
 
+    let val_font = (size.x * 0.25).clamp(7.5, 11.0);
+    let y_off = (size.y * 0.13).clamp(3.0, 5.5);
     if let Some(pct) = avg_pct {
         let col = tone_for_user(pct, 1.0).color();
         painter.text(
-            pos2(rect.center().x, rect.center().y - 5.0),
+            pos2(rect.center().x, rect.center().y - y_off),
             Align2::CENTER_CENTER,
             fmt_pct(pct),
-            FontId::proportional(11.0),
+            FontId::proportional(val_font),
             col,
         );
         // Centered zero-tick bar
         let bar_w = rect.width() * 0.72;
-        let bar_h = 4.0;
+        let bar_h = (size.y * 0.09).clamp(2.5, 4.0);
         let bar_rect = Rect::from_center_size(
-            pos2(rect.center().x, rect.center().y + 8.0),
+            pos2(rect.center().x, rect.center().y + y_off + 2.0),
             vec2(bar_w, bar_h),
         );
         painter.rect_filled(bar_rect, 0.0, P_INDIGO_3);
@@ -367,7 +369,7 @@ pub(super) fn paint_avg_square_cell(ui: &mut egui::Ui, size: Vec2, avg_pct: Opti
             rect.center(),
             Align2::CENTER_CENTER,
             "...",
-            FontId::proportional(11.0),
+            FontId::proportional(val_font),
             P_MUTED,
         );
     }
@@ -384,20 +386,23 @@ pub(super) fn paint_total_corner_cell(ui: &mut egui::Ui, size: Vec2, edge_pct: f
     } else {
         P_INDIGO_2
     };
+    let val_font = (size.x * 0.25).clamp(7.5, 11.5);
+    let sub_font = (size.x * 0.17).clamp(6.0, 8.5);
+    let y_off = (size.y * 0.13).clamp(3.0, 5.5);
     painter.rect_filled(rect, 0.0, bg);
     painter.rect_stroke(rect, 0.0, Stroke::new(1.5_f32, col), StrokeKind::Inside);
     painter.text(
-        pos2(rect.center().x, rect.center().y - 5.0),
+        pos2(rect.center().x, rect.center().y - y_off),
         Align2::CENTER_CENTER,
         fmt_pct(edge_pct),
-        FontId::proportional(11.5),
+        FontId::proportional(val_font),
         col,
     );
     painter.text(
-        pos2(rect.center().x, rect.center().y + 8.0),
+        pos2(rect.center().x, rect.center().y + y_off + 2.5),
         Align2::CENTER_CENTER,
         label,
-        FontId::proportional(8.5),
+        FontId::proportional(sub_font),
         P_MUTED,
     );
 }
@@ -430,22 +435,43 @@ pub(super) fn paint_matrix_scale_bar(ui: &mut egui::Ui, left_label: &str, right_
     });
 }
 
+pub(super) fn paint_mini_badge_scaled(
+    ui: &mut egui::Ui,
+    text: &str,
+    text_color: Color32,
+    border_color: Color32,
+    font_size: f32,
+    pad_x: i8,
+) {
+    egui::Frame::NONE
+        .fill(P_INDIGO_1)
+        .stroke(Stroke::new(1.0_f32, border_color))
+        .inner_margin(Margin::symmetric(pad_x, 1))
+        .show(ui, |ui| {
+            ui.label(
+                RichText::new(text)
+                    .size(font_size)
+                    .strong()
+                    .color(text_color),
+            );
+        });
+}
+
 pub(super) fn paint_mini_badge(
     ui: &mut egui::Ui,
     text: &str,
     text_color: Color32,
     border_color: Color32,
 ) {
-    egui::Frame::NONE
-        .fill(P_INDIGO_1)
-        .stroke(Stroke::new(1.0_f32, border_color))
-        .inner_margin(Margin::symmetric(4, 1))
-        .show(ui, |ui| {
-            ui.label(RichText::new(text).size(8.5).strong().color(text_color));
-        });
+    paint_mini_badge_scaled(ui, text, text_color, border_color, 8.5, 4);
 }
 
-pub(super) fn paint_trend_badge(ui: &mut egui::Ui, trend_pct: f32) {
+pub(super) fn paint_trend_badge_scaled(
+    ui: &mut egui::Ui,
+    trend_pct: f32,
+    font_size: f32,
+    pad_x: i8,
+) {
     if trend_pct.abs() < EPS_PCT {
         return;
     }
@@ -455,11 +481,12 @@ pub(super) fn paint_trend_badge(ui: &mut egui::Ui, trend_pct: f32) {
     egui::Frame::NONE
         .fill(P_INDIGO_1)
         .stroke(Stroke::new(1.0_f32, border))
-        .inner_margin(Margin::symmetric(4, 1))
+        .inner_margin(Margin::symmetric(pad_x, 1))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                let (tri_rect, _) = ui.allocate_exact_size(vec2(6.0, 6.0), Sense::hover());
+                ui.spacing_mut().item_spacing.x = if pad_x <= 2 { 1.5 } else { 2.0 };
+                let tri_sz = if font_size < 8.0 { 5.0 } else { 6.0 };
+                let (tri_rect, _) = ui.allocate_exact_size(vec2(tri_sz, tri_sz), Sense::hover());
                 let pts = if up {
                     vec![
                         pos2(tri_rect.center().x, tri_rect.min.y),
@@ -477,10 +504,87 @@ pub(super) fn paint_trend_badge(ui: &mut egui::Ui, trend_pct: f32) {
                     .add(Shape::convex_polygon(pts, col, Stroke::NONE));
                 ui.label(
                     RichText::new(format!("{:.1}", trend_pct.abs()))
-                        .size(8.5)
+                        .size(font_size)
                         .strong()
                         .color(col),
                 );
             });
         });
+}
+
+/// Builds a 64x64 RGBA window/taskbar icon centered on the embedded Gem of True Sight.
+pub(crate) fn build_gem_window_icon() -> Option<egui::IconData> {
+    let atlas = parse_hero_atlas()?;
+    if atlas.gem_width == 0 || atlas.gem_height == 0 {
+        return None;
+    }
+    let expected_len = atlas
+        .gem_width
+        .checked_mul(atlas.gem_height)?
+        .checked_mul(3)?;
+    if atlas.gem_rgb.len() < expected_len {
+        return None;
+    }
+
+    const OUT_SIZE: usize = 64;
+    const GEM_W: usize = 56;
+    const GEM_H: usize = 42;
+    const OFF_X: usize = (OUT_SIZE - GEM_W) / 2;
+    const OFF_Y: usize = (OUT_SIZE - GEM_H) / 2;
+
+    let mut rgba = vec![0u8; OUT_SIZE * OUT_SIZE * 4];
+    for y in 0..OUT_SIZE {
+        for x in 0..OUT_SIZE {
+            let idx = (y * OUT_SIZE + x) * 4;
+            let inner = 3..OUT_SIZE - 3;
+            let in_corner_cut = !inner.contains(&x) && !inner.contains(&y);
+            if in_corner_cut {
+                continue;
+            }
+            let is_border = x == 0
+                || y == 0
+                || x == OUT_SIZE - 1
+                || y == OUT_SIZE - 1
+                || ((x == 1 || x == OUT_SIZE - 2) && inner.contains(&y))
+                || ((y == 1 || y == OUT_SIZE - 2) && inner.contains(&x));
+            let base = if is_border { P_GEM_DEEP } else { P_VOID };
+            rgba[idx] = base.r();
+            rgba[idx + 1] = base.g();
+            rgba[idx + 2] = base.b();
+            rgba[idx + 3] = 255;
+        }
+    }
+
+    // Bilinear-sample the embedded 4:3 Gem RGB raster inside the dark TrueSight badge.
+    for dy in 0..GEM_H {
+        let sy = (dy as f32 + 0.5) * (atlas.gem_height as f32 / GEM_H as f32) - 0.5;
+        let y0 = (sy.floor() as isize).clamp(0, atlas.gem_height as isize - 1) as usize;
+        let y1 = (y0 + 1).min(atlas.gem_height - 1);
+        let wy = (sy - y0 as f32).clamp(0.0, 1.0);
+
+        for dx in 0..GEM_W {
+            let sx = (dx as f32 + 0.5) * (atlas.gem_width as f32 / GEM_W as f32) - 0.5;
+            let x0 = (sx.floor() as isize).clamp(0, atlas.gem_width as isize - 1) as usize;
+            let x1 = (x0 + 1).min(atlas.gem_width - 1);
+            let wx = (sx - x0 as f32).clamp(0.0, 1.0);
+
+            let sample = |x: usize, y: usize, c: usize| -> f32 {
+                atlas.gem_rgb[(y * atlas.gem_width + x) * 3 + c] as f32
+            };
+            let out_idx = ((OFF_Y + dy) * OUT_SIZE + (OFF_X + dx)) * 4;
+            for c in 0..3 {
+                let top = sample(x0, y0, c) * (1.0 - wx) + sample(x1, y0, c) * wx;
+                let bot = sample(x0, y1, c) * (1.0 - wx) + sample(x1, y1, c) * wx;
+                let val = (top * (1.0 - wy) + bot * wy).round().clamp(0.0, 255.0) as u8;
+                rgba[out_idx + c] = val;
+            }
+            rgba[out_idx + 3] = 255;
+        }
+    }
+
+    Some(egui::IconData {
+        rgba,
+        width: OUT_SIZE as u32,
+        height: OUT_SIZE as u32,
+    })
 }

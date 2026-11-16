@@ -59,9 +59,15 @@ jobs:
         run: |
           mkdir -p dist-linux stage-linux
           install -m 755 target/release/truesight-dota stage-linux/truesight-dota
-          cp packaging/gamestate_integration_truesight.cfg LICENSE README.md stage-linux/
+          install -m 755 packaging/linux/install-desktop.sh stage-linux/install-desktop.sh
+          cp packaging/gamestate_integration_truesight.cfg \
+            packaging/linux/truesight-dota.desktop \
+            packaging/icons/truesight-dota.png \
+            LICENSE README.md stage-linux/
           tar -C stage-linux -czf dist-linux/truesight-dota-linux-x86_64.tar.gz \
-            truesight-dota gamestate_integration_truesight.cfg LICENSE README.md
+            truesight-dota gamestate_integration_truesight.cfg \
+            truesight-dota.desktop install-desktop.sh truesight-dota.png \
+            LICENSE README.md
 
       - name: Upload Linux release artifact
         uses: actions/upload-artifact@v4

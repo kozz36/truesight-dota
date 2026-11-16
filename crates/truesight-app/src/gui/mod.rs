@@ -25,6 +25,10 @@ use truesight_adapters::gsi::BoundedGsiListener;
 use truesight_adapters::sync::{AccountLinkConfig, normalize_steam32_id, save_account_config};
 use truesight_adapters::vision::BoundedVisionWorker;
 use truesight_core::domain::{Role, Side, TEAM_SIZE};
+use truesight_core::math::DraftAnalysis5v5;
+
+const MIN_UNSCROLLED_W: f32 = 940.0;
+const MIN_UNSCROLLED_H: f32 = 660.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MatrixTab {
@@ -56,6 +60,7 @@ pub struct TrueSightGuiApp {
     drag_slot: Option<(Side, usize)>,
     suggest_filter: String,
     status_banner: String,
+    options_open: bool,
     account_editor_open: bool,
     account_input: String,
     pub(super) enemy_scout_role: Option<Role>,
@@ -91,6 +96,7 @@ impl TrueSightGuiApp {
             drag_slot: None,
             suggest_filter: String::new(),
             status_banner,
+            options_open: false,
             account_editor_open: false,
             account_input,
             enemy_scout_role: None,
@@ -164,6 +170,11 @@ impl Default for SlotTelemetry {
 #[derive(Debug, Clone)]
 pub struct LayoutRects {
     pub top_bar: Rect,
+    pub options_button: Rect,
+    pub reset_button: Rect,
+    pub bracket_bar: Rect,
+    pub options_window: Option<Rect>,
+    pub options_demo_button: Option<Rect>,
     pub allies: Rect,
     pub oracle: Rect,
     pub enemies: Rect,
@@ -173,10 +184,17 @@ pub struct LayoutRects {
     pub enemy_slots: [SlotTelemetry; TEAM_SIZE],
     pub enemy_scout_cards: Vec<Rect>,
     pub matrix_cell_size: Vec2,
+    pub matrix_grid_rect: Rect,
     pub matrix_h_gap: f32,
     pub matrix_v_gap: f32,
     pub matrix_bottom_y: f32,
+    pub docked_comp: Option<Rect>,
+    pub comp_enemies_hdr: Rect,
     pub suggested_last_col_max_x: f32,
+    pub suggested_comfort_hdr_max_x: f32,
+    pub suggested_row_rects: Vec<Rect>,
+    pub suggested_pick_rects: Vec<Rect>,
+    pub scrollable_fallback: bool,
 }
 
 impl TrueSightGuiApp {
@@ -193,6 +211,11 @@ impl TrueSightGuiApp {
         let (analysis, _) = self.session.evaluate();
         let mut rects = LayoutRects {
             top_bar: Rect::NOTHING,
+            options_button: Rect::NOTHING,
+            reset_button: Rect::NOTHING,
+            bracket_bar: Rect::NOTHING,
+            options_window: None,
+            options_demo_button: None,
             allies: Rect::NOTHING,
             oracle: Rect::NOTHING,
             enemies: Rect::NOTHING,
@@ -202,10 +225,17 @@ impl TrueSightGuiApp {
             enemy_slots: [SlotTelemetry::default(); TEAM_SIZE],
             enemy_scout_cards: Vec::new(),
             matrix_cell_size: Vec2::ZERO,
+            matrix_grid_rect: Rect::NOTHING,
             matrix_h_gap: 0.0,
             matrix_v_gap: 0.0,
             matrix_bottom_y: 0.0,
+            docked_comp: None,
+            comp_enemies_hdr: Rect::NOTHING,
             suggested_last_col_max_x: 0.0,
+            suggested_comfort_hdr_max_x: 0.0,
+            suggested_row_rects: Vec::new(),
+            suggested_pick_rects: Vec::new(),
+            scrollable_fallback: false,
         };
 
         egui::CentralPanel::default()
@@ -215,92 +245,36 @@ impl TrueSightGuiApp {
                     .inner_margin(Margin::same(10)),
             )
             .show(ctx, |ui| {
-                // 1. Top Bar
-                rects.top_bar = self.render_top_bar(ui);
-                ui.add_space(10.0);
+                let avail_w = ui.available_width();
+                let avail_h = ui.available_height();
+                let needs_scroll = avail_w < MIN_UNSCROLLED_W || avail_h < MIN_UNSCROLLED_H;
+                rects.scrollable_fallback = needs_scroll;
 
-                // 2. Top Row: Allies (356px) | Oracle (flex) | Enemies (356px)
-                let total_w = ui.available_width();
-                let side_w = 356.0_f32.min(total_w * 0.275);
-                let gap = 10.0;
-                let center_w = (total_w - 2.0 * side_w - 2.0 * gap).max(360.0);
-                let top_row_h = 368.0_f32;
-
-                ui.horizontal_top(|ui| {
-                    ui.spacing_mut().item_spacing.x = gap;
-                    ui.allocate_ui_with_layout(
-                        vec2(side_w, top_row_h),
-                        Layout::top_down(Align::Min),
-                        |ui| {
-                            rects.allies = self.render_team_card(
-                                ui,
-                                &analysis,
-                                Side::Allies,
-                                &mut rects.ally_slots,
+                let layout_w = avail_w.max(MIN_UNSCROLLED_W);
+                let layout_h = avail_h.max(MIN_UNSCROLLED_H);
+                if needs_scroll {
+                    egui::ScrollArea::both()
+                        .id_salt("truesight_viewport_fallback_scroll")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.allocate_ui_with_layout(
+                                vec2(layout_w, layout_h),
+                                Layout::top_down(Align::Min),
+                                |ui| {
+                                    self.render_workspace_body(
+                                        ui, &analysis, &mut rects, layout_w, layout_h,
+                                    );
+                                },
                             );
-                        },
-                    );
-                    ui.allocate_ui_with_layout(
-                        vec2(center_w, top_row_h),
-                        Layout::top_down(Align::Min),
-                        |ui| {
-                            rects.oracle = self.render_oracle_card(
-                                ui,
-                                &analysis,
-                                &mut rects.enemy_scout_cards,
-                            );
-                        },
-                    );
-                    ui.allocate_ui_with_layout(
-                        vec2(side_w, top_row_h),
-                        Layout::top_down(Align::Min),
-                        |ui| {
-                            rects.enemies = self.render_team_card(
-                                ui,
-                                &analysis,
-                                Side::Enemies,
-                                &mut rects.enemy_slots,
-                            );
-                        },
-                    );
-                });
-
-                ui.add_space(10.0);
-
-                // 3. Bottom Row: Suggested Picks (flex) | 5v5 Matrix / Comp (square-coupled)
-                let bottom_h = ui.available_height().max(320.0);
-                let ideal_cell = ((bottom_h - 134.0) / 7.0).floor().clamp(32.0, 56.0);
-                let matrix_w = (7.0 * ideal_cell + 6.0 * 4.0 + 20.0)
-                    .min(total_w * 0.34)
-                    .max(380.0);
-                let recs_w = (total_w - matrix_w - gap).max(480.0);
-
-                ui.horizontal_top(|ui| {
-                    ui.spacing_mut().item_spacing.x = gap;
-                    ui.allocate_ui_with_layout(
-                        vec2(recs_w, bottom_h),
-                        Layout::top_down(Align::Min),
-                        |ui| {
-                            let (s_rect, last_x) = self.render_suggested_picks_card(ui);
-                            rects.suggested = s_rect;
-                            rects.suggested_last_col_max_x = last_x;
-                        },
-                    );
-                    ui.allocate_ui_with_layout(
-                        vec2(matrix_w, bottom_h),
-                        Layout::top_down(Align::Min),
-                        |ui| {
-                            let (m_rect, cell_sz, h_gap, v_gap, bottom_y) =
-                                self.render_matrix_card(ui, &analysis);
-                            rects.matrix = m_rect;
-                            rects.matrix_cell_size = cell_sz;
-                            rects.matrix_h_gap = h_gap;
-                            rects.matrix_v_gap = v_gap;
-                            rects.matrix_bottom_y = bottom_y;
-                        },
-                    );
-                });
+                        });
+                } else {
+                    self.render_workspace_body(ui, &analysis, &mut rects, layout_w, layout_h);
+                }
             });
+
+        let (opts_win, opts_demo) = self.render_options_window(ctx);
+        rects.options_window = opts_win;
+        rects.options_demo_button = opts_demo;
 
         if self.drag_slot.is_some() {
             ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
@@ -375,6 +349,133 @@ impl TrueSightGuiApp {
 
         rects
     }
+
+    fn render_workspace_body(
+        &mut self,
+        ui: &mut egui::Ui,
+        analysis: &DraftAnalysis5v5,
+        rects: &mut LayoutRects,
+        total_w: f32,
+        total_h: f32,
+    ) {
+        let gap = if total_w < 1120.0 { 8.0 } else { 10.0 };
+        let compact_h = total_h < 760.0;
+
+        // 1. Top Bar
+        let top_out = self.render_top_bar(ui);
+        rects.top_bar = top_out.bar;
+        rects.options_button = top_out.options_button;
+        rects.reset_button = top_out.reset_button;
+        rects.bracket_bar = top_out.bracket_bar;
+        ui.add_space(if compact_h { 8.0 } else { 10.0 });
+
+        // 2. Top Row: Allies (238..356px) | Oracle (flex) | Enemies (238..356px)
+        let side_w = (total_w * 0.275).clamp(238.0, 356.0);
+        let center_w = (total_w - 2.0 * side_w - 2.0 * gap).max(320.0);
+        let top_row_h = if compact_h { 324.0_f32 } else { 368.0_f32 };
+
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            ui.allocate_ui_with_layout(
+                vec2(side_w, top_row_h),
+                Layout::top_down(Align::Min),
+                |ui| {
+                    rects.allies =
+                        self.render_team_card(ui, analysis, Side::Allies, &mut rects.ally_slots);
+                },
+            );
+            ui.allocate_ui_with_layout(
+                vec2(center_w, top_row_h),
+                Layout::top_down(Align::Min),
+                |ui| {
+                    rects.oracle =
+                        self.render_oracle_card(ui, analysis, &mut rects.enemy_scout_cards);
+                },
+            );
+            ui.allocate_ui_with_layout(
+                vec2(side_w, top_row_h),
+                Layout::top_down(Align::Min),
+                |ui| {
+                    rects.enemies =
+                        self.render_team_card(ui, analysis, Side::Enemies, &mut rects.enemy_slots);
+                },
+            );
+        });
+
+        ui.add_space(if compact_h { 8.0 } else { 10.0 });
+
+        // 3. Bottom Row: Suggested Picks (flex) | 5v5 Matrix / Comp (square-coupled)
+        let bottom_h = ui.available_height().max(240.0);
+        let ideal_cell = ((bottom_h - 122.0) / 7.0).floor().clamp(22.0, 56.0);
+        let matrix_min_w = if total_w < 1100.0 { 276.0 } else { 360.0 };
+        let matrix_max_w = (total_w * 0.36).max(matrix_min_w);
+        let matrix_w = (7.0 * ideal_cell + 6.0 * 4.0 + 24.0).clamp(matrix_min_w, matrix_max_w);
+        let recs_w = (total_w - matrix_w - gap).max(320.0);
+
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            ui.allocate_ui_with_layout(
+                vec2(recs_w, bottom_h),
+                Layout::top_down(Align::Min),
+                |ui| {
+                    let s_out = self.render_suggested_picks_card(ui);
+                    rects.suggested = s_out.card;
+                    rects.suggested_last_col_max_x = s_out.last_col_max_x;
+                    rects.suggested_comfort_hdr_max_x = s_out.comfort_hdr_max_x;
+                    rects.suggested_row_rects = s_out.row_rects;
+                    rects.suggested_pick_rects = s_out.pick_rects;
+                },
+            );
+            let dock_comp = bottom_h >= 740.0;
+            ui.allocate_ui_with_layout(
+                vec2(matrix_w, bottom_h),
+                Layout::top_down(Align::Min),
+                |ui| {
+                    if dock_comp {
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        let matrix_h = (bottom_h * 0.56).clamp(380.0, 496.0);
+                        let comp_h = (bottom_h - matrix_h - gap).max(220.0);
+                        let mut m_out = None;
+                        ui.allocate_ui_with_layout(
+                            vec2(matrix_w, matrix_h),
+                            Layout::top_down(Align::Min),
+                            |ui| {
+                                m_out = Some(self.render_matrix_card(ui, analysis, true));
+                            },
+                        );
+                        ui.add_space(gap);
+                        let mut comp_out = None;
+                        ui.allocate_ui_with_layout(
+                            vec2(matrix_w, comp_h),
+                            Layout::top_down(Align::Min),
+                            |ui| {
+                                comp_out = Some(self.render_comp_card(ui, analysis));
+                            },
+                        );
+                        if let (Some(m), Some((c_rect, c_hdr))) = (m_out, comp_out) {
+                            rects.matrix = m.card.union(c_rect);
+                            rects.matrix_grid_rect = m.grid;
+                            rects.matrix_cell_size = m.cell_size;
+                            rects.matrix_h_gap = m.h_gap;
+                            rects.matrix_v_gap = m.v_gap;
+                            rects.matrix_bottom_y = m.bottom_y;
+                            rects.docked_comp = Some(c_rect);
+                            rects.comp_enemies_hdr = c_hdr;
+                        }
+                    } else {
+                        let m = self.render_matrix_card(ui, analysis, false);
+                        rects.matrix = m.card;
+                        rects.matrix_grid_rect = m.grid;
+                        rects.matrix_cell_size = m.cell_size;
+                        rects.matrix_h_gap = m.h_gap;
+                        rects.matrix_v_gap = m.v_gap;
+                        rects.matrix_bottom_y = m.bottom_y;
+                        rects.comp_enemies_hdr = m.comp_enemies_hdr;
+                    }
+                },
+            );
+        });
+    }
 }
 
 impl eframe::App for TrueSightGuiApp {
@@ -384,15 +485,26 @@ impl eframe::App for TrueSightGuiApp {
     }
 }
 
+/// Builds the desktop viewport configuration with low-resolution bounds, Wayland `app_id`, and the Gem icon.
+pub(super) fn build_viewport_builder() -> egui::ViewportBuilder {
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([1180.0, 700.0])
+        .with_min_inner_size([640.0, 440.0])
+        .with_app_id("truesight-dota")
+        .with_title("TrueSight Dota — 5v5 Live Draft Oracle");
+    if let Some(icon) = theme::build_gem_window_icon() {
+        viewport = viewport.with_icon(std::sync::Arc::new(icon));
+    }
+    viewport
+}
+
 pub fn run_gui(
     session: AppSession,
     gsi_listener: Option<BoundedGsiListener>,
     vision_worker: Option<BoundedVisionWorker>,
 ) -> Result<(), String> {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1468.0, 960.0])
-            .with_title("TrueSight Dota — 5v5 Live Draft Oracle"),
+        viewport: build_viewport_builder(),
         ..Default::default()
     };
     eframe::run_native(

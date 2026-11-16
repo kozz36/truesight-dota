@@ -32,6 +32,7 @@ New-Item -ItemType Directory -Path $StageDir -Force | Out-Null
 Copy-Item -LiteralPath $ExePath -Destination (Join-Path $StageDir "truesight-dota.exe")
 Copy-Item -LiteralPath (Join-Path $PackagingDir "gamestate_integration_truesight.cfg") -Destination (Join-Path $StageDir "gamestate_integration_truesight.cfg")
 Copy-Item -LiteralPath (Join-Path $ScriptDir "install-gsi.ps1") -Destination (Join-Path $StageDir "install-gsi.ps1")
+Copy-Item -LiteralPath (Join-Path $ScriptDir "truesight-dota.ico") -Destination (Join-Path $StageDir "truesight-dota.ico")
 Copy-Item -LiteralPath (Join-Path $RepoRoot "LICENSE") -Destination (Join-Path $StageDir "LICENSE")
 Copy-Item -LiteralPath (Join-Path $RepoRoot "README.md") -Destination (Join-Path $StageDir "README.md")
 

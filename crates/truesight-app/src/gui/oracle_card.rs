@@ -22,18 +22,24 @@ impl TrueSightGuiApp {
             + self.session.draft.enemies.iter().flatten().count();
 
         hud_card_fill(ui, |ui| {
+            let card_w = ui.available_width();
+            let card_h = ui.available_height();
+            let compact_w = card_w < 460.0;
+            let compact_h = card_h < 340.0;
+            let score_sz = if compact_w || compact_h { 30.0 } else { 40.0 };
+
             // 1. Score Row
             ui.columns(3, |cols| {
                 cols[0].label(RichText::new("ALLIES WIN").size(10.0).color(P_MUTED));
                 cols[0].label(
                     RichText::new(format!("{ally_pct:4.1}%"))
-                        .size(40.0)
+                        .size(score_sz)
                         .strong()
                         .color(P_GEM),
                 );
 
                 cols[1].vertical_centered(|ui| {
-                    ui.add_space(8.0);
+                    ui.add_space(if compact_h { 4.0 } else { 8.0 });
                     let tag_col = tone_for_user(lead, 1.0).color();
                     let tag_word = if lead >= EPS_PCT {
                         "FAVORED"
@@ -44,11 +50,11 @@ impl TrueSightGuiApp {
                     };
                     egui::Frame::NONE
                         .stroke(Stroke::new(1.0_f32, tag_col))
-                        .inner_margin(Margin::symmetric(8, 3))
+                        .inner_margin(Margin::symmetric(if compact_w { 5 } else { 8 }, 3))
                         .show(ui, |ui| {
                             ui.label(
                                 RichText::new(format!("{tag_word} {}", fmt_pct(lead)))
-                                    .size(10.5)
+                                    .size(if compact_w { 9.5 } else { 10.5 })
                                     .strong()
                                     .color(tag_col),
                             );
@@ -59,7 +65,7 @@ impl TrueSightGuiApp {
                             "{} · {picked_total} / 10 picked",
                             self.session.draft.bracket.label()
                         ))
-                        .size(10.0)
+                        .size(9.5)
                         .color(P_MUTED),
                     );
                 });
@@ -68,7 +74,7 @@ impl TrueSightGuiApp {
                     ui.label(RichText::new("ENEMIES WIN").size(10.0).color(P_MUTED));
                     ui.label(
                         RichText::new(format!("{enemy_pct:4.1}%"))
-                            .size(40.0)
+                            .size(score_sz)
                             .strong()
                             .color(P_DIRE),
                     );
@@ -157,17 +163,34 @@ impl TrueSightGuiApp {
                     let top_col = tone_for_user(*val_pct, 1.0).color();
                     let fr = egui::Frame::NONE
                         .fill(P_INDIGO_2)
-                        .inner_margin(Margin::symmetric(8, 7))
+                        .inner_margin(Margin::symmetric(
+                            if compact_w { 5 } else { 8 },
+                            if compact_h { 5 } else { 7 },
+                        ))
                         .show(&mut cols[idx], |ui| {
                             ui.set_min_width(ui.available_width());
-                            ui.label(RichText::new(*label).size(10.0).color(P_MUTED));
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(*label)
+                                        .size(if compact_w { 9.5 } else { 10.0 })
+                                        .color(P_MUTED),
+                                )
+                                .truncate(),
+                            );
                             ui.label(
                                 RichText::new(fmt_pct(*val_pct))
-                                    .size(18.0)
+                                    .size(if compact_w { 14.5 } else { 18.0 })
                                     .strong()
                                     .color(top_col),
                             );
-                            ui.label(RichText::new(sub).size(9.5).color(P_MUTED));
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(sub)
+                                        .size(if compact_w { 9.0 } else { 9.5 })
+                                        .color(P_MUTED),
+                                )
+                                .truncate(),
+                            );
                         });
                     let r = fr.response.rect;
                     cols[idx].painter().rect_filled(
@@ -178,34 +201,49 @@ impl TrueSightGuiApp {
                 }
             });
 
-            ui.add_space(5.0);
+            ui.add_space(if compact_h { 3.0 } else { 5.0 });
 
             // 4. Insight Strip (Strongest Pair + Hardest Counter)
-            self.render_insight_strip(ui, analysis);
+            self.render_insight_strip(ui, analysis, compact_h);
 
-            ui.add_space(5.0);
+            ui.add_space(if compact_h { 3.0 } else { 5.0 });
 
             // 5. Draft Order (10 slots) & Bans (16 slots) side-by-side
-            let thumb_row_h = 26.0_f32;
+            let thumb_row_h = if compact_h { 20.0_f32 } else { 26.0_f32 };
+            let thumb_gap = if compact_w { 2.0_f32 } else { 3.0_f32 };
             ui.columns(2, |cols| {
                 // Draft Order Box
                 egui::Frame::NONE
                     .fill(P_INDIGO_2)
                     .stroke(Stroke::new(1.0_f32, P_INDIGO_3))
-                    .inner_margin(Margin::symmetric(8, 6))
+                    .inner_margin(Margin::symmetric(
+                        if compact_w { 6 } else { 8 },
+                        if compact_h { 4 } else { 6 },
+                    ))
                     .show(&mut cols[0], |ui| {
                         let inner_w = ui.available_width();
                         ui.set_min_width(inner_w);
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new("DRAFT ORDER").size(9.5).color(P_MUTED));
+                            ui.label(
+                                RichText::new(if inner_w < 200.0 {
+                                    "ORDER"
+                                } else {
+                                    "DRAFT ORDER"
+                                })
+                                .size(9.5)
+                                .color(P_MUTED),
+                            );
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                ui.label(
-                                    RichText::new(format!(
-                                        "TARGET · {}",
-                                        self.session.draft.target_role.label()
-                                    ))
-                                    .size(9.5)
-                                    .color(P_MUTED),
+                                let tgt_text = if inner_w < 200.0 {
+                                    format!("P{}", self.session.draft.target_role.index() + 1)
+                                } else {
+                                    format!("TARGET · {}", self.session.draft.target_role.label())
+                                };
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(tgt_text).size(9.5).color(P_MUTED),
+                                    )
+                                    .truncate(),
                                 );
                             });
                         });
@@ -214,8 +252,8 @@ impl TrueSightGuiApp {
                             vec2(inner_w, thumb_row_h),
                             Layout::left_to_right(Align::Center),
                             |ui| {
-                                ui.spacing_mut().item_spacing.x = 3.0;
-                                let w = ((inner_w - 9.0 * 3.0) / 10.0).max(20.0);
+                                ui.spacing_mut().item_spacing.x = thumb_gap;
+                                let w = ((inner_w - 9.0 * thumb_gap) / 10.0).max(11.0);
                                 let h = (w * 9.0 / 16.0).round().min(thumb_row_h);
                                 for i in 0..TEAM_SIZE {
                                     if let Some(p) = self.session.draft.allies[i] {
@@ -269,7 +307,10 @@ impl TrueSightGuiApp {
                 egui::Frame::NONE
                     .fill(P_INDIGO_2)
                     .stroke(Stroke::new(1.0_f32, P_INDIGO_3))
-                    .inner_margin(Margin::symmetric(8, 6))
+                    .inner_margin(Margin::symmetric(
+                        if compact_w { 6 } else { 8 },
+                        if compact_h { 4 } else { 6 },
+                    ))
                     .show(&mut cols[1], |ui| {
                         let inner_w = ui.available_width();
                         ui.set_min_width(inner_w);
@@ -283,7 +324,7 @@ impl TrueSightGuiApp {
                                     .add(
                                         egui::Button::new(
                                             RichText::new(if ban_active {
-                                                "CLOSE BAN"
+                                                "CLOSE"
                                             } else {
                                                 "+ BAN"
                                             })
@@ -316,9 +357,9 @@ impl TrueSightGuiApp {
                             vec2(inner_w, thumb_row_h),
                             Layout::left_to_right(Align::Center),
                             |ui| {
-                                ui.spacing_mut().item_spacing.x = 3.0;
+                                ui.spacing_mut().item_spacing.x = thumb_gap;
                                 let slots_shown = 8usize;
-                                let w = ((inner_w - 7.0 * 3.0) / 8.0).max(24.0);
+                                let w = ((inner_w - 7.0 * thumb_gap) / 8.0).max(14.0);
                                 let h = (w * 9.0 / 16.0).round().min(thumb_row_h);
                                 for idx in 0..slots_shown {
                                     if let Some(&hid) = banned_ids.get(idx) {
@@ -373,7 +414,12 @@ impl TrueSightGuiApp {
         })
     }
 
-    fn render_insight_strip(&self, ui: &mut egui::Ui, analysis: &DraftAnalysis5v5) {
+    fn render_insight_strip(
+        &self,
+        ui: &mut egui::Ui,
+        analysis: &DraftAnalysis5v5,
+        compact_h: bool,
+    ) {
         let mut best_syn: Option<(HeroId, HeroId, f32)> = None;
         for i in 0..TEAM_SIZE {
             let Some(a) = self.session.draft.allies[i] else {
@@ -408,18 +454,29 @@ impl TrueSightGuiApp {
             }
         }
 
+        let strip_compact = compact_h || ui.available_width() < 460.0;
         let fr = egui::Frame::NONE
             .fill(P_INDIGO_2)
-            .inner_margin(Margin::symmetric(10, 7))
+            .inner_margin(Margin::symmetric(
+                if strip_compact { 8 } else { 10 },
+                if strip_compact { 5 } else { 7 },
+            ))
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = if strip_compact { 4.0 } else { 6.0 };
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    let txt_sz = if strip_compact { 10.5 } else { 11.5 };
                     if let Some((ha, hb, syn)) = best_syn {
                         let ta = self.textures.heroes.get(&ha).map(|s| &s.color);
                         let tb = self.textures.heroes.get(&hb).map(|s| &s.color);
-                        paint_portrait_16_9(ui, ta, vec2(40.0, 22.0), P_LINE, 1.0);
-                        paint_portrait_16_9(ui, tb, vec2(40.0, 22.0), P_LINE, 1.0);
+                        let p_sz = if strip_compact {
+                            vec2(32.0, 18.0)
+                        } else {
+                            vec2(40.0, 22.0)
+                        };
+                        paint_portrait_16_9(ui, ta, p_sz, P_LINE, 1.0);
+                        paint_portrait_16_9(ui, tb, p_sz, P_LINE, 1.0);
                         let na = self
                             .session
                             .matrix
@@ -434,7 +491,7 @@ impl TrueSightGuiApp {
                             .unwrap_or("Ally");
                         ui.label(
                             RichText::new(format!("{na} + {nb}"))
-                                .size(11.5)
+                                .size(txt_sz)
                                 .strong()
                                 .color(P_GLINT),
                         );
@@ -443,11 +500,18 @@ impl TrueSightGuiApp {
                                 "is your best pair ({} synergy).",
                                 fmt_pct(syn * 100.0)
                             ))
-                            .size(11.5)
+                            .size(txt_sz)
                             .color(P_MUTED),
                         );
                     } else {
-                        ui.label(RichText::new(&self.status_banner).size(11.5).color(P_MUTED));
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(&self.status_banner)
+                                    .size(txt_sz)
+                                    .color(P_MUTED),
+                            )
+                            .wrap(),
+                        );
                     }
 
                     if let Some((_ally_id, enemy_id, slot_idx, cnt)) = worst_cnt {
@@ -458,14 +522,14 @@ impl TrueSightGuiApp {
                                 .hero(enemy_id)
                                 .map(|h| h.display_name.as_str())
                                 .unwrap_or("Enemy");
-                            ui.label(RichText::new(ne).size(11.5).strong().color(P_GLINT));
+                            ui.label(RichText::new(ne).size(txt_sz).strong().color(P_GLINT));
                             ui.label(
                                 RichText::new(format!(
                                     "counters your Pos {} ({}).",
                                     slot_idx + 1,
                                     fmt_pct(cnt * 100.0)
                                 ))
-                                .size(11.5)
+                                .size(txt_sz)
                                 .color(P_MUTED),
                             );
                         }
@@ -482,19 +546,29 @@ impl TrueSightGuiApp {
 
     fn render_enemy_scout_strip(&mut self, ui: &mut egui::Ui, scout_cards_out: &mut Vec<Rect>) {
         let active_role = self.active_enemy_scout_role();
-        let role_labels = ["POS 1", "POS 2", "POS 3", "POS 4", "POS 5"];
-        let card_size = vec2(48.0, 27.0);
-        let gap = 5.0_f32;
+        let avail_w = ui.available_width();
+        let compact_w = avail_w < 460.0;
+        let role_labels = if compact_w {
+            ["P1", "P2", "P3", "P4", "P5"]
+        } else {
+            ["POS 1", "POS 2", "POS 3", "POS 4", "POS 5"]
+        };
+        let card_size = if compact_w {
+            vec2(44.0, 24.75)
+        } else {
+            vec2(48.0, 27.0)
+        };
+        let gap = if compact_w { 4.0_f32 } else { 5.0_f32 };
 
         egui::Frame::NONE
             .fill(P_INDIGO_2)
             .stroke(Stroke::new(1.0_f32, P_DIRE_DEEP))
-            .inner_margin(Margin::symmetric(8, 4))
+            .inner_margin(Margin::symmetric(if compact_w { 6 } else { 8 }, 4))
             .show(ui, |ui| {
                 let inner_w = ui.available_width();
                 ui.set_min_width(inner_w);
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.spacing_mut().item_spacing.x = if compact_w { 3.0 } else { 4.0 };
                     ui.label(
                         RichText::new("ENEMY SCOUT")
                             .size(9.0)
@@ -514,16 +588,19 @@ impl TrueSightGuiApp {
                             1.0_f32,
                             if selected { P_DIRE } else { P_LINE },
                         ))
-                        .min_size(vec2(36.0, 15.0));
+                        .min_size(vec2(if compact_w { 26.0 } else { 36.0 }, 15.0));
                         if ui.add(btn).clicked() {
                             self.enemy_scout_role = Some(role);
                         }
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.label(
-                            RichText::new(format!("{} · Neutral WR", active_role.label()))
-                                .size(8.5)
-                                .color(P_MUTED),
+                        let lbl = if compact_w {
+                            active_role.label().to_string()
+                        } else {
+                            format!("{} · Neutral WR", active_role.label())
+                        };
+                        ui.add(
+                            egui::Label::new(RichText::new(lbl).size(8.5).color(P_MUTED)).truncate(),
                         );
                     });
                 });
@@ -628,11 +705,12 @@ impl TrueSightGuiApp {
             .stroke(Stroke::new(1.0_f32, P_GEM))
             .inner_margin(Margin::symmetric(8, 6))
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
+                let search_w = (ui.available_width() * 0.42).clamp(110.0, 190.0);
+                ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new(&label).size(10.5).strong().color(P_GEM));
                     let resp = ui.add(
                         egui::TextEdit::singleline(&mut self.picker_search)
-                            .desired_width(190.0)
+                            .desired_width(search_w)
                             .hint_text("Type hero name & press Enter..."),
                     );
                     if self.focus_picker_input {
@@ -651,22 +729,20 @@ impl TrueSightGuiApp {
                         self.picker_target = None;
                         return;
                     }
-                    ui.horizontal_wrapped(|ui| {
-                        for (idx, &(hid, ref hname)) in matches.iter().take(6).enumerate() {
-                            let txt = if idx == 0 && !self.picker_search.trim().is_empty() {
-                                RichText::new(format!("[Enter] {hname}"))
-                                    .size(10.5)
-                                    .strong()
-                                    .color(P_GEM)
-                            } else {
-                                RichText::new(hname.as_str()).size(10.5).color(P_GLINT)
-                            };
-                            if ui.small_button(txt).clicked() {
-                                self.apply_picker_choice(target, hid, hname);
-                                break;
-                            }
+                    for (idx, &(hid, ref hname)) in matches.iter().take(6).enumerate() {
+                        let txt = if idx == 0 && !self.picker_search.trim().is_empty() {
+                            RichText::new(format!("[Enter] {hname}"))
+                                .size(10.5)
+                                .strong()
+                                .color(P_GEM)
+                        } else {
+                            RichText::new(hname.as_str()).size(10.5).color(P_GLINT)
+                        };
+                        if ui.small_button(txt).clicked() {
+                            self.apply_picker_choice(target, hid, hname);
+                            break;
                         }
-                    });
+                    }
                 });
             });
     }

@@ -495,3 +495,343 @@ fn v4_enemy_scout_strip_renders_overlaid_portraits_switches_roles_and_yields_to_
         r_picking.oracle
     );
 }
+
+#[test]
+fn viewport_sets_low_res_bounds_wayland_app_id_and_gem_icon() {
+    let icon = theme::build_gem_window_icon().expect("gem window icon must build from atlas");
+    assert_eq!(icon.width, 64);
+    assert_eq!(icon.height, 64);
+    assert_eq!(icon.rgba.len(), 64 * 64 * 4);
+    // Center region must contain bright Gem green channel energy rather than flat solid fill
+    let center_green_max = icon.rgba.chunks_exact(4).map(|px| px[1]).max().unwrap_or(0);
+    assert!(
+        center_green_max > 140,
+        "expected visible Gem green luminance, max green={center_green_max}"
+    );
+
+    let vb = build_viewport_builder();
+    assert_eq!(vb.min_inner_size, Some(vec2(640.0, 440.0)));
+    assert_eq!(vb.inner_size, Some(vec2(1180.0, 700.0)));
+    assert_eq!(vb.app_id.as_deref(), Some("truesight-dota"));
+    assert!(vb.icon.is_some(), "viewport must carry the Gem window icon");
+}
+
+#[test]
+fn responsive_layout_fits_low_resolution_and_half_screen_viewports() {
+    let mut app = TrueSightGuiApp::new(make_5v5_gui_session(), None, None);
+    for viewport in [vec2(960.0, 680.0), vec2(1024.0, 720.0), vec2(1280.0, 720.0)] {
+        let ctx = egui::Context::default();
+        for tab in [MatrixTab::Counter, MatrixTab::Synergy, MatrixTab::Comp] {
+            app.matrix_tab = tab;
+            let r = render_at_viewport(&mut app, &ctx, viewport);
+
+            assert!(
+                r.top_bar.max.x <= viewport.x && r.top_bar.height() < 80.0,
+                "viewport={viewport:?} tab={tab:?} top_bar overflowed: {:?}",
+                r.top_bar
+            );
+            assert!(
+                r.top_bar.contains_rect(r.options_button),
+                "viewport={viewport:?} OPTIONS button {:?} outside top_bar {:?}",
+                r.options_button,
+                r.top_bar
+            );
+            assert!(
+                r.allies.max.x < r.oracle.min.x
+                    && r.oracle.max.x < r.enemies.min.x
+                    && r.enemies.max.x <= viewport.x,
+                "viewport={viewport:?} tab={tab:?} top row overlap/overflow: allies={:?} oracle={:?} enemies={:?}",
+                r.allies,
+                r.oracle,
+                r.enemies
+            );
+            assert!(
+                (r.allies.max.y - r.oracle.max.y).abs() <= 2.0
+                    && (r.allies.max.y - r.enemies.max.y).abs() <= 2.0,
+                "viewport={viewport:?} tab={tab:?} top row misaligned",
+            );
+            assert!(
+                r.suggested.max.x < r.matrix.min.x
+                    && r.matrix.max.x <= viewport.x
+                    && r.matrix.max.y <= viewport.y,
+                "viewport={viewport:?} tab={tab:?} bottom row overflow: suggested={:?} matrix={:?}",
+                r.suggested,
+                r.matrix
+            );
+            assert!(
+                (r.suggested.max.y - r.matrix.max.y).abs() <= 2.0,
+                "viewport={viewport:?} tab={tab:?} bottom row height misaligned: suggested={:?} matrix={:?}",
+                r.suggested,
+                r.matrix
+            );
+            assert!(
+                (r.matrix_cell_size.x - r.matrix_cell_size.y).abs() <= 0.5,
+                "viewport={viewport:?} matrix cells not square: {:?}",
+                r.matrix_cell_size
+            );
+            if tab != MatrixTab::Comp {
+                assert!(
+                    r.matrix_bottom_y <= r.matrix.max.y,
+                    "viewport={viewport:?} tab={tab:?} matrix bottom {} exceeded {:?}",
+                    r.matrix_bottom_y,
+                    r.matrix
+                );
+            }
+            for (side_name, slots) in [("allies", &r.ally_slots), ("enemies", &r.enemy_slots)] {
+                for (i, s) in slots.iter().enumerate() {
+                    let ratio = s.portrait.width() / s.portrait.height().max(1.0);
+                    assert!(
+                        (ratio - 16.0 / 9.0).abs() < 0.06,
+                        "viewport={viewport:?} {side_name} P{} portrait ratio {ratio}",
+                        i + 1
+                    );
+                    assert!(s.portrait.max.x < s.mid.min.x && s.mid.max.x < s.net.min.x);
+                }
+            }
+        }
+    }
+
+    // Inline picker open at minimum viewport (960x680) must also preserve non-overlapping bounds
+    app.picker_target = Some(PickerTarget::Slot(Side::Allies, 1));
+    let ctx = egui::Context::default();
+    let r_pick = render_at_viewport(&mut app, &ctx, vec2(960.0, 680.0));
+    assert!(
+        r_pick.allies.max.x < r_pick.oracle.min.x
+            && r_pick.oracle.max.x < r_pick.enemies.min.x
+            && r_pick.enemies.max.x <= 960.0,
+        "960x680 picker top row overflowed: allies={:?} oracle={:?} enemies={:?}",
+        r_pick.allies,
+        r_pick.oracle,
+        r_pick.enemies
+    );
+}
+
+#[test]
+fn top_bar_moves_dev_telemetry_and_actions_into_options_panel() {
+    let mut app = TrueSightGuiApp::new(AppSession::new().unwrap(), None, None);
+    let ctx = egui::Context::default();
+    let viewport = vec2(960.0, 680.0);
+
+    let r0 = render_at_viewport(&mut app, &ctx, viewport);
+    assert!(!app.options_open);
+    assert!(r0.options_window.is_none());
+    assert!(r0.options_button.width() > 30.0);
+    assert!(
+        (r0.options_button.center().y - r0.reset_button.center().y).abs() <= 1.0
+            && (r0.options_button.center().y - r0.bracket_bar.center().y).abs() <= 1.0
+            && (r0.options_button.height() - r0.reset_button.height()).abs() <= 1.5,
+        "OPTIONS/RESET/brackets misaligned: opts={:?} reset={:?} brackets={:?}",
+        r0.options_button,
+        r0.reset_button,
+        r0.bracket_bar
+    );
+    assert!(
+        r0.options_button.min.x - r0.bracket_bar.max.x >= 10.0,
+        "OPTIONS too close to brackets: gap={}",
+        r0.options_button.min.x - r0.bracket_bar.max.x
+    );
+
+    let click_pos = r0.options_button.center();
+    for pressed in [true, false] {
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), viewport)),
+            events: vec![
+                egui::Event::PointerMoved(click_pos),
+                egui::Event::PointerButton {
+                    pos: click_pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            app.render_frame(ctx);
+        });
+    }
+    assert!(
+        app.options_open,
+        "clicking OPTIONS button must open OPTIONS panel"
+    );
+
+    let r1 = render_at_viewport(&mut app, &ctx, viewport);
+    let win_rect = r1
+        .options_window
+        .expect("OPTIONS window rect must be reported");
+    assert!(
+        win_rect.max.x <= viewport.x && win_rect.max.y <= viewport.y,
+        "OPTIONS window overflowed viewport: {win_rect:?}"
+    );
+    let demo_rect = r1
+        .options_demo_button
+        .expect("DEMO 5V5 button must live inside OPTIONS panel");
+    let demo_pos = demo_rect.center();
+    for pressed in [true, false] {
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), viewport)),
+            events: vec![
+                egui::Event::PointerMoved(demo_pos),
+                egui::Event::PointerButton {
+                    pos: demo_pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            app.render_frame(ctx);
+        });
+    }
+    assert!(
+        app.session.draft.allies[0].is_some(),
+        "DEMO 5V5 inside OPTIONS must populate demo draft"
+    );
+}
+
+#[test]
+fn pinned_pick_column_and_centered_matrix_hold_at_low_res() {
+    let mut app = TrueSightGuiApp::new(make_5v5_gui_session(), None, None);
+    let ctx = egui::Context::default();
+    let mut pick_w_960 = 0.0_f32;
+    let mut pick_w_1468 = 0.0_f32;
+
+    for viewport in [vec2(960.0, 680.0), vec2(1024.0, 720.0), vec2(1468.0, 960.0)] {
+        for tab in [MatrixTab::Counter, MatrixTab::Synergy] {
+            app.matrix_tab = tab;
+            let r = render_at_viewport(&mut app, &ctx, viewport);
+            assert!(
+                r.suggested_last_col_max_x >= r.suggested.max.x - 36.0
+                    && r.suggested_last_col_max_x <= r.suggested.max.x - 4.0,
+                "viewport={viewport:?} PICK column must remain pinned at right edge of suggested card: last_x={} vs suggested={:?}",
+                r.suggested_last_col_max_x,
+                r.suggested
+            );
+            assert!(
+                !r.suggested_row_rects.is_empty()
+                    && r.suggested_row_rects.len() == r.suggested_pick_rects.len(),
+                "viewport={viewport:?} row/pick rect mismatch"
+            );
+            for (idx, (row_r, pick_r)) in r
+                .suggested_row_rects
+                .iter()
+                .zip(r.suggested_pick_rects.iter())
+                .enumerate()
+            {
+                assert!(
+                    (pick_r.center().y - row_r.center().y).abs() <= 1.2,
+                    "viewport={viewport:?} row {idx} PICK misaligned: pick={:?} row={:?}",
+                    pick_r,
+                    row_r
+                );
+                assert!(
+                    pick_r.height() <= 22.0,
+                    "viewport={viewport:?} row {idx} PICK stretched vertically: {:?}",
+                    pick_r
+                );
+            }
+            if tab == MatrixTab::Counter && viewport == vec2(960.0, 680.0) {
+                pick_w_960 = r.suggested_pick_rects[0].width();
+                assert!(
+                    r.suggested_comfort_hdr_max_x <= r.suggested_pick_rects[0].min.x,
+                    "960x680 COMFORT column ({}) should scale to fit left of PICK ({})",
+                    r.suggested_comfort_hdr_max_x,
+                    r.suggested_pick_rects[0].min.x
+                );
+            }
+            if tab == MatrixTab::Counter && viewport == vec2(1468.0, 960.0) {
+                pick_w_1468 = r.suggested_pick_rects[0].width();
+            }
+            let left_pad = r.matrix_grid_rect.min.x - r.matrix.min.x;
+            let right_pad = r.matrix.max.x - r.matrix_grid_rect.max.x;
+            assert!(
+                (left_pad - right_pad).abs() <= 3.0,
+                "viewport={viewport:?} tab={tab:?} matrix grid not centered: left_pad={left_pad} right_pad={right_pad} grid={:?} card={:?}",
+                r.matrix_grid_rect,
+                r.matrix
+            );
+        }
+    }
+    assert!(
+        pick_w_960 < pick_w_1468,
+        "PICK button must scale down in compact viewport (960={pick_w_960}, 1468={pick_w_1468})"
+    );
+}
+
+#[test]
+fn tall_window_docks_symmetrical_composition_below_matrix() {
+    let mut app = TrueSightGuiApp::new(make_5v5_gui_session(), None, None);
+    let ctx = egui::Context::default();
+
+    let r_short = render_at_viewport(&mut app, &ctx, vec2(1468.0, 960.0));
+    assert!(
+        r_short.docked_comp.is_none(),
+        "960px tall window should keep tabbed COMP instead of docking"
+    );
+    app.matrix_tab = MatrixTab::Comp;
+    let r_comp = render_at_viewport(&mut app, &ctx, vec2(1468.0, 960.0));
+    assert!(
+        (r_comp.comp_enemies_hdr.max.x - (r_comp.matrix.max.x - 10.0)).abs() <= 6.0,
+        "COMP ENEMIES header must align flush right: hdr={:?} card={:?}",
+        r_comp.comp_enemies_hdr,
+        r_comp.matrix
+    );
+
+    app.matrix_tab = MatrixTab::Counter;
+    let r_tall = render_at_viewport(&mut app, &ctx, vec2(1440.0, 1320.0));
+    let docked = r_tall
+        .docked_comp
+        .expect("tall 1440x1320 window must dock COMPOSITION below active matrix");
+    assert!(
+        docked.min.y > r_tall.matrix.min.y + 300.0
+            && docked.max.x <= 1440.0
+            && (docked.max.y - r_tall.suggested.max.y).abs() <= 2.0,
+        "docked COMP bounds invalid: docked={docked:?} matrix={:?} suggested={:?}",
+        r_tall.matrix,
+        r_tall.suggested
+    );
+    assert!(
+        (r_tall.comp_enemies_hdr.max.x - (docked.max.x - 10.0)).abs() <= 6.0,
+        "docked COMP ENEMIES header must align flush right: hdr={:?} docked={docked:?}",
+        r_tall.comp_enemies_hdr
+    );
+}
+
+#[test]
+fn dpi_scaled_low_resolution_viewport_uses_scrollable_fallback_without_overlap() {
+    let mut app = TrueSightGuiApp::new(make_5v5_gui_session(), None, None);
+
+    // Non-scaled 960x680 must NOT trigger outer scrollable fallback.
+    let ctx_1x = egui::Context::default();
+    let r_full = render_at_viewport(&mut app, &ctx_1x, vec2(960.0, 680.0));
+    assert!(!r_full.scrollable_fallback);
+
+    // Simulate 720p @ 125% (1024x576 logical), 768p @ 150% (910x512 logical), and min_inner_size (640x440).
+    for (ppp, logical_vp) in [
+        (1.25_f32, vec2(1024.0, 576.0)),
+        (1.5_f32, vec2(910.0, 512.0)),
+        (1.5_f32, vec2(640.0, 440.0)),
+    ] {
+        let ctx = egui::Context::default();
+        ctx.set_pixels_per_point(ppp);
+        let r = render_at_viewport(&mut app, &ctx, logical_vp);
+        assert!(
+            r.scrollable_fallback,
+            "ppp={ppp} logical={logical_vp:?} must activate scrollable fallback"
+        );
+        assert!(
+            r.allies.max.x < r.oracle.min.x
+                && r.oracle.max.x < r.enemies.min.x
+                && r.suggested.max.x < r.matrix.min.x,
+            "ppp={ppp} logical={logical_vp:?} cards overlapped under fallback"
+        );
+        assert!(
+            !r.suggested_row_rects.is_empty()
+                && (r.suggested_pick_rects[0].center().y - r.suggested_row_rects[0].center().y)
+                    .abs()
+                    <= 1.2
+        );
+    }
+}
