@@ -6,29 +6,51 @@ use truesight_core::ports::PortError;
 #[cfg(target_os = "windows")]
 use xcap::Window;
 
-/// Validates Windows window metadata so minimized/helper windows and browsers mentioning
-/// `"Dota 2"` in a tab title are excluded.
+fn is_dota2_title(title: &str) -> bool {
+    let title_norm = title.trim();
+    title_norm.eq_ignore_ascii_case("dota 2") || title_norm.eq_ignore_ascii_case("dota2")
+}
+
+/// Validates Windows window metadata and verified PID executable identity so minimized windows,
+/// unverified/elevated lookups (`None`), and third-party processes titled `"Dota 2"` are rejected.
 pub fn is_dota2_windows_window(
     title: &str,
-    app_name: &str,
+    owner_exe: Option<&str>,
     minimized: bool,
     width: u32,
     height: u32,
 ) -> bool {
-    if minimized || width < 640 || height < 360 {
+    if minimized || width < 640 || height < 360 || !is_dota2_title(title) {
         return false;
     }
-    let title_norm = title.trim();
-    let title_matches =
-        title_norm.eq_ignore_ascii_case("dota 2") || title_norm.eq_ignore_ascii_case("dota2");
-    if !title_matches {
+    let Some(raw_exe) = owner_exe else {
         return false;
+    };
+    let basename = raw_exe.trim().rsplit(['\\', '/']).next().unwrap_or("");
+    basename.eq_ignore_ascii_case("dota2.exe")
+}
+
+/// Parses `tasklist /FI "PID eq <pid>" /FO CSV /NH` output and returns the verified executable
+/// image name when a row matches `expected_pid`.
+pub fn parse_tasklist_exe_for_pid(csv_output: &str, expected_pid: u32) -> Option<String> {
+    let pid_str = expected_pid.to_string();
+    for raw_line in csv_output.lines() {
+        let line = raw_line.trim();
+        let Some(after_open_quote) = line.strip_prefix('"') else {
+            continue;
+        };
+        let Some((exe, rest)) = after_open_quote.split_once("\",\"") else {
+            continue;
+        };
+        let Some((pid_col, _)) = rest.split_once('"') else {
+            continue;
+        };
+        let exe = exe.trim();
+        if !exe.is_empty() && pid_col.trim() == pid_str {
+            return Some(exe.to_string());
+        }
     }
-    let app_lower = app_name.trim().to_ascii_lowercase();
-    let app_base = app_lower.strip_suffix(".exe").unwrap_or(&app_lower);
-    // Empty `app_name` (e.g. restricted version-info read) falls back to exact title matching,
-    // while non-empty executable/product names must belong to Dota 2.
-    app_base.is_empty() || app_base == "dota2" || app_base == "dota 2"
+    None
 }
 
 /// Extracts the top 8% Dota 2 hero top-bar strip from a full-window RGBA buffer (`width x height`),
@@ -55,12 +77,29 @@ pub fn rgba_to_topbar_rgb_frame(rgba: &[u8], width: usize, height: usize) -> Opt
     Some(RgbFrame::with_source_height(width, strip_h, height, rgb))
 }
 
-/// Live Windows Win32/GDI top-bar frame source capturing the `"Dota 2"` window via `xcap`
-/// (`PrintWindow` / GDI fallback, avoiding Windows Graphics Capture yellow privacy borders).
+#[cfg(target_os = "windows")]
+fn resolve_windows_pid_exe(pid: u32) -> Option<String> {
+    if pid == 0 {
+        return None;
+    }
+    let mut cmd = std::process::Command::new("tasklist");
+    crate::platform::configure_background_command(&mut cmd);
+    let out = cmd
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_tasklist_exe_for_pid(&String::from_utf8_lossy(&out.stdout), pid)
+}
+
+/// Live Windows Win32/GDI top-bar frame source capturing the `"Dota 2"` window (`dota2.exe`) via
+/// `xcap` (`PrintWindow` / GDI fallback, avoiding Windows Graphics Capture yellow privacy borders).
 #[cfg(target_os = "windows")]
 #[derive(Debug, Default)]
 pub struct WindowsTopBarFrameSource {
-    cached_window: Option<Window>,
+    cached_window: Option<(Window, u32)>,
 }
 
 #[cfg(target_os = "windows")]
@@ -69,50 +108,57 @@ impl WindowsTopBarFrameSource {
         Self::default()
     }
 
-    fn matches_dota_window(win: &Window) -> bool {
-        let Ok(minimized) = win.is_minimized() else {
-            return false;
-        };
-        let Ok(title) = win.title() else {
-            return false;
-        };
-        let app_name = win.app_name().unwrap_or_default();
-        let Ok(width) = win.width() else {
-            return false;
-        };
-        let Ok(height) = win.height() else {
-            return false;
-        };
-        is_dota2_windows_window(&title, &app_name, minimized, width, height)
+    fn inspect_candidate(win: &Window) -> Option<(String, bool, u32, u32, u32)> {
+        let minimized = win.is_minimized().ok()?;
+        let title = win.title().ok()?;
+        let width = win.width().ok()?;
+        let height = win.height().ok()?;
+        let pid = win.pid().ok()?;
+        if minimized || width < 640 || height < 360 || !is_dota2_title(&title) {
+            return None;
+        }
+        Some((title, minimized, width, height, pid))
     }
 
-    fn find_dota_window() -> Result<Option<Window>, PortError> {
+    fn verify_dota_window(win: &Window) -> Option<u32> {
+        let (title, minimized, width, height, pid) = Self::inspect_candidate(win)?;
+        let exe = resolve_windows_pid_exe(pid);
+        is_dota2_windows_window(&title, exe.as_deref(), minimized, width, height).then_some(pid)
+    }
+
+    fn find_dota_window() -> Result<Option<(Window, u32)>, PortError> {
         let windows = Window::all()
             .map_err(|e| PortError(format!("Windows window enumeration failed: {e}")))?;
-        Ok(windows.into_iter().find(Self::matches_dota_window))
+        for win in windows {
+            if let Some(pid) = Self::verify_dota_window(&win) {
+                return Ok(Some((win, pid)));
+            }
+        }
+        Ok(None)
     }
 }
 
 #[cfg(target_os = "windows")]
 impl ScreenFrameSource for WindowsTopBarFrameSource {
     fn capture_frame(&mut self) -> Result<Option<RgbFrame>, PortError> {
-        if let Some(ref win) = self.cached_window
-            && !Self::matches_dota_window(win)
+        if let Some((ref win, cached_pid)) = self.cached_window
+            && Self::inspect_candidate(win).is_none_or(|(_, _, _, _, pid)| pid != cached_pid)
         {
             self.cached_window = None;
         }
         if self.cached_window.is_none() {
             self.cached_window = Self::find_dota_window()?;
         }
-        let Some(ref win) = self.cached_window else {
+        let Some((ref win, cached_pid)) = self.cached_window else {
             return Ok(None);
         };
         let img = match win.capture_image() {
             Ok(img) => img,
             Err(err) => {
-                // Closing or minimizing Dota 2 mid-poll transitions to WaitingForGame (`Ok(None)`),
-                // whereas capture failures on an open visible window surface as `CaptureError`.
-                let still_visible = Self::matches_dota_window(win);
+                // Closing or minimizing Dota 2 mid-poll transitions cleanly to WaitingForGame,
+                // whereas failures on a still-open verified Dota 2 window surface as CaptureError.
+                let still_visible =
+                    Self::inspect_candidate(win).is_some_and(|(_, _, _, _, pid)| pid == cached_pid);
                 self.cached_window = None;
                 if !still_visible {
                     return Ok(None);

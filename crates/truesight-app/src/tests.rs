@@ -1296,6 +1296,7 @@ fn session_and_cli_surface_capture_availability_and_allow_manual_picks_when_unav
     }
     assert_eq!(session.vision_status, "WIN32: ERR");
     assert!(!session.vision_available);
+    assert!(session.vision_error);
     assert!(session.vision_detail.contains("handle lost"));
     assert!(
         session
@@ -1303,6 +1304,37 @@ fn session_and_cli_surface_capture_availability_and_allow_manual_picks_when_unav
             .to_ascii_lowercase()
             .contains("manual")
     );
+    let cli_err1 = crate::render_dashboard_string(&session, false);
+    assert!(
+        cli_err1.contains("Vision: WIN32: ERR") && cli_err1.contains("handle lost"),
+        "CLI dashboard must render failure reason alongside ERR badge: {cli_err1}"
+    );
+
+    // Changing the failure reason under the same `WIN32: ERR` badge must trigger redraw & update CLI output.
+    steps
+        .lock()
+        .unwrap()
+        .push_back(Err(truesight_core::ports::PortError(
+            "Windows window enumeration failed: access denied".into(),
+        )));
+    worker.reset();
+    let mut changed_on_second_err = false;
+    let err2_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while std::time::Instant::now() < err2_deadline {
+        if session.poll_live_sources(None, Some(&mut worker))
+            && session.vision_detail.contains("access denied")
+        {
+            changed_on_second_err = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(
+        changed_on_second_err,
+        "Changing error detail under same WIN32: ERR badge must trigger redraw"
+    );
+    let cli_err2 = crate::render_dashboard_string(&session, false);
+    assert!(cli_err2.contains("access denied"));
 
     steps
         .lock()

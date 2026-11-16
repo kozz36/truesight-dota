@@ -2685,58 +2685,99 @@ fn capture_factory_detects_platform_capabilities_and_reports_actionable_degradat
 fn windows_capture_filter_and_rgba_strip_reject_browsers_minimized_and_convert_topbar() {
     use crate::vision::{
         HeroVisionCatalog, ScreenFrameSource, VisionCaptureAdapter, is_dota2_windows_window,
-        parse_hero_atlas, rgba_to_topbar_rgb_frame,
+        parse_hero_atlas, parse_tasklist_exe_for_pid, rgba_to_topbar_rgb_frame,
     };
     use truesight_core::domain::{HeroId, Side};
     use truesight_core::ports::{DraftEvent, DraftEventSource};
 
     assert!(is_dota2_windows_window(
         "Dota 2",
-        "dota2.exe",
+        Some("dota2.exe"),
         false,
         1920,
         1080
     ));
     assert!(is_dota2_windows_window(
-        "Dota 2", "Dota 2", false, 2560, 1440
+        "dota2",
+        Some(r"C:\Steam\steamapps\common\dota 2 beta\game\bin\win64\dota2.exe"),
+        false,
+        2560,
+        1440
     ));
-    assert!(is_dota2_windows_window("Dota 2", "", false, 1280, 720));
 
+    // Reject unverified PID lookups, non-dota2 executables with same title, minimized, or tiny windows.
+    assert!(!is_dota2_windows_window("Dota 2", None, false, 1280, 720));
     assert!(!is_dota2_windows_window(
         "Dota 2",
-        "dota2.exe",
+        Some(""),
+        false,
+        1920,
+        1080
+    ));
+    assert!(!is_dota2_windows_window(
+        "Dota 2",
+        Some("notepad.exe"),
+        false,
+        1920,
+        1080
+    ));
+    assert!(!is_dota2_windows_window(
+        "Dota 2",
+        Some("Dota 2"),
+        false,
+        1920,
+        1080
+    ));
+    assert!(!is_dota2_windows_window(
+        "Dota 2",
+        Some("dota2.exe"),
         true,
         1920,
         1080
     ));
     assert!(!is_dota2_windows_window(
         "Dota 2",
-        "dota2.exe",
+        Some("dota2.exe"),
         false,
         639,
         1080
     ));
     assert!(!is_dota2_windows_window(
         "Dota 2",
-        "dota2.exe",
+        Some("dota2.exe"),
         false,
         1920,
         359
     ));
     assert!(!is_dota2_windows_window(
         "Dota 2 - Google Chrome",
-        "Google Chrome",
+        Some("chrome.exe"),
         false,
         1920,
         1080
     ));
-    assert!(!is_dota2_windows_window(
-        "Dota 2",
-        "Windows Explorer",
-        false,
-        1920,
-        1080
-    ));
+
+    assert_eq!(
+        parse_tasklist_exe_for_pid(
+            "\"dota2.exe\",\"4210\",\"Console\",\"1\",\"2,100,000 K\"\r\n",
+            4210
+        ),
+        Some("dota2.exe".to_string())
+    );
+    assert_eq!(
+        parse_tasklist_exe_for_pid(
+            "\"notepad.exe\",\"4210\",\"Console\",\"1\",\"12,000 K\"\r\n",
+            9999
+        ),
+        None
+    );
+    assert_eq!(
+        parse_tasklist_exe_for_pid(
+            "INFO: No tasks are running which match the specified criteria.\r\n",
+            4210
+        ),
+        None
+    );
 
     // Full RGBA window conversion strips alpha, crops top 8% strip, and rejects invalid buffers.
     assert!(rgba_to_topbar_rgb_frame(&[0u8; 400], 639, 720).is_none());

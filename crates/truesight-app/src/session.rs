@@ -158,9 +158,12 @@ impl AppSession {
         self.last_runtime_health = None;
     }
 
-    fn apply_runtime_health(&mut self, health: truesight_adapters::vision::CaptureRuntimeHealth) {
+    fn apply_runtime_health(
+        &mut self,
+        health: truesight_adapters::vision::CaptureRuntimeHealth,
+    ) -> bool {
         if self.last_runtime_health.as_ref() == Some(&health) {
-            return;
+            return false;
         }
         let backend = self
             .vision_backend
@@ -171,11 +174,20 @@ impl AppSession {
             } else {
                 truesight_adapters::vision::CaptureBackendKind::Unsupported
             });
-        self.vision_available = health.is_capturing();
-        self.vision_error = health.is_error();
-        self.vision_status = health.status_badge(backend);
-        self.vision_detail = health.summary();
+        let next_available = health.is_capturing();
+        let next_error = health.is_error();
+        let next_status = health.status_badge(backend);
+        let next_detail = health.summary();
+        let visual_changed = self.vision_available != next_available
+            || self.vision_error != next_error
+            || self.vision_status != next_status
+            || self.vision_detail != next_detail;
+        self.vision_available = next_available;
+        self.vision_error = next_error;
+        self.vision_status = next_status;
+        self.vision_detail = next_detail;
         self.last_runtime_health = Some(health);
+        visual_changed
     }
 
     pub fn reload_repository(&mut self) {
@@ -762,9 +774,7 @@ impl AppSession {
                     }
                 }
             }
-            let prev_status = self.vision_status.clone();
-            self.apply_runtime_health(worker.runtime_health());
-            if self.vision_status != prev_status {
+            if self.apply_runtime_health(worker.runtime_health()) {
                 changed = true;
             }
         }
