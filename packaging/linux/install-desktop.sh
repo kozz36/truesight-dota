@@ -1,50 +1,70 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+script_parent="."
+if [[ "${BASH_SOURCE[0]}" == */* ]]; then
+  script_parent="${BASH_SOURCE[0]%/*}"
+  [[ -z "$script_parent" ]] && script_parent="/"
+fi
+script_dir_raw=$(cd -- "$script_parent" && pwd -P && printf x)
+SCRIPT_DIR="${script_dir_raw%$'\n'x}"
 DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 APP_DIR="$DATA_HOME/applications"
 ICON_DIR="$DATA_HOME/icons/hicolor/128x128/apps"
 
+reject_cr_lf() {
+  local val="$1"
+  if [[ "$val" == *$'\n'* || "$val" == *$'\r'* ]]; then
+    echo "Unsupported newline/carriage-return in Exec target path" >&2
+    return 1
+  fi
+}
+
+# Resolve target path into BIN_EXEC without $(...) command substitution stripping trailing newlines.
 resolve_exec_target() {
   local candidate="${1:-}"
   if [[ -n "$candidate" ]]; then
+    reject_cr_lf "$candidate"
     if [[ "$candidate" == */* ]]; then
-      local dir_part base_part
-      dir_part="$(dirname -- "$candidate")"
-      base_part="$(basename -- "$candidate")"
+      local dir_part="${candidate%/*}"
+      local base_part="${candidate##*/}"
+      [[ -z "$dir_part" ]] && dir_part="/"
       if [[ -d "$dir_part" ]]; then
-        printf '%s/%s' "$(cd -- "$dir_part" && pwd -P)" "$base_part"
+        local dir_abs_raw
+        dir_abs_raw=$(cd -- "$dir_part" && pwd -P && printf x)
+        local dir_abs="${dir_abs_raw%$'\n'x}"
+        if [[ "$dir_abs" == "/" ]]; then
+          BIN_EXEC="/$base_part"
+        else
+          BIN_EXEC="$dir_abs/$base_part"
+        fi
       else
-        printf '%s' "$candidate"
+        BIN_EXEC="$candidate"
       fi
     else
-      printf '%s' "$candidate"
+      BIN_EXEC="$candidate"
     fi
     return 0
   fi
 
   # Prefer the binary bundled beside this script inside an extracted release tarball.
   if [[ -x "$SCRIPT_DIR/truesight-dota" ]]; then
-    printf '%s/truesight-dota' "$SCRIPT_DIR"
-  elif command -v truesight-dota >/dev/null 2>&1; then
-    command -v truesight-dota
+    BIN_EXEC="$SCRIPT_DIR/truesight-dota"
+  elif cmd_raw=$(command -v truesight-dota 2>/dev/null && printf x); then
+    BIN_EXEC="${cmd_raw%$'\n'x}"
   elif [[ -x "$HOME/.local/bin/truesight-dota" ]]; then
-    printf '%s/.local/bin/truesight-dota' "$HOME"
+    BIN_EXEC="$HOME/.local/bin/truesight-dota"
   else
-    printf '%s' "truesight-dota"
+    BIN_EXEC="truesight-dota"
   fi
 }
 
-# Serialize Exec= across both Desktop Entry layers:
+# Serialize Exec= into EXEC_VALUE across both Desktop Entry layers:
 # 1) Exec argument quoting/escaping (\, ", `, $, and %% for literal %),
 # 2) Desktop Entry `string` value escaping (\ -> \\).
 format_desktop_exec() {
   local raw="$1"
-  if [[ "$raw" == *$'\n'* || "$raw" == *$'\r'* ]]; then
-    echo "Unsupported newline/carriage-return in Exec target path" >&2
-    return 1
-  fi
+  reject_cr_lf "$raw"
 
   local exec_encoded="$raw"
   local reserved_re='[[:space:]"'\''<>~|&;$*?#()`\\]'
@@ -60,11 +80,13 @@ format_desktop_exec() {
   fi
 
   # Layer 2: escape backslashes for the .desktop string parser before writing Exec=.
-  printf '%s' "${exec_encoded//\\/\\\\}"
+  printf -v EXEC_VALUE '%s' "${exec_encoded//\\/\\\\}"
 }
 
-BIN_EXEC="$(resolve_exec_target "${1:-}")"
-EXEC_VALUE="$(format_desktop_exec "$BIN_EXEC")"
+BIN_EXEC=""
+EXEC_VALUE=""
+resolve_exec_target "${1:-}"
+format_desktop_exec "$BIN_EXEC"
 
 ICON_SRC=""
 if [[ -f "$SCRIPT_DIR/truesight-dota.png" ]]; then

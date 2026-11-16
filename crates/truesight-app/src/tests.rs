@@ -1465,24 +1465,32 @@ fn linux_install_desktop_prefers_sibling_binary_and_escapes_ampersand_and_spaces
         );
     }
 
-    // Literal newline in target path must fail cleanly before modifying the existing .desktop file.
-    let newline_arg = format!("{}/bad\npath", extract_dir.display());
-    let out3 = std::process::Command::new(&script_path)
-        .arg(&newline_arg)
-        .env("HOME", &fake_home)
-        .env("XDG_DATA_HOME", &fake_xdg)
-        .env("PATH", "/usr/bin:/bin")
-        .output()
-        .expect("run install-desktop.sh with newline path");
-    assert!(
-        !out3.status.success(),
-        "install-desktop.sh must reject newline in Exec path"
-    );
-    assert_eq!(
-        std::fs::read_to_string(&desktop_path).unwrap(),
-        desktop2,
-        "Rejected newline path must not corrupt existing .desktop file"
-    );
+    // Embedded or trailing newline/CR in target path must fail before modifying existing launcher.
+    for (kind, bad_arg) in [
+        (
+            "embedded_lf",
+            format!("{}/bad\npath", extract_dir.display()),
+        ),
+        ("trailing_lf", "/tmp/app\n".to_string()),
+        ("trailing_cr", "/tmp/app\r".to_string()),
+    ] {
+        let out_bad = std::process::Command::new(&script_path)
+            .arg(&bad_arg)
+            .env("HOME", &fake_home)
+            .env("XDG_DATA_HOME", &fake_xdg)
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .expect("run install-desktop.sh with invalid CR/LF path");
+        assert!(
+            !out_bad.status.success(),
+            "install-desktop.sh must reject {kind} in Exec path"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&desktop_path).unwrap(),
+            desktop2,
+            "Rejected {kind} path must leave existing .desktop file unchanged"
+        );
+    }
 
     let _ = std::fs::remove_dir_all(&base_tmp);
 }
