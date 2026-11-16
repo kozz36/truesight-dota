@@ -128,3 +128,26 @@ jobs:
             Write-Error "Unexpected --demo output on Windows release binary:`n$text"
             exit 1
           }
+
+      - name: Smoke-test Windows GSI installer & MSI/ZIP packaging
+        shell: pwsh
+        run: |
+          $tmpDota = Join-Path $env:RUNNER_TEMP "ts_gsi_smoke"
+          New-Item -ItemType Directory -Path (Join-Path $tmpDota "game\dota\cfg") -Force | Out-Null
+          .\packaging\windows\install-gsi.ps1 -DotaDir $tmpDota
+          $installedCfg = Join-Path $tmpDota "game\dota\cfg\gamestate_integration\gamestate_integration_truesight.cfg"
+          if (-not (Test-Path -LiteralPath $installedCfg)) {
+            Write-Error "install-gsi.ps1 did not create $installedCfg"
+            exit 1
+          }
+          dotnet tool install --global wix
+          $pkgOut = Join-Path $env:RUNNER_TEMP "ts_pkg_out"
+          .\packaging\windows\build-release-packages.ps1 `
+            -ExePath ".\target\release\truesight-dota.exe" `
+            -Version "0.1.0" `
+            -OutDir $pkgOut
+          if (-not (Test-Path -LiteralPath (Join-Path $pkgOut "truesight-dota-windows-x86_64.msi")) -or
+              -not (Test-Path -LiteralPath (Join-Path $pkgOut "truesight-dota-windows-x86_64.zip"))) {
+            Write-Error "Missing expected Windows release package output in $pkgOut"
+            exit 1
+          }

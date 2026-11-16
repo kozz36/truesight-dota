@@ -1,0 +1,65 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+    <Package Name="TrueSight Dota"
+             Manufacturer="kozz36"
+             Version="$(var.Version)"
+             UpgradeCode="7E9C4B12-8D3A-4C6B-9E21-5A4C2B8D109F"
+             Scope="perUser">
+
+        <SummaryInformation Description="Native 5v5 draft analyzer and recommender for Dota 2" />
+        <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+        <MediaTemplate EmbedCab="yes" />
+
+        <Feature Id="Main" Title="TrueSight Dota" Level="1">
+            <ComponentGroupRef Id="AppComponents" />
+            <ComponentGroupRef Id="ShortcutComponents" />
+        </Feature>
+    </Package>
+
+    <Fragment>
+        <StandardDirectory Id="LocalAppDataFolder">
+            <Directory Id="ProgramsFolder" Name="Programs">
+                <Directory Id="INSTALLFOLDER" Name="TrueSight Dota" />
+            </Directory>
+        </StandardDirectory>
+
+        <StandardDirectory Id="ProgramMenuFolder">
+            <Directory Id="ApplicationProgramsFolder" Name="TrueSight Dota" />
+        </StandardDirectory>
+
+        <ComponentGroup Id="AppComponents" Directory="INSTALLFOLDER">
+            <Component Id="MainExecutable" Guid="B9A1D4E0-3C72-4F55-A2C4-12F7F6B81A01">
+                <File Id="TrueSightExe" Source="$(var.StageDir)\truesight-dota.exe" KeyPath="yes" />
+            </Component>
+            <Component Id="GsiConfigFile" Guid="C2D3E5F1-8A41-4E88-B912-34A9C1D2E302">
+                <File Id="GsiCfg" Source="$(var.StageDir)\gamestate_integration_truesight.cfg" KeyPath="yes" />
+            </Component>
+            <Component Id="GsiInstallScript" Guid="D4E5F6A2-9B52-4F99-C023-45B0D2E3F403">
+                <File Id="GsiPs1" Source="$(var.StageDir)\install-gsi.ps1" KeyPath="yes" />
+            </Component>
+            <Component Id="LicenseFile" Guid="E6F7A8B3-0C63-4A00-D134-56C1E3F4A504">
+                <File Id="LicenseDoc" Source="$(var.StageDir)\LICENSE" KeyPath="yes" />
+            </Component>
+            <Component Id="ReadmeFile" Guid="F8A9B0C4-1D74-4B11-E245-67D2F4A5B605">
+                <File Id="ReadmeDoc" Source="$(var.StageDir)\README.md" KeyPath="yes" />
+            </Component>
+        </ComponentGroup>
+
+        <ComponentGroup Id="ShortcutComponents" Directory="ApplicationProgramsFolder">
+            <Component Id="StartMenuShortcuts" Guid="A1B2C3D4-5E6F-4789-90AB-CDEF12345606">
+                <Shortcut Id="LaunchTrueSight"
+                          Name="TrueSight Dota"
+                          Description="Launch TrueSight Dota 5v5 Draft Oracle"
+                          Target="[INSTALLFOLDER]truesight-dota.exe"
+                          WorkingDirectory="INSTALLFOLDER" />
+                <RemoveFolder Id="CleanProgramsFolder" Directory="ApplicationProgramsFolder" On="uninstall" />
+                <RemoveFolder Id="CleanInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
+                <RegistryValue Root="HKCU"
+                               Key="Software\kozz36\TrueSightDota"
+                               Name="installed"
+                               Type="integer"
+                               Value="1"
+                               KeyPath="yes" />
+            </Component>
+        </ComponentGroup>
+    </Fragment>
+</Wix>
