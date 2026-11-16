@@ -2121,3 +2121,164 @@ fn vision_pickphase_and_ingame_adapter_detect_all_49_arcana_and_persona_variants
         failures.join("\n")
     );
 }
+
+#[test]
+fn gsi_parser_emits_init_and_custom_game_setup_states_alongside_lifecycle_states() {
+    for (state, clock) in [
+        ("DOTA_GAMERULES_STATE_INIT", 0),
+        ("DOTA_GAMERULES_STATE_CUSTOM_GAME_SETUP", -15),
+        ("DOTA_GAMERULES_STATE_WAIT_FOR_PLAYERS_TO_LOAD", -90),
+        ("DOTA_GAMERULES_STATE_HERO_SELECTION", 45),
+        ("DOTA_GAMERULES_STATE_STRATEGY_TIME", 10),
+        ("DOTA_GAMERULES_STATE_PRE_GAME", -30),
+        ("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS", 120),
+        ("DOTA_GAMERULES_STATE_POST_GAME", 2400),
+        ("DOTA_GAMERULES_STATE_DISCONNECT", 2405),
+    ] {
+        let payload = format!(r#"{{"map":{{"game_state":"{state}","clock_time":{clock}}}}}"#);
+        let events = crate::gsi::parse_gsi_json_events(&payload);
+        assert_eq!(
+            events,
+            vec![DraftEvent::GameRulesStateChanged {
+                state_name: state.into(),
+                game_time_secs: clock,
+            }],
+            "GSI parser must emit GameRulesStateChanged for {state}"
+        );
+    }
+}
+
+#[test]
+fn vision_recalls_dark_low_contrast_heroes_and_rejects_empty_slots_across_resolutions() {
+    use crate::vision::{
+        HeroVisionCatalog, RgbFrame, ScreenFrameSource, TopBarSlotRect, VisionCaptureAdapter,
+        VisionCaptureMode, compute_ingame_topbar_slot_rects, compute_pickphase_topbar_slot_rects,
+        parse_hero_atlas,
+    };
+    use truesight_core::domain::Faction;
+
+    struct SingleFrame(Option<RgbFrame>);
+    impl ScreenFrameSource for SingleFrame {
+        fn capture_frame(&mut self) -> Result<Option<RgbFrame>, truesight_core::ports::PortError> {
+            Ok(self.0.take())
+        }
+    }
+
+    fn paint_slot_crop(
+        frame: &mut [u8],
+        frame_w: usize,
+        rect: TopBarSlotRect,
+        src_rgb: &[u8],
+        src_w: usize,
+        crop: TopBarSlotRect,
+    ) {
+        for dy in 0..rect.height {
+            let sy = crop.y + (dy * crop.height) / rect.height;
+            for dx in 0..rect.width {
+                let sx = crop.x + (dx * crop.width) / rect.width;
+                let s = (sy * src_w + sx) * 3;
+                let d = ((rect.y + dy) * frame_w + (rect.x + dx)) * 3;
+                frame[d..d + 3].copy_from_slice(&src_rgb[s..s + 3]);
+            }
+        }
+    }
+
+    let atlas = parse_hero_atlas().expect("base atlas must load");
+    let catalog = HeroVisionCatalog::from_embedded().expect("vision catalog must load");
+    let full_crop = TopBarSlotRect {
+        x: 0,
+        y: 0,
+        width: atlas.hero_width,
+        height: atlas.hero_height,
+    };
+    let upper_crop = TopBarSlotRect {
+        x: 4,
+        y: 2,
+        width: atlas.hero_width - 8,
+        height: 22,
+    };
+    let inner_crop = TopBarSlotRect {
+        x: 4,
+        y: 2,
+        width: atlas.hero_width - 8,
+        height: atlas.hero_height - 4,
+    };
+
+    // Dark/low-contrast trio from #25 paired with negative-control empty slate slots in R3..R4 and D1..D4.
+    let targets = [
+        (0usize, HeroId(11), Role::Carry),   // Shadow Fiend
+        (1usize, HeroId(102), Role::Mid),    // Abaddon
+        (2usize, HeroId(109), Role::Offlane), // Terrorblade
+    ];
+
+    let configs = [
+        (1280usize, 720usize, true, upper_crop),
+        (1280usize, 720usize, true, full_crop),
+        (1920usize, 1080usize, true, upper_crop),
+        (1920usize, 1080usize, true, full_crop),
+        (1280usize, 720usize, false, inner_crop),
+        (1280usize, 720usize, false, full_crop),
+        (1920usize, 1080usize, false, inner_crop),
+        (1920usize, 1080usize, false, full_crop),
+        (2560usize, 1440usize, false, full_crop),
+    ];
+
+    let mut failures = Vec::new();
+    for (w, h, is_pickphase, crop) in configs {
+        let fh = 160usize;
+        let (rad_r, dire_r) = if is_pickphase {
+            compute_pickphase_topbar_slot_rects(w, h)
+        } else {
+            compute_ingame_topbar_slot_rects(w, h)
+        };
+        let mut rgb = vec![15u8; w * fh * 3];
+        // Paint empty-card dark cyan-slate negative controls in R3..R4 & D1..D4.
+        for rect in rad_r[3..].iter().chain(dire_r[1..].iter()) {
+            for dy in 0..rect.height {
+                for dx in 0..rect.width {
+                    let border = dy < 3 || dy + 3 >= rect.height || dx < 4 || dx + 4 >= rect.width;
+                    let idx = ((rect.y + dy) * w + (rect.x + dx)) * 3;
+                    rgb[idx..idx + 3].copy_from_slice(&if border { [32, 48, 66] } else { [18, 28, 42] });
+                }
+            }
+        }
+        for (slot, hid, _) in targets {
+            paint_slot_crop(&mut rgb, w, rad_r[slot], &atlas.heroes[&hid], atlas.hero_width, crop);
+        }
+        // Anti-Mage in Dire slot 0 to validate opposite side + zero phantom picks on empty slots.
+        paint_slot_crop(&mut rgb, w, dire_r[0], &atlas.heroes[&HeroId(1)], atlas.hero_width, crop);
+
+        let mut adapter = VisionCaptureAdapter::new(
+            SingleFrame(Some(RgbFrame { width: w, height: fh, rgb })),
+            catalog.clone(),
+        );
+        adapter.set_ally_faction(Faction::Radiant);
+        adapter.set_capture_mode(if is_pickphase {
+            VisionCaptureMode::DraftOnly
+        } else {
+            VisionCaptureMode::Any
+        });
+        let events = adapter.poll_events().expect("poll_events must succeed");
+        for (slot, hid, role) in targets {
+            let expected = DraftEvent::PickDetected {
+                side: Side::Allies,
+                slot,
+                hero_id: hid,
+                role: Some(role),
+            };
+            if !events.contains(&expected) {
+                failures.push(format!("{w}x{h} pickphase={is_pickphase} crop={}x{}: missing {hid:?} in {events:?}", crop.width, crop.height));
+            }
+        }
+        if events.len() != 4 {
+            failures.push(format!("{w}x{h} pickphase={is_pickphase} crop={}x{}: expected 4 picks (0 phantom empty slots), got {}", crop.width, crop.height, events.len()));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "Dark/low-contrast recall or negative-control failures ({}):\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}

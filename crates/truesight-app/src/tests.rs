@@ -902,3 +902,174 @@ fn session_suppresses_vision_during_wait_for_players_and_resumes_in_hero_selecti
     assert_eq!(session.draft.allies.iter().flatten().count(), 1);
     assert_eq!(session.draft.enemies.iter().flatten().count(), 1);
 }
+
+#[test]
+fn live_gsi_init_and_custom_setup_suppress_vision_and_restore_across_match_transitions() {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+    use truesight_adapters::gsi::BoundedGsiListener;
+    use truesight_adapters::vision::{
+        BoundedVisionWorker, RgbFrame, ScreenFrameSource, compute_topbar_slot_rects, parse_hero_atlas,
+    };
+    use truesight_core::domain::{HeroId, Side};
+
+    struct StationarySource(RgbFrame);
+    impl ScreenFrameSource for StationarySource {
+        fn capture_frame(&mut self) -> Result<Option<RgbFrame>, truesight_core::ports::PortError> {
+            Ok(Some(self.0.clone()))
+        }
+    }
+
+    fn paint_slot(
+        frame: &mut [u8],
+        frame_w: usize,
+        rect: truesight_adapters::vision::TopBarSlotRect,
+        hero_rgb: &[u8],
+        src_w: usize,
+        src_h: usize,
+    ) {
+        for dy in 0..rect.height {
+            let sy = (dy * src_h) / rect.height;
+            for dx in 0..rect.width {
+                let sx = (dx * src_w) / rect.width;
+                let s = (sy * src_w + sx) * 3;
+                let d = ((rect.y + dy) * frame_w + (rect.x + dx)) * 3;
+                frame[d..d + 3].copy_from_slice(&hero_rgb[s..s + 3]);
+            }
+        }
+    }
+
+    let atlas = parse_hero_atlas().unwrap();
+    let (w, h) = (1920usize, 1080usize);
+    let mut rgb = vec![0u8; w * h * 3];
+    let (rad_r, dire_r) = compute_topbar_slot_rects(w, h);
+    paint_slot(&mut rgb, w, rad_r[0], &atlas.heroes[&HeroId(1)], atlas.hero_width, atlas.hero_height);
+    paint_slot(&mut rgb, w, dire_r[0], &atlas.heroes[&HeroId(94)], atlas.hero_width, atlas.hero_height);
+
+    let mut listener = BoundedGsiListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr();
+    let send_state = |state: &str, clock: i32| {
+        let body = format!(r#"{{"map":{{"game_state":"{state}","clock_time":{clock}}}}}"#);
+        let req = format!(
+            "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let mut s = TcpStream::connect(addr).unwrap();
+        s.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+        s.write_all(req.as_bytes()).unwrap();
+        s.flush().unwrap();
+        let mut resp = String::new();
+        let _ = s.read_to_string(&mut resp);
+        assert!(resp.starts_with("HTTP/1.1 200"), "Expected 200 OK, got: {resp}");
+    };
+
+    let mut worker = BoundedVisionWorker::spawn_with_source(StationarySource(RgbFrame {
+        width: w,
+        height: h,
+        rgb,
+    }))
+    .unwrap();
+
+    // 1. Absent GSI (None) allows vision picks normally (VisionCaptureMode::Any).
+    let mut absent_gsi_session = AppSession::new().unwrap();
+    for _ in 0..30 {
+        absent_gsi_session.poll_live_sources(None, Some(&mut worker));
+        if absent_gsi_session.draft.allies.iter().flatten().count() == 1 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(absent_gsi_session.draft.allies.iter().flatten().count(), 1);
+
+    // 2. Fresh session in INIT and CUSTOM_GAME_SETUP receives 0 new vision picks (no reset_draft()).
+    let mut session = AppSession::new().unwrap();
+    send_state("DOTA_GAMERULES_STATE_INIT", 0);
+    for _ in 0..8 {
+        session.poll_live_sources(Some(&mut listener), Some(&mut worker));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        session.last_gsi_state.contains("DOTA_GAMERULES_STATE_INIT"),
+        "Expected INIT state in AppSession, got: {}",
+        session.last_gsi_state
+    );
+    assert_eq!(
+        session.draft.allies.iter().flatten().count(),
+        0,
+        "INIT must prevent new vision picks without requiring manual reset_draft()"
+    );
+
+    send_state("DOTA_GAMERULES_STATE_CUSTOM_GAME_SETUP", -10);
+    for _ in 0..8 {
+        session.poll_live_sources(Some(&mut listener), Some(&mut worker));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(session.last_gsi_state.contains("DOTA_GAMERULES_STATE_CUSTOM_GAME_SETUP"));
+    assert_eq!(
+        session.draft.allies.iter().flatten().count(),
+        0,
+        "CUSTOM_GAME_SETUP must prevent new vision picks without requiring manual reset_draft()"
+    );
+
+    // 3. HERO_SELECTION lifts suppression and populates match picks; PRE_GAME/GAME_IN_PROGRESS continue.
+    send_state("DOTA_GAMERULES_STATE_HERO_SELECTION", 45);
+    for _ in 0..40 {
+        session.poll_live_sources(Some(&mut listener), Some(&mut worker));
+        if session.draft.allies.iter().flatten().count() == 1
+            && session.draft.enemies.iter().flatten().count() == 1
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(session.draft.allies.iter().flatten().count(), 1);
+    assert_eq!(session.draft.enemies.iter().flatten().count(), 1);
+
+    for (state, clock) in [
+        ("DOTA_GAMERULES_STATE_PRE_GAME", -20),
+        ("DOTA_GAMERULES_STATE_GAME_IN_PROGRESS", 120),
+    ] {
+        send_state(state, clock);
+        session.poll_live_sources(Some(&mut listener), Some(&mut worker));
+        assert!(session.last_gsi_state.contains(state), "Expected state {state}");
+    }
+
+    // 4. Existing draft picks stay preserved across INIT / CUSTOM_GAME_SETUP / POST_GAME / DISCONNECT
+    //    for post-game review or manual testing, until HERO_SELECTION automatically resets them.
+    session.set_slot_manual(Side::Allies, 3, HeroId(2));
+    assert!(session.draft.allies[3].is_some());
+
+    for (state, clock) in [
+        ("DOTA_GAMERULES_STATE_POST_GAME", 2000),
+        ("DOTA_GAMERULES_STATE_DISCONNECT", 2005),
+        ("DOTA_GAMERULES_STATE_INIT", 0),
+        ("DOTA_GAMERULES_STATE_CUSTOM_GAME_SETUP", -5),
+    ] {
+        send_state(state, clock);
+        for _ in 0..4 {
+            session.poll_live_sources(Some(&mut listener), Some(&mut worker));
+            std::thread::sleep(Duration::from_millis(15));
+        }
+        assert!(session.last_gsi_state.contains(state), "Expected state {state}");
+        assert!(
+            session.draft.allies[3].is_some(),
+            "Prior draft picks must stay preserved during {state}"
+        );
+    }
+
+    send_state("DOTA_GAMERULES_STATE_HERO_SELECTION", 50);
+    for _ in 0..40 {
+        session.poll_live_sources(Some(&mut listener), Some(&mut worker));
+        if session.draft.allies[3].is_none() && session.draft.allies.iter().flatten().count() == 1 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        session.draft.allies[3].is_none(),
+        "Transitioning to HERO_SELECTION must automatically clear stale prior-match picks"
+    );
+    assert_eq!(session.draft.allies.iter().flatten().count(), 1);
+}

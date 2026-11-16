@@ -449,7 +449,12 @@ impl HeroVisionCatalog {
             return None;
         }
 
-        let (entry_sets, threshold, has_portrait_detail): (&[&[(HeroId, [u8; DESC_LEN])]], f32, bool) = match layout {
+        let saturated_dark_border = ov >= 12.0 && ms >= 28.0 && os >= 28.0;
+        let (entry_sets, threshold, has_portrait_detail): (
+            &[&[(HeroId, [u8; DESC_LEN])]],
+            f32,
+            bool,
+        ) = match layout {
             TopBarLayout::SyntheticExact => (
                 &[&self.full_entries],
                 MATCH_L1_THRESHOLD,
@@ -462,12 +467,15 @@ impl HeroVisionCatalog {
                 tv >= 13.5
                     && (ov >= 13.5
                         || (ov >= 12.5 && tv >= 18.0 && os >= 20.0)
+                        || saturated_dark_border
                         || (ov >= 7.5 && os >= 35.0)),
             ),
             TopBarLayout::InGame => (
                 &[&self.inner_entries],
                 INGAME_L1_THRESHOLD,
-                tv >= 13.5 && os >= 10.5 && (ov >= 13.5 || (ov >= 9.5 && os >= 35.0)),
+                tv >= 13.5
+                    && os >= 10.5
+                    && (ov >= 13.5 || saturated_dark_border || (ov >= 9.5 && os >= 35.0)),
             ),
         };
         if !has_portrait_detail {
