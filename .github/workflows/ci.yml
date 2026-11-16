@@ -140,7 +140,7 @@ jobs:
             Write-Error "install-gsi.ps1 did not create $installedCfg"
             exit 1
           }
-          dotnet tool install --global wix
+          dotnet tool install --global wix --version 5.0.2
           $pkgOut = Join-Path $env:RUNNER_TEMP "ts_pkg_out"
           .\packaging\windows\build-release-packages.ps1 `
             -ExePath ".\target\release\truesight-dota.exe" `

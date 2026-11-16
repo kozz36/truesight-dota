@@ -104,7 +104,7 @@ jobs:
 
       - name: Install WiX CLI
         shell: pwsh
-        run: dotnet tool install --global wix
+        run: dotnet tool install --global wix --version 5.0.2
 
       - name: Package Windows ZIP and MSI installer
         shell: pwsh
