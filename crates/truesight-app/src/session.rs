@@ -694,6 +694,8 @@ impl AppSession {
                 self.vision_reset_pending = false;
                 changed = true;
             }
+            // Suppressed prevents new vision picks before hero selection / post-game while preserving
+            // prior draft picks until WAIT_FOR_PLAYERS_TO_LOAD or HERO_SELECTION starts a new match.
             let capture_mode = match self.last_rules_state.as_deref() {
                 Some(
                     "DOTA_GAMERULES_STATE_INIT"
