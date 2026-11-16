@@ -316,22 +316,24 @@ fn descriptor_total_variance(desc: &[u8; DESC_LEN]) -> f32 {
     var_sum / (n * 3.0)
 }
 
-fn match_descriptor(
-    entries: &[(HeroId, [u8; DESC_LEN])],
+fn match_descriptor_sets(
+    entry_sets: &[&[(HeroId, [u8; DESC_LEN])]],
     query_desc: &[u8; DESC_LEN],
 ) -> Option<(HeroId, f32)> {
     let mut best_hero = None;
     let mut best_diff = f32::MAX;
 
-    for (hero_id, candidate_desc) in entries {
-        let mut sum_abs = 0_u32;
-        for i in 0..DESC_LEN {
-            sum_abs += u32::from(query_desc[i].abs_diff(candidate_desc[i]));
-        }
-        let mean_l1 = (sum_abs as f32) / (DESC_LEN as f32);
-        if mean_l1 < best_diff {
-            best_diff = mean_l1;
-            best_hero = Some(*hero_id);
+    for entries in entry_sets {
+        for (hero_id, candidate_desc) in *entries {
+            let mut sum_abs = 0_u32;
+            for i in 0..DESC_LEN {
+                sum_abs += u32::from(query_desc[i].abs_diff(candidate_desc[i]));
+            }
+            let mean_l1 = (sum_abs as f32) / (DESC_LEN as f32);
+            if mean_l1 < best_diff {
+                best_diff = mean_l1;
+                best_hero = Some(*hero_id);
+            }
         }
     }
 
@@ -368,11 +370,17 @@ impl HeroVisionCatalog {
             height: 22.min(atlas.hero_height.saturating_sub(2)),
         };
 
-        let mut full_entries = Vec::with_capacity(atlas.heroes.len());
-        let mut inner_entries = Vec::with_capacity(atlas.heroes.len());
-        let mut upper_entries = Vec::with_capacity(atlas.heroes.len());
+        let alt_atlas = crate::hero_alt_atlas::parse_hero_alt_atlas()?;
+        if alt_atlas.width != atlas.hero_width || alt_atlas.height != atlas.hero_height {
+            return None;
+        }
+        let total_entries = atlas.heroes.len() + alt_atlas.entries.len();
 
-        for (hero_id, rgb) in atlas.heroes {
+        let mut full_entries = Vec::with_capacity(total_entries);
+        let mut inner_entries = Vec::with_capacity(total_entries);
+        let mut upper_entries = Vec::with_capacity(total_entries);
+
+        for (hero_id, rgb) in atlas.heroes.into_iter().chain(alt_atlas.entries) {
             if let Some((desc, _)) =
                 compute_descriptor_8x4(&rgb, atlas.hero_width, atlas.hero_height, full_rect)
             {
@@ -413,7 +421,7 @@ impl HeroVisionCatalog {
         if mean_intensity < DARK_INTENSITY_THRESHOLD {
             return None;
         }
-        let (best_hero, best_diff) = match_descriptor(&self.full_entries, &query_desc)?;
+        let (best_hero, best_diff) = match_descriptor_sets(&[&self.full_entries], &query_desc)?;
         if best_diff < MATCH_L1_THRESHOLD {
             Some(best_hero)
         } else {
@@ -441,17 +449,20 @@ impl HeroVisionCatalog {
             return None;
         }
 
-        let (entries, threshold, has_portrait_detail) = match layout {
-            TopBarLayout::SyntheticExact => {
-                (&self.full_entries, MATCH_L1_THRESHOLD, tv >= 12.5 && ov >= 11.0)
-            }
+        let (entry_sets, threshold, has_portrait_detail): (&[&[(HeroId, [u8; DESC_LEN])]], f32, bool) = match layout {
+            TopBarLayout::SyntheticExact => (
+                &[&self.full_entries],
+                MATCH_L1_THRESHOLD,
+                tv >= 12.5 && ov >= 11.0,
+            ),
+            // PickPhase captures both nameplate-cropped upper cards and full/inner 16:9 slots.
             TopBarLayout::PickPhase => (
-                &self.upper_entries,
+                &[&self.upper_entries, &self.inner_entries, &self.full_entries],
                 PICKPHASE_L1_THRESHOLD,
                 tv >= 13.5 && (ov >= 13.5 || (ov >= 7.5 && os >= 35.0)),
             ),
             TopBarLayout::InGame => (
-                &self.inner_entries,
+                &[&self.inner_entries],
                 INGAME_L1_THRESHOLD,
                 tv >= 13.5 && os >= 10.5 && (ov >= 13.5 || (ov >= 9.5 && os >= 35.0)),
             ),
@@ -460,7 +471,7 @@ impl HeroVisionCatalog {
             return None;
         }
 
-        let (best_hero, best_diff) = match_descriptor(entries, &query_desc)?;
+        let (best_hero, best_diff) = match_descriptor_sets(entry_sets, &query_desc)?;
         if best_diff < threshold {
             Some((best_hero, best_diff, ms))
         } else {

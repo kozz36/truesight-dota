@@ -1842,3 +1842,283 @@ fn vision_x11_import_args_include_silent_flag_to_prevent_xbell() {
         ["-silent", "-window", "0x620013d", "-depth", "8", "-crop", "100%x8%+0+0", "ppm:-"]
     );
 }
+
+#[test]
+fn alt_portrait_atlas_loads_verified_variants_and_rejects_malformed_headers() {
+    use crate::hero_alt_atlas::{parse_hero_alt_atlas, parse_hero_alt_atlas_from_slice};
+
+    let alt_atlas = parse_hero_alt_atlas().expect("embedded alt portrait atlas must load");
+    assert_eq!(alt_atlas.width, 64);
+    assert_eq!(alt_atlas.height, 36);
+    assert_eq!(alt_atlas.entries.len(), 49);
+
+    let count_for = |id: u16| -> usize {
+        alt_atlas
+            .entries
+            .iter()
+            .filter(|(hero_id, _)| *hero_id == HeroId(id))
+            .count()
+    };
+    assert_eq!(count_for(14), 3, "Pudge must include alt1, alt2, persona1");
+    assert_eq!(
+        count_for(44),
+        2,
+        "Phantom Assassin must include alt1 and persona1"
+    );
+    assert_eq!(
+        count_for(5),
+        2,
+        "Crystal Maiden must include alt1 and persona1"
+    );
+    assert_eq!(count_for(91), 1, "Io/Wisp must include Companion Cube alt");
+
+    assert!(parse_hero_alt_atlas_from_slice(b"NOPE").is_none());
+    let mut bad_magic = crate::hero_alt_atlas::HERO_ALT_ATLAS_BYTES[..10].to_vec();
+    bad_magic[0..4].copy_from_slice(b"BAD!");
+    assert!(parse_hero_alt_atlas_from_slice(&bad_magic).is_none());
+
+    let truncated = &crate::hero_alt_atlas::HERO_ALT_ATLAS_BYTES
+        [..crate::hero_alt_atlas::HERO_ALT_ATLAS_BYTES.len() - 1];
+    assert!(parse_hero_alt_atlas_from_slice(truncated).is_none());
+}
+
+#[test]
+fn vision_catalog_matches_all_arcana_and_persona_portraits_across_layouts() {
+    use crate::hero_alt_atlas::parse_hero_alt_atlas;
+    use crate::vision::{
+        HeroVisionCatalog, RgbFrame, ScreenFrameSource, TopBarSlotRect, VisionCaptureAdapter,
+        compute_ingame_topbar_slot_rects, compute_pickphase_topbar_slot_rects, parse_hero_atlas,
+    };
+    use truesight_core::domain::Faction;
+
+    struct SingleFrameSource(Option<RgbFrame>);
+    impl ScreenFrameSource for SingleFrameSource {
+        fn capture_frame(&mut self) -> Result<Option<RgbFrame>, truesight_core::ports::PortError> {
+            Ok(self.0.take())
+        }
+    }
+
+    fn paint_rgb(
+        frame: &mut [u8],
+        frame_w: usize,
+        rect: TopBarSlotRect,
+        src_rgb: &[u8],
+        src_w: usize,
+        src_h: usize,
+    ) {
+        for dy in 0..rect.height {
+            let sy = (dy * src_h) / rect.height;
+            for dx in 0..rect.width {
+                let sx = (dx * src_w) / rect.width;
+                let s = (sy * src_w + sx) * 3;
+                let d = ((rect.y + dy) * frame_w + (rect.x + dx)) * 3;
+                frame[d..d + 3].copy_from_slice(&src_rgb[s..s + 3]);
+            }
+        }
+    }
+
+    let base_atlas = parse_hero_atlas().expect("embedded base atlas must load");
+    let alt_atlas = parse_hero_alt_atlas().expect("embedded alt atlas must load");
+    assert_eq!(
+        base_atlas.heroes.len(),
+        127,
+        "UI base hero atlas must stay strictly at the 127 canonical base portraits"
+    );
+
+    let catalog = HeroVisionCatalog::from_embedded().expect("vision catalog must load");
+
+    // 1. Every single extracted Arcana/Persona variant must resolve to its base HeroId.
+    let exact_rect = TopBarSlotRect {
+        x: 0,
+        y: 0,
+        width: alt_atlas.width,
+        height: alt_atlas.height,
+    };
+    for (idx, (expected_id, rgb)) in alt_atlas.entries.iter().enumerate() {
+        let matched = catalog.match_portrait_crop(rgb, alt_atlas.width, alt_atlas.height, exact_rect);
+        assert_eq!(
+            matched,
+            Some(*expected_id),
+            "Alt/Persona variant idx {idx} for {expected_id:?} was not recognized"
+        );
+    }
+
+    // 2. End-to-end PickPhase & InGame 10-slot recognition for Persona & Arcana portraits,
+    //    preserving dark/grayscale negative-control rejection on empty slots.
+    let pudge_persona = &alt_atlas
+        .entries
+        .iter()
+        .rfind(|(id, _)| *id == HeroId(14))
+        .expect("Pudge persona1 must exist")
+        .1;
+    let wisp_arcana = &alt_atlas
+        .entries
+        .iter()
+        .find(|(id, _)| *id == HeroId(91))
+        .expect("Wisp alt must exist")
+        .1;
+    let pa_persona = &alt_atlas
+        .entries
+        .iter()
+        .rfind(|(id, _)| *id == HeroId(44))
+        .expect("PA persona1 must exist")
+        .1;
+
+    let (w, h) = (1920usize, 1080usize);
+    for (is_pickphase, rects) in [
+        (true, compute_pickphase_topbar_slot_rects(w, h)),
+        (false, compute_ingame_topbar_slot_rects(w, h)),
+    ] {
+        let (rad_r, dire_r) = rects;
+        let mut frame_rgb = vec![0u8; w * h * 3];
+        paint_rgb(&mut frame_rgb, w, rad_r[0], pudge_persona, alt_atlas.width, alt_atlas.height);
+        paint_rgb(&mut frame_rgb, w, rad_r[1], wisp_arcana, alt_atlas.width, alt_atlas.height);
+        paint_rgb(&mut frame_rgb, w, dire_r[0], pa_persona, alt_atlas.width, alt_atlas.height);
+        // Leave rad_r[2..5] and dire_r[1..5] as dark empty/grayscale UI negative controls.
+
+        let catalog = HeroVisionCatalog::from_embedded().expect("vision catalog must load");
+        let source = SingleFrameSource(Some(RgbFrame {
+            width: w,
+            height: h,
+            rgb: frame_rgb,
+        }));
+        let mut adapter = VisionCaptureAdapter::new(source, catalog);
+        adapter.set_ally_faction(Faction::Radiant);
+        let events = adapter.poll_events().expect("poll_events must succeed");
+
+        assert!(
+            events.contains(&DraftEvent::PickDetected {
+                side: Side::Allies,
+                slot: 0,
+                hero_id: HeroId(14),
+                role: Some(Role::Carry),
+            }),
+            "layout pickphase={is_pickphase}: expected Pudge Persona -> HeroId(14), got {events:?}"
+        );
+        assert!(
+            events.contains(&DraftEvent::PickDetected {
+                side: Side::Allies,
+                slot: 1,
+                hero_id: HeroId(91),
+                role: Some(Role::Mid),
+            }),
+            "layout pickphase={is_pickphase}: expected Wisp Arcana -> HeroId(91), got {events:?}"
+        );
+        assert!(
+            events.contains(&DraftEvent::PickDetected {
+                side: Side::Enemies,
+                slot: 0,
+                hero_id: HeroId(44),
+                role: Some(Role::Carry),
+            }),
+            "layout pickphase={is_pickphase}: expected PA Persona -> HeroId(44), got {events:?}"
+        );
+        assert_eq!(
+            events.len(),
+            3,
+            "layout pickphase={is_pickphase}: negative-control empty slots must produce 0 extra picks, got {events:?}"
+        );
+    }
+}
+
+#[test]
+fn vision_pickphase_and_ingame_adapter_detect_all_49_arcana_and_persona_variants() {
+    use crate::hero_alt_atlas::parse_hero_alt_atlas;
+    use crate::vision::{
+        HeroVisionCatalog, RgbFrame, ScreenFrameSource, TopBarSlotRect, VisionCaptureAdapter,
+        VisionCaptureMode, compute_ingame_topbar_slot_rects, compute_pickphase_topbar_slot_rects,
+        parse_hero_atlas,
+    };
+    use truesight_core::domain::Faction;
+
+    struct SingleFrameSource(Option<RgbFrame>);
+    impl ScreenFrameSource for SingleFrameSource {
+        fn capture_frame(&mut self) -> Result<Option<RgbFrame>, truesight_core::ports::PortError> {
+            Ok(self.0.take())
+        }
+    }
+
+    fn paint_rgb_crop(
+        frame: &mut [u8],
+        frame_w: usize,
+        rect: TopBarSlotRect,
+        src_rgb: &[u8],
+        src_w: usize,
+        crop: TopBarSlotRect,
+    ) {
+        for dy in 0..rect.height {
+            let sy = crop.y + (dy * crop.height) / rect.height;
+            for dx in 0..rect.width {
+                let sx = crop.x + (dx * crop.width) / rect.width;
+                let s = (sy * src_w + sx) * 3;
+                let d = ((rect.y + dy) * frame_w + (rect.x + dx)) * 3;
+                frame[d..d + 3].copy_from_slice(&src_rgb[s..s + 3]);
+            }
+        }
+    }
+
+    let base_atlas = parse_hero_atlas().expect("base atlas must load");
+    let alt_atlas = parse_hero_alt_atlas().expect("alt atlas must load");
+    let catalog = HeroVisionCatalog::from_embedded().expect("vision catalog must load");
+    // Companion heroes with no entries in hero_alt_atlas.bin so slot 0 never collides via dedup.
+    let magnus = &base_atlas.heroes[&HeroId(97)];
+    let medusa = &base_atlas.heroes[&HeroId(94)];
+    let (w, h) = (1920usize, 1080usize);
+    let full_src = TopBarSlotRect { x: 0, y: 0, width: alt_atlas.width, height: alt_atlas.height };
+    let upper_src = TopBarSlotRect { x: 4, y: 2, width: alt_atlas.width - 8, height: 22 };
+
+    let mut failures = Vec::new();
+    for (idx, (expected_id, rgb)) in alt_atlas.entries.iter().enumerate() {
+        let mut cases = vec![
+            (true, full_src, compute_pickphase_topbar_slot_rects(w, h)),
+            (false, full_src, compute_ingame_topbar_slot_rects(w, h)),
+        ];
+        if matches!(idx, 9 | 13 | 18 | 23 | 28 | 30) {
+            cases.push((true, upper_src, compute_pickphase_topbar_slot_rects(w, h)));
+        }
+        for (is_pickphase, crop, (rad_r, dire_r)) in cases {
+            let mut frame_rgb = vec![0u8; w * h * 3];
+            paint_rgb_crop(&mut frame_rgb, w, rad_r[0], rgb, alt_atlas.width, crop);
+            paint_rgb_crop(&mut frame_rgb, w, rad_r[1], magnus, base_atlas.hero_width, full_src);
+            paint_rgb_crop(&mut frame_rgb, w, dire_r[0], medusa, base_atlas.hero_width, full_src);
+
+            let mut adapter = VisionCaptureAdapter::new(
+                SingleFrameSource(Some(RgbFrame {
+                    width: w,
+                    height: h,
+                    rgb: frame_rgb,
+                })),
+                catalog.clone(),
+            );
+            adapter.set_ally_faction(Faction::Radiant);
+            adapter.set_capture_mode(if is_pickphase {
+                VisionCaptureMode::DraftOnly
+            } else {
+                VisionCaptureMode::Any
+            });
+            let events = adapter.poll_events().expect("poll_events must succeed");
+            let slot0_pick = events.iter().find_map(|ev| match ev {
+                DraftEvent::PickDetected {
+                    side: Side::Allies,
+                    slot: 0,
+                    hero_id,
+                    ..
+                } => Some(*hero_id),
+                _ => None,
+            });
+            if slot0_pick != Some(*expected_id) || events.len() != 3 {
+                failures.push(format!(
+                    "idx={idx} pickphase={is_pickphase} crop={}x{} expected={expected_id:?} got_slot0={slot0_pick:?} events={events:?}",
+                    crop.width, crop.height
+                ));
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "Arcana/Persona adapter failures ({}):\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}

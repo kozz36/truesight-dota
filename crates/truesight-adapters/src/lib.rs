@@ -1,4 +1,5 @@
 pub mod gsi;
+pub mod hero_alt_atlas;
 pub mod meta_repo;
 pub mod snapshot_data;
 pub mod snapshot_pairs;
