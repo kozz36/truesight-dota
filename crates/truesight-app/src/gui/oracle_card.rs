@@ -400,7 +400,7 @@ impl TrueSightGuiApp {
                     continue;
                 };
                 if let Some(s) = analysis.ally_synergy_grid[i][k] {
-                    if best_syn.map_or(true, |cur| s > cur.2) {
+                    if best_syn.is_none_or(|cur| s > cur.2) {
                         best_syn = Some((a.hero_id, b.hero_id, s));
                     }
                 }
@@ -417,7 +417,7 @@ impl TrueSightGuiApp {
                     continue;
                 };
                 if let Some(c) = analysis.counter_grid[i][j] {
-                    if worst_cnt.map_or(true, |cur| c < cur.3) {
+                    if worst_cnt.is_none_or(|cur| c < cur.3) {
                         worst_cnt = Some((a.hero_id, e.hero_id, i, c));
                     }
                 }

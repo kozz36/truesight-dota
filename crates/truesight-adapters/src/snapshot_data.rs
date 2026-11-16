@@ -1,4 +1,6 @@
 // Auto-generated snapshot from OpenDota heroStats (127 heroes) + authoritative Pos 1-5 roles + neutral personal comfort defaults.
+#![allow(clippy::approx_constant)]
+
 use truesight_core::domain::{AttackType, Role};
 
 pub struct SnapshotHeroRow {

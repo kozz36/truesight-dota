@@ -392,6 +392,8 @@ pub struct EventQueueStats {
     pub recovered_resyncs: u64,
 }
 
+type SideSlotPicks = [Option<(HeroId, Option<Role>)>; 5];
+
 #[derive(Default)]
 struct GsiStateSnapshot {
     pending_reset_state: Option<(String, i32)>,
@@ -400,7 +402,7 @@ struct GsiStateSnapshot {
     latest_faction: Option<Faction>,
     latest_local_hero: Option<String>,
     latest_player_mappings: Vec<(u64, Faction, String)>,
-    latest_picks: [[Option<(HeroId, Option<Role>)>; 5]; 2],
+    latest_picks: [SideSlotPicks; 2],
     latest_bans: Vec<HeroId>,
 }
 

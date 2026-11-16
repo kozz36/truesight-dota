@@ -59,42 +59,33 @@ fn hero_role_affinity(matrix: &MatchupMatrix, hero_id: HeroId, role: Role) -> f3
     }
 }
 
-fn search_best_role_assignment(
-    matrix: &MatchupMatrix,
-    heroes: &[HeroId],
-    available_slots: &[usize],
-    hero_idx: usize,
-    used_mask: u8,
-    current_slots: &mut Vec<usize>,
-    current_score: f32,
-    best_score: &mut f32,
-    best_slots: &mut Vec<usize>,
-) {
-    if hero_idx == heroes.len() {
-        if current_score > *best_score + 1e-4 {
-            *best_score = current_score;
-            *best_slots = current_slots.clone();
+struct RoleAssignmentSearch<'a> {
+    matrix: &'a MatchupMatrix,
+    heroes: &'a [HeroId],
+    available_slots: &'a [usize],
+    current_slots: Vec<usize>,
+    best_score: f32,
+    best_slots: Vec<usize>,
+}
+
+impl RoleAssignmentSearch<'_> {
+    fn search(&mut self, hero_idx: usize, used_mask: u8, current_score: f32) {
+        if hero_idx == self.heroes.len() {
+            if current_score > self.best_score + 1e-4 {
+                self.best_score = current_score;
+                self.best_slots = self.current_slots.clone();
+            }
+            return;
         }
-        return;
-    }
-    for (pos, &slot) in available_slots.iter().enumerate() {
-        if (used_mask & (1 << pos)) != 0 {
-            continue;
+        for (pos, &slot) in self.available_slots.iter().enumerate() {
+            if (used_mask & (1 << pos)) != 0 {
+                continue;
+            }
+            let aff = hero_role_affinity(self.matrix, self.heroes[hero_idx], Role::ALL[slot]);
+            self.current_slots.push(slot);
+            self.search(hero_idx + 1, used_mask | (1 << pos), current_score + aff);
+            self.current_slots.pop();
         }
-        let aff = hero_role_affinity(matrix, heroes[hero_idx], Role::ALL[slot]);
-        current_slots.push(slot);
-        search_best_role_assignment(
-            matrix,
-            heroes,
-            available_slots,
-            hero_idx + 1,
-            used_mask | (1 << pos),
-            current_slots,
-            current_score + aff,
-            best_score,
-            best_slots,
-        );
-        current_slots.pop();
     }
 }
 
@@ -451,20 +442,16 @@ impl AppSession {
             return;
         }
 
-        let mut best_score = f32::NEG_INFINITY;
-        let mut best_slots = Vec::with_capacity(unlocked_heroes.len());
-        let mut current = Vec::with_capacity(unlocked_heroes.len());
-        search_best_role_assignment(
-            &self.matrix,
-            &unlocked_heroes,
-            &unlocked_slots,
-            0,
-            0,
-            &mut current,
-            0.0,
-            &mut best_score,
-            &mut best_slots,
-        );
+        let mut search = RoleAssignmentSearch {
+            matrix: &self.matrix,
+            heroes: &unlocked_heroes,
+            available_slots: &unlocked_slots,
+            current_slots: Vec::with_capacity(unlocked_heroes.len()),
+            best_score: f32::NEG_INFINITY,
+            best_slots: Vec::with_capacity(unlocked_heroes.len()),
+        };
+        search.search(0, 0, 0.0);
+        let best_slots = search.best_slots;
 
         let picks = self.side_picks_mut(side);
         for &s in &unlocked_slots {

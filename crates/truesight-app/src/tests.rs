@@ -621,7 +621,7 @@ fn faction_change_atomically_swaps_teams_and_enemy_scout_uses_neutral_comfort() 
     assert!(scout_recs.iter().all(|r| r.comfort_delta == 0.0));
 
     let top_enemy = &scout_recs[0];
-    let mut check_draft = session.draft.clone();
+    let mut check_draft = session.draft;
     check_draft.enemies[Role::Carry.index()] = Some(truesight_core::domain::DraftPick {
         hero_id: top_enemy.hero_id,
         role: Some(Role::Carry),

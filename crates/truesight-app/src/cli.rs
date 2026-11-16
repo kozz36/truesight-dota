@@ -350,10 +350,8 @@ pub fn parse_account_id_arg(args: &[String]) -> Result<Option<Option<u64>>, Stri
     while i < args.len() {
         let val = if args[i] == "--account-id" {
             args.get(i + 1).map(String::as_str)
-        } else if let Some(rest) = args[i].strip_prefix("--account-id=") {
-            Some(rest)
         } else {
-            None
+            args[i].strip_prefix("--account-id=")
         };
         if let Some(raw_str) = val {
             let trimmed = raw_str.trim();
@@ -428,7 +426,7 @@ fn render_cli_frame<W: Write>(
     } else {
         ("", "", "")
     };
-    write!(out, "\x1b[2J\x1b[H{dashboard}\n")?;
+    writeln!(out, "\x1b[2J\x1b[H{dashboard}")?;
     if let Some(err) = last_error {
         writeln!(out, "{red}Error: {err}{reset}")?;
     }

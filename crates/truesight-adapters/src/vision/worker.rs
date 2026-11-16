@@ -338,11 +338,11 @@ impl BoundedVisionWorker {
     pub fn set_capture_mode(&self, mode: VisionCaptureMode) {
         let next = mode as u8;
         let prev = self.capture_mode_code.swap(next, Ordering::AcqRel);
-        if prev != next {
-            if prev == VisionCaptureMode::Suppressed as u8 || mode == VisionCaptureMode::Suppressed
-            {
-                self.queue.request_reset();
-            }
+        if prev != next
+            && (prev == VisionCaptureMode::Suppressed as u8
+                || mode == VisionCaptureMode::Suppressed)
+        {
+            self.queue.request_reset();
         }
     }
 

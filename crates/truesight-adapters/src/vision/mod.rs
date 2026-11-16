@@ -456,12 +456,11 @@ impl HeroVisionCatalog {
             return None;
         }
 
+        type DescriptorSets<'a> = &'a [&'a [(HeroId, [u8; DESC_LEN])]];
+
         let saturated_dark_border = ov >= 12.0 && ms >= 28.0 && os >= 28.0;
-        let (entry_sets, threshold, has_portrait_detail): (
-            &[&[(HeroId, [u8; DESC_LEN])]],
-            f32,
-            bool,
-        ) = match layout {
+        let (entry_sets, threshold, has_portrait_detail): (DescriptorSets<'_>, f32, bool) =
+            match layout {
             TopBarLayout::SyntheticExact => (
                 &[&self.full_entries],
                 MATCH_L1_THRESHOLD,

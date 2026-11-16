@@ -256,8 +256,10 @@ struct CacheSyncState {
     latest_committed_meta_gen: u64,
 }
 
+type CacheCoordinatorEntry = (PathBuf, Arc<Mutex<CacheSyncState>>);
+
 fn coordinator_for_dir(dir: &Path) -> Arc<Mutex<CacheSyncState>> {
-    static REGISTRY: OnceLock<Mutex<Vec<(PathBuf, Arc<Mutex<CacheSyncState>>)>>> = OnceLock::new();
+    static REGISTRY: OnceLock<Mutex<Vec<CacheCoordinatorEntry>>> = OnceLock::new();
     let reg = REGISTRY.get_or_init(|| Mutex::new(Vec::new()));
     let mut list = reg.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((_, coord)) = list.iter().find(|(p, _)| p == dir) {
