@@ -55,6 +55,30 @@ impl TrueSightGuiApp {
                         });
                     });
 
+                // Vision Capture Capability Pill
+                let cap_dot = if self.session.vision_available {
+                    P_GEM
+                } else {
+                    P_NEUTRAL
+                };
+                let cap_resp = egui::Frame::NONE
+                    .fill(P_INDIGO_2)
+                    .stroke(Stroke::new(1.0_f32, P_LINE))
+                    .inner_margin(Margin::symmetric(8, 4))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let (dot_r, _) = ui.allocate_exact_size(vec2(7.0, 7.0), Sense::hover());
+                            ui.painter().rect_filled(dot_r, 0.0, cap_dot);
+                            ui.label(
+                                RichText::new(&self.session.vision_status)
+                                    .size(10.5)
+                                    .color(P_MUTED),
+                            );
+                        });
+                    })
+                    .response;
+                cap_resp.on_hover_text(&self.session.vision_detail);
+
                 // Interactive Faction Toggle Pill (YOU: RADIANT <-> / YOU: DIRE <->)
                 let fac_col = match self.session.draft.ally_faction {
                     Faction::Radiant => P_GEM,

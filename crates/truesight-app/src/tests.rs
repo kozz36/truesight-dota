@@ -1073,3 +1073,37 @@ fn live_gsi_init_and_custom_setup_suppress_vision_and_restore_across_match_trans
     );
     assert_eq!(session.draft.allies.iter().flatten().count(), 1);
 }
+
+#[test]
+fn session_and_cli_surface_capture_availability_and_allow_manual_picks_when_unavailable() {
+    use truesight_adapters::vision::{CaptureAvailability, CaptureBackendKind};
+
+    let mut session = AppSession::new().unwrap();
+    let unavailable = CaptureAvailability::Unavailable {
+        backend: CaptureBackendKind::WindowsNative,
+        reason: "Native Windows capture backend is not implemented yet (#12); manual pick mode & GSI remain active.".into(),
+    };
+    session.set_vision_availability(&unavailable);
+    assert_eq!(session.vision_status, "CAP: MANUAL");
+    assert!(session.vision_detail.contains("#12"));
+    assert!(!session.vision_available);
+
+    // Manual draft entry & polling with vision_worker = None must remain completely functional.
+    assert!(crate::execute_command(&mut session, "ally 1 anti-mage").is_ok());
+    session.poll_live_sources(None, None);
+    assert_eq!(session.draft.allies[0].map(|p| p.hero_id), Some(truesight_core::domain::HeroId(1)));
+
+    let cli_out = crate::render_dashboard_string(&session, false);
+    assert!(
+        cli_out.contains("Vision: CAP: MANUAL"),
+        "CLI header must surface capture status explicitly: {cli_out}"
+    );
+
+    let available = CaptureAvailability::Available {
+        backend: CaptureBackendKind::X11,
+        detail: "X11/XWayland (xprop + import)".into(),
+    };
+    session.set_vision_availability(&available);
+    assert_eq!(session.vision_status, "CAP: X11");
+    assert!(session.vision_available);
+}

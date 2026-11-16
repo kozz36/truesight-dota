@@ -70,6 +70,12 @@ impl TrueSightGuiApp {
             .player_account_id
             .map(|id| id.to_string())
             .unwrap_or_default();
+        let status_banner = if vision_worker.is_none() && !session.vision_detail.is_empty() {
+            session.vision_detail.clone()
+        } else {
+            "Click any Ally (P1..P5) or Enemy (P1..P5) slot card, type hero name, and press Enter."
+                .into()
+        };
         Self {
             session,
             gsi_listener,
@@ -82,9 +88,7 @@ impl TrueSightGuiApp {
             focus_picker_input: false,
             drag_slot: None,
             suggest_filter: String::new(),
-            status_banner:
-                "Click any Ally (P1..P5) or Enemy (P1..P5) slot card, type hero name, and press Enter."
-                    .into(),
+            status_banner,
             account_editor_open: false,
             account_input,
             enemy_scout_role: None,

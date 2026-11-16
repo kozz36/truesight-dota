@@ -2282,3 +2282,72 @@ fn vision_recalls_dark_low_contrast_heroes_and_rejects_empty_slots_across_resolu
         failures.join("\n")
     );
 }
+
+#[test]
+fn capture_factory_detects_platform_capabilities_and_reports_actionable_degradation() {
+    use crate::vision::{
+        CaptureAvailability, CaptureBackendKind, detect_capture_availability_for,
+        spawn_platform_worker_for,
+    };
+
+    assert_eq!(
+        detect_capture_availability_for("linux", false, true, true, true),
+        CaptureAvailability::Available {
+            backend: CaptureBackendKind::X11,
+            detail: "X11/XWayland (xprop + import)".into(),
+        }
+    );
+
+    let missing_tools = detect_capture_availability_for("linux", false, true, false, true);
+    assert!(matches!(
+        missing_tools,
+        CaptureAvailability::Unavailable {
+            backend: CaptureBackendKind::X11,
+            ref reason,
+        } if reason.contains("xprop") && reason.to_ascii_lowercase().contains("manual")
+    ));
+
+    let native_wayland = detect_capture_availability_for("linux", true, false, false, false);
+    assert!(matches!(
+        native_wayland,
+        CaptureAvailability::Unavailable {
+            backend: CaptureBackendKind::WaylandPortal,
+            ref reason,
+        } if reason.contains("Wayland") && reason.contains("#13")
+    ));
+
+    let win = detect_capture_availability_for("windows", false, false, false, false);
+    assert!(matches!(
+        win,
+        CaptureAvailability::Unavailable {
+            backend: CaptureBackendKind::WindowsNative,
+            ref reason,
+        } if reason.contains("Windows") && reason.contains("#12")
+    ));
+
+    let other = detect_capture_availability_for("macos", false, false, false, false);
+    assert!(matches!(
+        other,
+        CaptureAvailability::Unavailable {
+            backend: CaptureBackendKind::Unsupported,
+            ..
+        }
+    ));
+
+    // When backend is unavailable (or marked Available for an unimplemented backend),
+    // factory spawns no background worker and guarantees !avail.is_available().
+    let (worker, avail) = spawn_platform_worker_for(&win);
+    assert!(worker.is_none());
+    assert_eq!(avail, win);
+    assert_eq!(avail.badge_label(), "CAP: MANUAL");
+    assert!(!avail.is_available());
+
+    let unimplemented_avail = CaptureAvailability::Available {
+        backend: CaptureBackendKind::WindowsNative,
+        detail: "Win32 stub".into(),
+    };
+    let (w2, a2) = spawn_platform_worker_for(&unimplemented_avail);
+    assert!(w2.is_none());
+    assert!(!a2.is_available());
+    assert_eq!(a2.badge_label(), "CAP: MANUAL");
+}

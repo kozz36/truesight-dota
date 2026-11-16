@@ -42,8 +42,8 @@ pub fn render_dashboard_string(session: &AppSession, color: bool) -> String {
         session.draft.ally_faction.label()
     ));
     out.push_str(&format!(
-        " GSI State: {d}{}{r}   |   {d}{}{r}\n",
-        session.last_gsi_state, session.db_status
+        " GSI State: {d}{}{r}   |   Vision: {d}{}{r}   |   {d}{}{r}\n",
+        session.last_gsi_state, session.vision_status, session.db_status
     ));
     out.push_str(&format!(
         "{b}----------------------------------------------------------------------------------------{r}\n"
