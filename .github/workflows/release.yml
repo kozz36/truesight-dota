@@ -6,7 +6,7 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -108,10 +108,12 @@ jobs:
 
       - name: Package Windows ZIP and MSI installer
         shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           .\packaging\windows\build-release-packages.ps1 `
             -ExePath ".\target\release\truesight-dota.exe" `
-            -Version "${{ github.ref_name }}" `
+            -Version $env:RELEASE_TAG `
             -OutDir ".\dist-windows"
 
       - name: Upload Windows release artifacts
@@ -124,6 +126,8 @@ jobs:
 
   publish-release:
     name: Generate Unified SHA256SUMS & Publish Release
+    permissions:
+      contents: write
     needs:
       - release-linux-x86_64
       - release-windows-x86_64
