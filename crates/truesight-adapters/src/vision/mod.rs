@@ -1,8 +1,15 @@
+mod capture;
 mod worker;
-pub use worker::{
-    BoundedVisionWorker, ScreenFrameSource, VisionCaptureAdapter, X11TopBarFrameSource,
-    build_x11_import_args, is_dota2_xprop_output,
+mod x11;
+
+pub use capture::{
+    CaptureAvailability, CaptureBackendKind, detect_capture_availability,
+    detect_capture_availability_for, spawn_platform_worker, spawn_platform_worker_for,
 };
+pub use worker::{BoundedVisionWorker, ScreenFrameSource, VisionCaptureAdapter};
+#[cfg(target_os = "linux")]
+pub use x11::X11TopBarFrameSource;
+pub use x11::{build_x11_import_args, is_dota2_xprop_output};
 
 use std::collections::HashMap;
 use truesight_core::domain::HeroId;

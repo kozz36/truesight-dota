@@ -1,7 +1,7 @@
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use truesight_adapters::gsi::BoundedGsiListener;
 use truesight_adapters::sync::LocalCacheManager;
-use truesight_adapters::vision::{BoundedVisionWorker, VisionCaptureMode};
+use truesight_adapters::vision::{BoundedVisionWorker, CaptureAvailability, VisionCaptureMode};
 use truesight_core::domain::{Bracket, DraftPick, DraftState, Faction, HeroId, Role, Side, TEAM_SIZE};
 use truesight_core::math::{
     DraftAnalysis5v5, HeroRecommendation, MatchupMatrix, ModelWeights, evaluate_draft_5v5,
@@ -22,6 +22,9 @@ pub struct AppSession {
     pub cache_mgr: LocalCacheManager,
     pub db_status: String,
     pub last_gsi_state: String,
+    pub vision_available: bool,
+    pub vision_status: String,
+    pub vision_detail: String,
     pub ally_locked_slots: [bool; TEAM_SIZE],
     pub enemy_locked_slots: [bool; TEAM_SIZE],
     pub manually_dismissed: Vec<HeroId>,
@@ -110,6 +113,9 @@ impl AppSession {
             cache_mgr,
             db_status,
             last_gsi_state: "IDLE (Waiting for Dota 2 GSI)".into(),
+            vision_available: false,
+            vision_status: "CAP: MANUAL".into(),
+            vision_detail: "Manual pick mode (screen capture inactive).".into(),
             ally_locked_slots: [false; TEAM_SIZE],
             enemy_locked_slots: [false; TEAM_SIZE],
             manually_dismissed: Vec::new(),
@@ -141,6 +147,13 @@ impl AppSession {
         if let Ok(m) = self.cache_mgr.build_repository().load_matrix(bracket) {
             self.matrix = m;
         }
+    }
+
+    /// Updates UI/CLI capture capability indicators from the platform capture factory.
+    pub fn set_vision_availability(&mut self, availability: &CaptureAvailability) {
+        self.vision_available = availability.is_available();
+        self.vision_status = availability.badge_label().to_string();
+        self.vision_detail = availability.summary().to_string();
     }
 
     pub fn reload_repository(&mut self) {

@@ -14,7 +14,7 @@ pub use session::AppSession;
 use std::io::{self, Write};
 use truesight_adapters::gsi::BoundedGsiListener;
 use truesight_adapters::sync::LocalCacheManager;
-use truesight_adapters::vision::BoundedVisionWorker;
+use truesight_adapters::vision::spawn_platform_worker;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -81,7 +81,11 @@ fn main() {
             None
         }
     };
-    let mut vision_worker = BoundedVisionWorker::spawn();
+    let (mut vision_worker, vision_availability) = spawn_platform_worker();
+    session.set_vision_availability(&vision_availability);
+    if vision_worker.is_none() {
+        let _ = writeln!(io::stderr(), "Info: {}", session.vision_detail);
+    }
 
     #[cfg(feature = "gui")]
     {

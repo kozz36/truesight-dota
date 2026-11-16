@@ -125,8 +125,13 @@ fn v4_layout_rects_fit_viewport_and_align_cards() {
     assert!(execute_command(&mut session, "enemy 4 tusk").unwrap());
     assert!(execute_command(&mut session, "enemy 5 witch doctor").unwrap());
     session.draft.target_role = Role::Mid;
+    session.set_vision_availability(&truesight_adapters::vision::CaptureAvailability::Unavailable {
+        backend: truesight_adapters::vision::CaptureBackendKind::WindowsNative,
+        reason: "Native Windows capture backend is not implemented yet (#12); manual pick mode & GSI remain active.".into(),
+    });
 
     let mut app = TrueSightGuiApp::new(session, None, None);
+    assert!(app.status_banner.contains("#12"), "Unavailable capture must explain fallback in banner");
     app.picker_target = Some(PickerTarget::Slot(Side::Allies, 1));
 
     for viewport in [
@@ -140,8 +145,8 @@ fn v4_layout_rects_fit_viewport_and_align_cards() {
             let r = render_at_viewport(&mut app, &ctx, viewport);
 
             assert!(
-                r.top_bar.height() > 24.0 && r.top_bar.height() < 65.0,
-                "viewport={viewport:?} tab={tab:?} top_bar height out of range: {:?}",
+                r.top_bar.height() > 24.0 && r.top_bar.height() < 65.0 && r.top_bar.max.x <= viewport.x,
+                "viewport={viewport:?} tab={tab:?} top_bar out of range: {:?}",
                 r.top_bar
             );
             assert!(r.allies.min.y > r.top_bar.max.y);

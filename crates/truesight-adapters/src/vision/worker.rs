@@ -1,6 +1,5 @@
 use super::*;
 use crate::gsi::{BoundedDraftQueue, EventQueueStats};
-use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::thread::{self, JoinHandle};
@@ -8,109 +7,9 @@ use std::time::Duration;
 use truesight_core::domain::{Faction, HeroId, Role, Side};
 use truesight_core::ports::{DraftEvent, DraftEventSource, PortError};
 
-/// Port abstraction for PipeWire / X11 / test frame capture backends.
+/// Port abstraction for X11 / Windows / Wayland / mock frame capture backends.
 pub trait ScreenFrameSource {
     fn capture_frame(&mut self) -> Result<Option<RgbFrame>, PortError>;
-}
-
-/// Validates `xprop` output so only visible Dota 2 (`WM_CLASS = "dota2"`) windows qualify.
-pub fn is_dota2_xprop_output(props_str: &str) -> bool {
-    if props_str.contains("_NET_WM_STATE_HIDDEN") {
-        return false;
-    }
-    props_str.lines().any(|line| {
-        let trimmed = line.trim_start();
-        trimmed.starts_with("WM_CLASS") && trimmed.contains("\"dota2\"")
-    })
-}
-
-/// Builds the ImageMagick `import` arguments for silent top-bar X11 capture.
-pub fn build_x11_import_args(window_id: &str) -> [&str; 8] {
-    [
-        "-silent",
-        "-window",
-        window_id,
-        "-depth",
-        "8",
-        "-crop",
-        "100%x8%+0+0",
-        "ppm:-",
-    ]
-}
-
-/// Live X11/XWayland top-bar frame source capturing the `"dota2"` window strip via `xprop` + `import`.
-#[derive(Debug, Default)]
-pub struct X11TopBarFrameSource {
-    cached_window: Option<String>,
-}
-
-impl X11TopBarFrameSource {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    fn find_dota_window() -> Option<String> {
-        let root_out = Command::new("xprop")
-            .args(["-root", "_NET_CLIENT_LIST"])
-            .output()
-            .ok()?;
-        if !root_out.status.success() {
-            return None;
-        }
-        let root_text = String::from_utf8_lossy(&root_out.stdout);
-        for tok in root_text.split_whitespace() {
-            let wid = tok.trim_end_matches(',');
-            if !wid.starts_with("0x") {
-                continue;
-            }
-            let props = Command::new("xprop")
-                .args(["-id", wid, "WM_CLASS", "_NET_WM_STATE"])
-                .output()
-                .ok();
-            let Some(props) = props else {
-                continue;
-            };
-            let props_str = String::from_utf8_lossy(&props.stdout);
-            if !is_dota2_xprop_output(&props_str) {
-                continue;
-            }
-            return Some(wid.to_string());
-        }
-        None
-    }
-}
-
-impl ScreenFrameSource for X11TopBarFrameSource {
-    fn capture_frame(&mut self) -> Result<Option<RgbFrame>, PortError> {
-        if self.cached_window.is_none() {
-            self.cached_window = Self::find_dota_window();
-        }
-        let Some(ref wid) = self.cached_window else {
-            return Ok(None);
-        };
-
-        let output = Command::new("import")
-            .args(build_x11_import_args(wid))
-            .output();
-
-        let Ok(out) = output else {
-            self.cached_window = None;
-            return Ok(None);
-        };
-        if !out.status.success() {
-            self.cached_window = None;
-            return Ok(None);
-        }
-
-        let Some(frame) = parse_ppm_p6(&out.stdout) else {
-            self.cached_window = None;
-            return Ok(None);
-        };
-        if frame.width < 640 || frame.height < 40 {
-            return Ok(None);
-        }
-        Ok(Some(frame))
-    }
 }
 
 const MIN_DETECTED_SLOTS_QUORUM: usize = 2;
@@ -392,7 +291,7 @@ pub struct BoundedVisionWorker {
 
 impl BoundedVisionWorker {
     pub fn spawn() -> Option<Self> {
-        Self::spawn_with_source(X11TopBarFrameSource::new())
+        super::spawn_platform_worker().0
     }
 
     /// Spawns a bounded background vision worker backed by a custom frame source.
