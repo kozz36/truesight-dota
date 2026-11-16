@@ -2351,3 +2351,159 @@ fn capture_factory_detects_platform_capabilities_and_reports_actionable_degradat
     assert!(!a2.is_available());
     assert_eq!(a2.badge_label(), "CAP: MANUAL");
 }
+
+#[test]
+fn platform_paths_and_steam_vdf_support_windows_without_home_and_preserve_linux() {
+    use crate::platform::{
+        PlatformEnv, build_curl_args, detect_steam_vdf_in_candidates,
+        parse_windows_reg_steam_path, resolve_cache_dir_for, resolve_config_file_path_for,
+        steam_vdf_candidates_for,
+    };
+    use std::path::{Path, PathBuf};
+
+    // 1. Linux preserves existing $HOME paths and falls back to temp_dir instead of /tmp when HOME is unset.
+    let linux_env = PlatformEnv {
+        home: Some(PathBuf::from("/home/tester")),
+        temp_dir: PathBuf::from("/var/tmp/ts-test"),
+        ..PlatformEnv::default()
+    };
+    assert_eq!(
+        resolve_config_file_path_for("linux", &linux_env),
+        PathBuf::from("/home/tester/.config/truesight-dota/config.toml")
+    );
+    assert_eq!(
+        resolve_cache_dir_for("linux", &linux_env),
+        PathBuf::from("/home/tester/.local/share/truesight-dota/cache")
+    );
+
+    let linux_no_home = PlatformEnv {
+        temp_dir: PathBuf::from("/var/tmp/ts-headless"),
+        ..PlatformEnv::default()
+    };
+    assert_eq!(
+        resolve_config_file_path_for("linux", &linux_no_home),
+        PathBuf::from("/var/tmp/ts-headless/.config/truesight-dota/config.toml")
+    );
+    assert_eq!(
+        resolve_cache_dir_for("linux", &linux_no_home),
+        PathBuf::from("/var/tmp/ts-headless/.local/share/truesight-dota/cache")
+    );
+
+    // 2. Windows ignores unset HOME, prefers APPDATA / LOCALAPPDATA, falls back to USERPROFILE or temp_dir, never /tmp.
+    let win_env = PlatformEnv {
+        home: None,
+        appdata: Some(PathBuf::from(r"C:\Users\Player\AppData\Roaming")),
+        localappdata: Some(PathBuf::from(r"C:\Users\Player\AppData\Local")),
+        userprofile: Some(PathBuf::from(r"C:\Users\Player")),
+        program_files_x86: Some(PathBuf::from(r"C:\Program Files (x86)")),
+        program_files: Some(PathBuf::from(r"C:\Program Files")),
+        temp_dir: PathBuf::from(r"C:\Users\Player\AppData\Local\Temp"),
+    };
+    assert_eq!(
+        resolve_config_file_path_for("windows", &win_env),
+        PathBuf::from(r"C:\Users\Player\AppData\Roaming")
+            .join("truesight-dota")
+            .join("config.toml")
+    );
+    assert_eq!(
+        resolve_cache_dir_for("windows", &win_env),
+        PathBuf::from(r"C:\Users\Player\AppData\Local")
+            .join("truesight-dota")
+            .join("cache")
+    );
+
+    let win_profile_only = PlatformEnv {
+        userprofile: Some(PathBuf::from(r"C:\Users\Player")),
+        temp_dir: PathBuf::from(r"C:\Windows\Temp"),
+        ..PlatformEnv::default()
+    };
+    assert_eq!(
+        resolve_config_file_path_for("windows", &win_profile_only),
+        PathBuf::from(r"C:\Users\Player")
+            .join("AppData")
+            .join("Roaming")
+            .join("truesight-dota")
+            .join("config.toml")
+    );
+    assert_eq!(
+        resolve_cache_dir_for("windows", &win_profile_only),
+        PathBuf::from(r"C:\Users\Player")
+            .join("AppData")
+            .join("Local")
+            .join("truesight-dota")
+            .join("cache")
+    );
+
+    let win_empty = PlatformEnv {
+        temp_dir: PathBuf::from(r"C:\Windows\Temp"),
+        ..PlatformEnv::default()
+    };
+    assert_eq!(
+        resolve_config_file_path_for("windows", &win_empty),
+        PathBuf::from(r"C:\Windows\Temp")
+            .join("truesight-dota")
+            .join("config.toml")
+    );
+    assert_eq!(
+        resolve_cache_dir_for("windows", &win_empty),
+        PathBuf::from(r"C:\Windows\Temp")
+            .join("truesight-dota")
+            .join("cache")
+    );
+
+    // 3. Windows Steam loginusers.vdf candidates & registry SteamPath parsing + real temp fixture fallback.
+    let reg_stdout = "\r\nHKEY_CURRENT_USER\\Software\\Valve\\Steam\r\n    SteamPath    REG_SZ    D:/Games/Steam\r\n\r\n";
+    let parsed_reg = parse_windows_reg_steam_path(reg_stdout);
+    assert_eq!(parsed_reg.as_deref(), Some(Path::new("D:/Games/Steam")));
+    assert_eq!(parse_windows_reg_steam_path("ERROR: unable to find key"), None);
+
+    let win_candidates = steam_vdf_candidates_for("windows", &win_env, parsed_reg.as_deref());
+    assert_eq!(
+        win_candidates,
+        vec![
+            PathBuf::from(r"C:\Program Files (x86)").join("Steam").join("config").join("loginusers.vdf"),
+            PathBuf::from(r"C:\Program Files").join("Steam").join("config").join("loginusers.vdf"),
+            PathBuf::from(r"C:\Users\Player\AppData\Local").join("Steam").join("config").join("loginusers.vdf"),
+            PathBuf::from("D:/Games/Steam").join("config").join("loginusers.vdf"),
+        ]
+    );
+
+    let tmp_root = std::env::temp_dir().join(format!("ts_win_vdf_test_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_root);
+    let custom_steam = tmp_root.join("CustomSteam");
+    std::fs::create_dir_all(custom_steam.join("config")).unwrap();
+    std::fs::write(
+        custom_steam.join("config").join("loginusers.vdf"),
+        r#""users" { "76561198061460213" { "MostRecent" "1" } }"#,
+    )
+    .unwrap();
+    let vdf_env = PlatformEnv {
+        program_files_x86: Some(tmp_root.join("MissingProgramFilesX86")),
+        ..PlatformEnv::default()
+    };
+    let candidates = steam_vdf_candidates_for("windows", &vdf_env, Some(&custom_steam));
+    assert_eq!(detect_steam_vdf_in_candidates(&candidates), Some(101_194_485));
+    let _ = std::fs::remove_dir_all(&tmp_root);
+
+    // 4. Shared curl argument builder unifies OpenDota GET & STRATZ POST invocations.
+    assert_eq!(
+        build_curl_args("https://api.opendota.com/api/heroStats", &[]),
+        vec!["-fsSL", "--max-time", "6", "https://api.opendota.com/api/heroStats"]
+    );
+    assert_eq!(
+        build_curl_args(
+            "https://api.stratz.com/graphql",
+            &["-H", "Content-Type: application/json", "-d", "{}"]
+        ),
+        vec![
+            "-fsSL",
+            "--max-time",
+            "6",
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            "{}",
+            "https://api.stratz.com/graphql",
+        ]
+    );
+}
