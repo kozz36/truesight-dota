@@ -2020,3 +2020,105 @@ fn vision_catalog_matches_all_arcana_and_persona_portraits_across_layouts() {
         );
     }
 }
+
+#[test]
+fn vision_pickphase_and_ingame_adapter_detect_all_49_arcana_and_persona_variants() {
+    use crate::hero_alt_atlas::parse_hero_alt_atlas;
+    use crate::vision::{
+        HeroVisionCatalog, RgbFrame, ScreenFrameSource, TopBarSlotRect, VisionCaptureAdapter,
+        VisionCaptureMode, compute_ingame_topbar_slot_rects, compute_pickphase_topbar_slot_rects,
+        parse_hero_atlas,
+    };
+    use truesight_core::domain::Faction;
+
+    struct SingleFrameSource(Option<RgbFrame>);
+    impl ScreenFrameSource for SingleFrameSource {
+        fn capture_frame(&mut self) -> Result<Option<RgbFrame>, truesight_core::ports::PortError> {
+            Ok(self.0.take())
+        }
+    }
+
+    fn paint_rgb_crop(
+        frame: &mut [u8],
+        frame_w: usize,
+        rect: TopBarSlotRect,
+        src_rgb: &[u8],
+        src_w: usize,
+        crop: TopBarSlotRect,
+    ) {
+        for dy in 0..rect.height {
+            let sy = crop.y + (dy * crop.height) / rect.height;
+            for dx in 0..rect.width {
+                let sx = crop.x + (dx * crop.width) / rect.width;
+                let s = (sy * src_w + sx) * 3;
+                let d = ((rect.y + dy) * frame_w + (rect.x + dx)) * 3;
+                frame[d..d + 3].copy_from_slice(&src_rgb[s..s + 3]);
+            }
+        }
+    }
+
+    let base_atlas = parse_hero_atlas().expect("base atlas must load");
+    let alt_atlas = parse_hero_alt_atlas().expect("alt atlas must load");
+    let catalog = HeroVisionCatalog::from_embedded().expect("vision catalog must load");
+    // Companion heroes with no entries in hero_alt_atlas.bin so slot 0 never collides via dedup.
+    let magnus = &base_atlas.heroes[&HeroId(97)];
+    let medusa = &base_atlas.heroes[&HeroId(94)];
+    let (w, h) = (1920usize, 1080usize);
+    let full_src = TopBarSlotRect { x: 0, y: 0, width: alt_atlas.width, height: alt_atlas.height };
+    let upper_src = TopBarSlotRect { x: 4, y: 2, width: alt_atlas.width - 8, height: 22 };
+
+    let mut failures = Vec::new();
+    for (idx, (expected_id, rgb)) in alt_atlas.entries.iter().enumerate() {
+        let mut cases = vec![
+            (true, full_src, compute_pickphase_topbar_slot_rects(w, h)),
+            (false, full_src, compute_ingame_topbar_slot_rects(w, h)),
+        ];
+        if matches!(idx, 9 | 13 | 18 | 23 | 28 | 30) {
+            cases.push((true, upper_src, compute_pickphase_topbar_slot_rects(w, h)));
+        }
+        for (is_pickphase, crop, (rad_r, dire_r)) in cases {
+            let mut frame_rgb = vec![0u8; w * h * 3];
+            paint_rgb_crop(&mut frame_rgb, w, rad_r[0], rgb, alt_atlas.width, crop);
+            paint_rgb_crop(&mut frame_rgb, w, rad_r[1], magnus, base_atlas.hero_width, full_src);
+            paint_rgb_crop(&mut frame_rgb, w, dire_r[0], medusa, base_atlas.hero_width, full_src);
+
+            let mut adapter = VisionCaptureAdapter::new(
+                SingleFrameSource(Some(RgbFrame {
+                    width: w,
+                    height: h,
+                    rgb: frame_rgb,
+                })),
+                catalog.clone(),
+            );
+            adapter.set_ally_faction(Faction::Radiant);
+            adapter.set_capture_mode(if is_pickphase {
+                VisionCaptureMode::DraftOnly
+            } else {
+                VisionCaptureMode::Any
+            });
+            let events = adapter.poll_events().expect("poll_events must succeed");
+            let slot0_pick = events.iter().find_map(|ev| match ev {
+                DraftEvent::PickDetected {
+                    side: Side::Allies,
+                    slot: 0,
+                    hero_id,
+                    ..
+                } => Some(*hero_id),
+                _ => None,
+            });
+            if slot0_pick != Some(*expected_id) || events.len() != 3 {
+                failures.push(format!(
+                    "idx={idx} pickphase={is_pickphase} crop={}x{} expected={expected_id:?} got_slot0={slot0_pick:?} events={events:?}",
+                    crop.width, crop.height
+                ));
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "Arcana/Persona adapter failures ({}):\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
