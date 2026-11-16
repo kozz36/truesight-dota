@@ -16,6 +16,7 @@ This document defines the tested OS support matrix, per-platform runtime depende
 
 - **Linux (`x86_64`)**:
   - **Live X11/XWayland capture**: `xprop` (`x11-utils` / `xorg-xprop`) and ImageMagick (`import`) on `PATH`. If missing, TrueSight Dota degrades cleanly to `CAP: MANUAL` while keeping manual hero entry and Dota 2 GSI active.
+  - **Wayland & desktop icon integration**: The GUI sets `app_id = "truesight-dota"` and embeds the Gem of True Sight window icon directly from `hero_atlas.bin`. On Wayland/Linux desktop environments, run `install-desktop.sh` (included in the release tarball and [`packaging/linux/`](../packaging/linux/)) to register `truesight-dota.desktop` and the Gem PNG icon (`packaging/icons/truesight-dota.png`).
   - **OpenDota / STRATZ sync**: `curl` on `PATH`.
   - **Building GUI from source**: `pkg-config`, `libxkbcommon-dev`, `libxcb-render0-dev`, `libxcb-shape0-dev`, `libxcb-xfixes0-dev`, `libwayland-dev`, `libgl1-mesa-dev`, `libegl1-mesa-dev`, `libgtk-3-dev` (not needed with `--no-default-features`).
 - **Windows (`x86_64`, Windows 10 / Windows 11)**:
@@ -41,9 +42,9 @@ TrueSight Dota listens on loopback `http://127.0.0.1:4001/` (`TRUESIGHT_GSI_ADDR
 
 Tagged `v*` builds in [`.github/workflows/release.yml`](../.github/workflows/release.yml) run full format/Clippy/test gates and release `--demo --no-color` smoke tests before publishing:
 
-- `truesight-dota-linux-x86_64.tar.gz` (`truesight-dota`, `gamestate_integration_truesight.cfg`, `LICENSE`, `README.md`)
-- `truesight-dota-windows-x86_64.msi` (per-user WiX v4 MSI installer into `%LOCALAPPDATA%\Programs\TrueSight Dota` + Start Menu shortcut, no admin UAC required)
-- `truesight-dota-windows-x86_64.zip` (portable archive including `truesight-dota.exe`, `gamestate_integration_truesight.cfg`, `install-gsi.ps1`, `LICENSE`, `README.md`)
+- `truesight-dota-linux-x86_64.tar.gz` (`truesight-dota`, `gamestate_integration_truesight.cfg`, `truesight-dota.desktop`, `install-desktop.sh`, `truesight-dota.png`, `LICENSE`, `README.md`)
+- `truesight-dota-windows-x86_64.msi` (per-user WiX v4 MSI installer into `%LOCALAPPDATA%\Programs\TrueSight Dota` + Start Menu shortcut with Gem icon, no admin UAC required)
+- `truesight-dota-windows-x86_64.zip` (portable archive including `truesight-dota.exe`, `gamestate_integration_truesight.cfg`, `install-gsi.ps1`, `truesight-dota.ico`, `LICENSE`, `README.md`)
 - `SHA256SUMS` (unified SHA-256 checksums for all artifacts in the release)
 
 Verify checksums locally after download:

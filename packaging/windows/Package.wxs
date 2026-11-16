@@ -8,6 +8,8 @@
         <SummaryInformation Description="Native 5v5 draft analyzer and recommender for Dota 2" />
         <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
         <MediaTemplate EmbedCab="yes" />
+        <Icon Id="TrueSightGem.ico" SourceFile="$(var.StageDir)\truesight-dota.ico" />
+        <Property Id="ARPPRODUCTICON" Value="TrueSightGem.ico" />
 
         <Feature Id="Main" Title="TrueSight Dota" Level="1">
             <ComponentGroupRef Id="AppComponents" />
@@ -80,7 +82,8 @@
                           Name="TrueSight Dota"
                           Description="Launch TrueSight Dota 5v5 Draft Oracle"
                           Target="[INSTALLFOLDER]truesight-dota.exe"
-                          WorkingDirectory="INSTALLFOLDER" />
+                          WorkingDirectory="INSTALLFOLDER"
+                          Icon="TrueSightGem.ico" />
                 <RemoveFolder Id="CleanProgramsFolder" Directory="ApplicationProgramsFolder" On="uninstall" />
                 <RemoveFolder Id="CleanInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
                 <RegistryValue Root="HKCU"

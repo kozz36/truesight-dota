@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=TrueSight Dota
+Comment=Native 5v5 draft analyzer and recommender for Dota 2
+Exec=truesight-dota
+Icon=truesight-dota
+Terminal=false
+Categories=Game;Utility;
+StartupWMClass=truesight-dota
+StartupNotify=true
