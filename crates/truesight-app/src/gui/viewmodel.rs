@@ -64,7 +64,10 @@ pub fn compute_slot_breakdown(
                     continue;
                 }
                 if let Some(other) = other_opt {
-                    syn_sum += session.matrix.cell(pick.hero_id, other.hero_id).synergy_delta;
+                    syn_sum += session
+                        .matrix
+                        .cell(pick.hero_id, other.hero_id)
+                        .synergy_delta;
                     syn_cnt += 1;
                 }
             }
@@ -194,4 +197,3 @@ pub fn compute_comp_diagnostic(
         score,
     }
 }
-

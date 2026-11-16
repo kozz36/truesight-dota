@@ -134,9 +134,13 @@ impl<S: ScreenFrameSource> VisionCaptureAdapter<S> {
     ) -> [SlotCandidate; 5] {
         let mut candidates = [None; 5];
         for (slot, rect) in rects.iter().enumerate() {
-            candidates[slot] = self
-                .catalog
-                .match_slot_with_layout(&frame.rgb, frame.width, frame.height, *rect, layout);
+            candidates[slot] = self.catalog.match_slot_with_layout(
+                &frame.rgb,
+                frame.width,
+                frame.height,
+                *rect,
+                layout,
+            );
         }
         candidates
     }
@@ -228,8 +232,7 @@ impl<S: ScreenFrameSource> DraftEventSource for VisionCaptureAdapter<S> {
             TopBarLayout::PickPhase,
             TopBarLayout::InGame,
         ] {
-            if self.capture_mode == VisionCaptureMode::DraftOnly && layout == TopBarLayout::InGame
-            {
+            if self.capture_mode == VisionCaptureMode::DraftOnly && layout == TopBarLayout::InGame {
                 continue;
             }
             let (score, unique_count, rad, dire) = self.evaluate_layout(&frame, virtual_h, layout);
@@ -317,7 +320,14 @@ impl BoundedVisionWorker {
         let worker = thread::Builder::new()
             .name("truesight-vision-worker".into())
             .spawn(move || {
-                run_vision_loop(source, catalog, queue_ref, faction_ref, mode_ref, shutdown_ref)
+                run_vision_loop(
+                    source,
+                    catalog,
+                    queue_ref,
+                    faction_ref,
+                    mode_ref,
+                    shutdown_ref,
+                )
             })
             .ok()?;
 
@@ -389,7 +399,11 @@ fn run_vision_loop<S: ScreenFrameSource>(
             adapter.reset_state();
         }
         let dire = ally_faction_code.load(Ordering::Relaxed) == 1;
-        adapter.set_ally_faction(if dire { Faction::Dire } else { Faction::Radiant });
+        adapter.set_ally_faction(if dire {
+            Faction::Dire
+        } else {
+            Faction::Radiant
+        });
         let mode = VisionCaptureMode::from_code(capture_mode_code.load(Ordering::Acquire));
         adapter.set_capture_mode(mode);
 

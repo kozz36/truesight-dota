@@ -30,7 +30,10 @@ fn parse_gsi_events_from_root(root: &JsonVal) -> Vec<DraftEvent> {
 
     let map_node = root.get("map").unwrap_or(root);
     if let Some(state) = map_node.get("game_state").and_then(JsonVal::as_str) {
-        let clock = map_node.get("clock_time").and_then(JsonVal::as_i32).unwrap_or(0);
+        let clock = map_node
+            .get("clock_time")
+            .and_then(JsonVal::as_i32)
+            .unwrap_or(0);
         if matches!(
             state,
             "DOTA_GAMERULES_STATE_INIT"
@@ -52,7 +55,8 @@ fn parse_gsi_events_from_root(root: &JsonVal) -> Vec<DraftEvent> {
 
     let player_node = root.get("player").unwrap_or(root);
     let hero_node_opt = root.get("hero");
-    let is_replay = (0..10_usize).any(|idx| find_slot(player_node, &format!("player{idx}")).is_some());
+    let is_replay =
+        (0..10_usize).any(|idx| find_slot(player_node, &format!("player{idx}")).is_some());
     if is_replay {
         for idx in 0..10_usize {
             let key = format!("player{idx}");
@@ -70,7 +74,11 @@ fn parse_gsi_events_from_root(root: &JsonVal) -> Vec<DraftEvent> {
                 .get("team_name")
                 .and_then(JsonVal::as_str)
                 .and_then(parse_faction_name)
-                .unwrap_or(if idx < 5 { Faction::Radiant } else { Faction::Dire });
+                .unwrap_or(if idx < 5 {
+                    Faction::Radiant
+                } else {
+                    Faction::Dire
+                });
             let hero_slug = hero_node_opt
                 .and_then(|hn| find_slot(hn, &key))
                 .and_then(|hs| hs.get("name"))
@@ -192,20 +200,34 @@ enum JsonVal {
 
 impl JsonVal {
     fn get(&self, key: &str) -> Option<&JsonVal> {
-        let JsonVal::Obj(entries) = self else { return None };
+        let JsonVal::Obj(entries) = self else {
+            return None;
+        };
         entries.iter().rev().find(|(k, _)| k == key).map(|(_, v)| v)
     }
 
     fn as_str(&self) -> Option<&str> {
-        if let JsonVal::Str(s) = self { Some(s.as_str()) } else { None }
+        if let JsonVal::Str(s) = self {
+            Some(s.as_str())
+        } else {
+            None
+        }
     }
 
     fn as_i32(&self) -> Option<i32> {
-        if let JsonVal::Num(s) | JsonVal::Str(s) = self { s.trim().parse().ok() } else { None }
+        if let JsonVal::Num(s) | JsonVal::Str(s) = self {
+            s.trim().parse().ok()
+        } else {
+            None
+        }
     }
 
     fn as_u64(&self) -> Option<u64> {
-        if let JsonVal::Num(s) | JsonVal::Str(s) = self { s.trim().parse().ok() } else { None }
+        if let JsonVal::Num(s) | JsonVal::Str(s) = self {
+            s.trim().parse().ok()
+        } else {
+            None
+        }
     }
 }
 
@@ -243,9 +265,10 @@ impl<'a> JsonParser<'a> {
             b'[' => self.parse_array(depth + 1),
             b'"' => self.parse_string().map(JsonVal::Str),
             b't' | b'f' | b'n' => ["true", "false", "null"].iter().find_map(|kw| {
-                self.src[self.pos..]
-                    .starts_with(kw)
-                    .then(|| { self.pos += kw.len(); JsonVal::Other })
+                self.src[self.pos..].starts_with(kw).then(|| {
+                    self.pos += kw.len();
+                    JsonVal::Other
+                })
             }),
             b'-' | b'0'..=b'9' => self.parse_number(),
             _ => None,
@@ -262,16 +285,23 @@ impl<'a> JsonParser<'a> {
         }
         loop {
             self.skip_ws();
-            if self.peek() != Some(b'"') { return None; }
+            if self.peek() != Some(b'"') {
+                return None;
+            }
             let key = self.parse_string()?;
             self.skip_ws();
-            if self.peek() != Some(b':') { return None; }
+            if self.peek() != Some(b':') {
+                return None;
+            }
             self.pos += 1;
             entries.push((key, self.parse_value(depth)?));
             self.skip_ws();
             match self.peek()? {
                 b',' => self.pos += 1,
-                b'}' => { self.pos += 1; return Some(JsonVal::Obj(entries)); }
+                b'}' => {
+                    self.pos += 1;
+                    return Some(JsonVal::Obj(entries));
+                }
                 _ => return None,
             }
         }
@@ -289,7 +319,10 @@ impl<'a> JsonParser<'a> {
             self.skip_ws();
             match self.peek()? {
                 b',' => self.pos += 1,
-                b']' => { self.pos += 1; return Some(JsonVal::Other); }
+                b']' => {
+                    self.pos += 1;
+                    return Some(JsonVal::Other);
+                }
                 _ => return None,
             }
         }
@@ -301,7 +334,10 @@ impl<'a> JsonParser<'a> {
         while self.pos < self.src.len() {
             let b = self.src.as_bytes()[self.pos];
             match b {
-                b'"' => { self.pos += 1; return Some(out); }
+                b'"' => {
+                    self.pos += 1;
+                    return Some(out);
+                }
                 b'\\' => {
                     self.pos += 1;
                     let esc = self.peek()?;
@@ -325,7 +361,10 @@ impl<'a> JsonParser<'a> {
                     }
                 }
                 0x00..=0x1F => return None,
-                0x20..=0x7F => { out.push(b as char); self.pos += 1; }
+                0x20..=0x7F => {
+                    out.push(b as char);
+                    self.pos += 1;
+                }
                 _ => {
                     let ch = self.src[self.pos..].chars().next()?;
                     out.push(ch);
@@ -338,20 +377,30 @@ impl<'a> JsonParser<'a> {
 
     fn parse_number(&mut self) -> Option<JsonVal> {
         let start = self.pos;
-        if self.peek() == Some(b'-') { self.pos += 1; }
+        if self.peek() == Some(b'-') {
+            self.pos += 1;
+        }
         match self.peek()? {
             b'0' => self.pos += 1,
-            b'1'..=b'9' => { self.take_digits(); }
+            b'1'..=b'9' => {
+                self.take_digits();
+            }
             _ => return None,
         }
         if self.peek() == Some(b'.') {
             self.pos += 1;
-            if !self.take_digits() { return None; }
+            if !self.take_digits() {
+                return None;
+            }
         }
         if matches!(self.peek(), Some(b'e' | b'E')) {
             self.pos += 1;
-            if matches!(self.peek(), Some(b'+' | b'-')) { self.pos += 1; }
-            if !self.take_digits() { return None; }
+            if matches!(self.peek(), Some(b'+' | b'-')) {
+                self.pos += 1;
+            }
+            if !self.take_digits() {
+                return None;
+            }
         }
         Some(JsonVal::Num(self.src[start..self.pos].to_string()))
     }
@@ -409,9 +458,13 @@ struct GsiStateSnapshot {
 impl GsiStateSnapshot {
     fn apply_event(&mut self, ev: &DraftEvent) -> bool {
         match ev {
-            DraftEvent::GameRulesStateChanged { state_name, game_time_secs } => {
+            DraftEvent::GameRulesStateChanged {
+                state_name,
+                game_time_secs,
+            } => {
                 let prev = self.latest_game_state.as_ref().map(|(s, _)| s.as_str());
-                let reset = (state_name == "DOTA_GAMERULES_STATE_WAIT_FOR_PLAYERS_TO_LOAD" && prev != Some(state_name.as_str()))
+                let reset = (state_name == "DOTA_GAMERULES_STATE_WAIT_FOR_PLAYERS_TO_LOAD"
+                    && prev != Some(state_name.as_str()))
                     || (state_name == "DOTA_GAMERULES_STATE_HERO_SELECTION"
                         && matches!(prev, Some(p) if !matches!(p, "DOTA_GAMERULES_STATE_HERO_SELECTION" | "DOTA_GAMERULES_STATE_WAIT_FOR_PLAYERS_TO_LOAD")));
                 if reset {
@@ -424,23 +477,48 @@ impl GsiStateSnapshot {
                 self.latest_game_state = Some((state_name.clone(), *game_time_secs));
                 reset
             }
-            DraftEvent::PlayerSteamIdDetected { steam32 } => { self.latest_steam32 = Some(*steam32); false }
-            DraftEvent::FactionDetected { faction } => { self.latest_faction = Some(*faction); false }
-            DraftEvent::LocalPlayerHeroDetected { hero_slug } => { self.latest_local_hero = Some(hero_slug.clone()); false }
-            DraftEvent::PlayerHeroMapped { steam32, faction, hero_slug } => {
-                if let Some(entry) = self.latest_player_mappings.iter_mut().find(|(id, _, _)| id == steam32) {
+            DraftEvent::PlayerSteamIdDetected { steam32 } => {
+                self.latest_steam32 = Some(*steam32);
+                false
+            }
+            DraftEvent::FactionDetected { faction } => {
+                self.latest_faction = Some(*faction);
+                false
+            }
+            DraftEvent::LocalPlayerHeroDetected { hero_slug } => {
+                self.latest_local_hero = Some(hero_slug.clone());
+                false
+            }
+            DraftEvent::PlayerHeroMapped {
+                steam32,
+                faction,
+                hero_slug,
+            } => {
+                if let Some(entry) = self
+                    .latest_player_mappings
+                    .iter_mut()
+                    .find(|(id, _, _)| id == steam32)
+                {
                     *entry = (*steam32, *faction, hero_slug.clone());
                 } else if self.latest_player_mappings.len() < 10 {
-                    self.latest_player_mappings.push((*steam32, *faction, hero_slug.clone()));
+                    self.latest_player_mappings
+                        .push((*steam32, *faction, hero_slug.clone()));
                 }
                 false
             }
-            DraftEvent::PickDetected { side, slot, hero_id, role } if *slot < 5 => {
+            DraftEvent::PickDetected {
+                side,
+                slot,
+                hero_id,
+                role,
+            } if *slot < 5 => {
                 let side_idx = if matches!(side, Side::Allies) { 0 } else { 1 };
                 self.latest_picks[side_idx][*slot] = Some((*hero_id, *role));
                 false
             }
-            DraftEvent::BanDetected { hero_id } if !self.latest_bans.contains(hero_id) && self.latest_bans.len() < 16 => {
+            DraftEvent::BanDetected { hero_id }
+                if !self.latest_bans.contains(hero_id) && self.latest_bans.len() < 16 =>
+            {
                 self.latest_bans.push(*hero_id);
                 false
             }
@@ -448,7 +526,11 @@ impl GsiStateSnapshot {
         }
     }
 
-    fn push_reconcile_events(&self, out: &mut Vec<DraftEvent>, pending_reset: Option<(String, i32)>) {
+    fn push_reconcile_events(
+        &self,
+        out: &mut Vec<DraftEvent>,
+        pending_reset: Option<(String, i32)>,
+    ) {
         if let Some((s, t)) = pending_reset {
             if let Some(pos) = out.iter().position(|e| matches!(e, DraftEvent::GameRulesStateChanged { state_name, .. } if state_name == &s)) {
                 let existing = out.remove(pos);
@@ -471,23 +553,52 @@ impl GsiStateSnapshot {
             upsert(out, DraftEvent::FactionDetected { faction });
         }
         if let Some(ref hero_slug) = self.latest_local_hero {
-            upsert(out, DraftEvent::LocalPlayerHeroDetected { hero_slug: hero_slug.clone() });
+            upsert(
+                out,
+                DraftEvent::LocalPlayerHeroDetected {
+                    hero_slug: hero_slug.clone(),
+                },
+            );
         }
         for (steam32, faction, hero_slug) in &self.latest_player_mappings {
-            upsert(out, DraftEvent::PlayerHeroMapped { steam32: *steam32, faction: *faction, hero_slug: hero_slug.clone() });
+            upsert(
+                out,
+                DraftEvent::PlayerHeroMapped {
+                    steam32: *steam32,
+                    faction: *faction,
+                    hero_slug: hero_slug.clone(),
+                },
+            );
         }
         for hero_id in &self.latest_bans {
             upsert(out, DraftEvent::BanDetected { hero_id: *hero_id });
         }
-        for (side, slots) in [Side::Allies, Side::Enemies].into_iter().zip(self.latest_picks.iter()) {
+        for (side, slots) in [Side::Allies, Side::Enemies]
+            .into_iter()
+            .zip(self.latest_picks.iter())
+        {
             for (slot, entry) in slots.iter().enumerate() {
                 if let Some((hero_id, role)) = entry {
-                    upsert(out, DraftEvent::PickDetected { side, slot, hero_id: *hero_id, role: *role });
+                    upsert(
+                        out,
+                        DraftEvent::PickDetected {
+                            side,
+                            slot,
+                            hero_id: *hero_id,
+                            role: *role,
+                        },
+                    );
                 }
             }
         }
         if let Some((ref state_name, game_time_secs)) = self.latest_game_state {
-            upsert(out, DraftEvent::GameRulesStateChanged { state_name: state_name.clone(), game_time_secs });
+            upsert(
+                out,
+                DraftEvent::GameRulesStateChanged {
+                    state_name: state_name.clone(),
+                    game_time_secs,
+                },
+            );
         }
     }
 }
@@ -603,10 +714,13 @@ impl BoundedDraftQueue {
         let mut g = self.lock_inner();
         for ev in events {
             if g.gsi_snapshot.apply_event(&ev) {
-                g.queue.retain(|queued| matches!(
-                    queued,
-                    DraftEvent::FactionDetected { .. } | DraftEvent::PlayerSteamIdDetected { .. }
-                ));
+                g.queue.retain(|queued| {
+                    matches!(
+                        queued,
+                        DraftEvent::FactionDetected { .. }
+                            | DraftEvent::PlayerSteamIdDetected { .. }
+                    )
+                });
             }
             if !Self::push_into_inner(&mut g, 0, ev) {
                 return false;
@@ -639,12 +753,18 @@ impl BoundedDraftQueue {
 }
 
 fn is_reset_state(state: &str) -> bool {
-    matches!(state, "DOTA_GAMERULES_STATE_WAIT_FOR_PLAYERS_TO_LOAD" | "DOTA_GAMERULES_STATE_HERO_SELECTION")
+    matches!(
+        state,
+        "DOTA_GAMERULES_STATE_WAIT_FOR_PLAYERS_TO_LOAD" | "DOTA_GAMERULES_STATE_HERO_SELECTION"
+    )
 }
 
 fn is_critical_event(ev: &DraftEvent) -> bool {
     use DraftEvent::*;
-    matches!(ev, GameRulesStateChanged { .. } | FactionDetected { .. } | PlayerSteamIdDetected { .. })
+    matches!(
+        ev,
+        GameRulesStateChanged { .. } | FactionDetected { .. } | PlayerSteamIdDetected { .. }
+    )
 }
 
 fn should_coalesce(existing: &DraftEvent, incoming: &DraftEvent) -> bool {
@@ -653,14 +773,20 @@ fn should_coalesce(existing: &DraftEvent, incoming: &DraftEvent) -> bool {
         (FactionDetected { .. }, FactionDetected { .. })
         | (PlayerSteamIdDetected { .. }, PlayerSteamIdDetected { .. })
         | (LocalPlayerHeroDetected { .. }, LocalPlayerHeroDetected { .. }) => true,
-        (PickDetected { side: s1, slot: l1, .. }, PickDetected { side: s2, slot: l2, .. }) => {
-            s1 == s2 && l1 == l2
-        }
+        (
+            PickDetected {
+                side: s1, slot: l1, ..
+            },
+            PickDetected {
+                side: s2, slot: l2, ..
+            },
+        ) => s1 == s2 && l1 == l2,
         (BanDetected { hero_id: a }, BanDetected { hero_id: b }) => a == b,
         (PlayerHeroMapped { steam32: a, .. }, PlayerHeroMapped { steam32: b, .. }) => a == b,
-        (GameRulesStateChanged { state_name: s1, .. }, GameRulesStateChanged { state_name: s2, .. }) => {
-            !is_reset_state(s1) || s1 == s2
-        }
+        (
+            GameRulesStateChanged { state_name: s1, .. },
+            GameRulesStateChanged { state_name: s2, .. },
+        ) => !is_reset_state(s1) || s1 == s2,
         _ => false,
     }
 }
@@ -680,7 +806,9 @@ impl BoundedGsiListener {
         listener
             .set_nonblocking(true)
             .map_err(|e| PortError(e.to_string()))?;
-        let local_addr = listener.local_addr().map_err(|e| PortError(e.to_string()))?;
+        let local_addr = listener
+            .local_addr()
+            .map_err(|e| PortError(e.to_string()))?;
 
         let queue = Arc::new(BoundedDraftQueue::new(GSI_QUEUE_CAPACITY));
         let queue_worker = Arc::clone(&queue);
@@ -836,10 +964,7 @@ fn validate_http_headers(header_bytes: &[u8]) -> Result<usize, (u16, &'static st
     let method = parts.next().ok_or((400, "Bad Request"))?;
     let target = parts.next().ok_or((400, "Bad Request"))?;
     let version = parts.next().ok_or((400, "Bad Request"))?;
-    if parts.next().is_some()
-        || target.is_empty()
-        || !matches!(version, "HTTP/1.0" | "HTTP/1.1")
-    {
+    if parts.next().is_some() || target.is_empty() || !matches!(version, "HTTP/1.0" | "HTTP/1.1") {
         return Err((400, "Bad Request"));
     }
     if method != "POST" {
@@ -857,7 +982,10 @@ fn validate_http_headers(header_bytes: &[u8]) -> Result<usize, (u16, &'static st
             return Err((400, "Bad Request"));
         }
         if lower == "content-length" {
-            let parsed = val.trim().parse::<usize>().map_err(|_| (400, "Bad Request"))?;
+            let parsed = val
+                .trim()
+                .parse::<usize>()
+                .map_err(|_| (400, "Bad Request"))?;
             if parsed > MAX_GSI_PAYLOAD_BYTES {
                 return Err((413, "Payload Too Large"));
             }

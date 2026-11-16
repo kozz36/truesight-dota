@@ -2,7 +2,9 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use truesight_adapters::gsi::BoundedGsiListener;
 use truesight_adapters::sync::LocalCacheManager;
 use truesight_adapters::vision::{BoundedVisionWorker, CaptureAvailability, VisionCaptureMode};
-use truesight_core::domain::{Bracket, DraftPick, DraftState, Faction, HeroId, Role, Side, TEAM_SIZE};
+use truesight_core::domain::{
+    Bracket, DraftPick, DraftState, Faction, HeroId, Role, Side, TEAM_SIZE,
+};
 use truesight_core::math::{
     DraftAnalysis5v5, HeroRecommendation, MatchupMatrix, ModelWeights, evaluate_draft_5v5,
     recommend_heroes,
@@ -155,7 +157,9 @@ impl AppSession {
         {
             self.matrix = m;
         }
-        self.db_status = self.cache_mgr.freshness_badge(LocalCacheManager::now_unix());
+        self.db_status = self
+            .cache_mgr
+            .freshness_badge(LocalCacheManager::now_unix());
     }
 
     pub fn set_account_id(&mut self, account_id: Option<u64>, explicit: bool) {
@@ -233,7 +237,8 @@ impl AppSession {
         let Ok(done) = outcome else {
             self.db_status = format!(
                 "{} · sync failed",
-                self.cache_mgr.freshness_badge(LocalCacheManager::now_unix())
+                self.cache_mgr
+                    .freshness_badge(LocalCacheManager::now_unix())
             );
             return true;
         };
@@ -253,13 +258,16 @@ impl AppSession {
                 match loaded {
                     Ok(m) if m.heroes().count() > 0 => {
                         self.matrix = m;
-                        self.db_status = self.cache_mgr.freshness_badge(LocalCacheManager::now_unix());
+                        self.db_status = self
+                            .cache_mgr
+                            .freshness_badge(LocalCacheManager::now_unix());
                         self.last_sync_notice = Some(msg);
                     }
                     _ => {
                         self.db_status = format!(
                             "{} · reload failed",
-                            self.cache_mgr.freshness_badge(LocalCacheManager::now_unix())
+                            self.cache_mgr
+                                .freshness_badge(LocalCacheManager::now_unix())
                         );
                         self.last_sync_notice = Some(
                             "Sync notice: refreshed cache failed validation (using last valid model)"
@@ -271,7 +279,8 @@ impl AppSession {
             Err(e) => {
                 self.db_status = format!(
                     "{} · sync failed",
-                    self.cache_mgr.freshness_badge(LocalCacheManager::now_unix())
+                    self.cache_mgr
+                        .freshness_badge(LocalCacheManager::now_unix())
                 );
                 self.last_sync_notice = Some(format!("Sync notice: {e} (using last valid model)"));
             }
@@ -293,7 +302,9 @@ impl AppSession {
         {
             self.matrix = m;
         }
-        self.db_status = self.cache_mgr.freshness_badge(LocalCacheManager::now_unix());
+        self.db_status = self
+            .cache_mgr
+            .freshness_badge(LocalCacheManager::now_unix());
         Ok(msg)
     }
 
@@ -340,7 +351,10 @@ impl AppSession {
             .collect();
 
         matches.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.2.cmp(&b.2)));
-        matches.into_iter().map(|(_, id, name)| (id, name)).collect()
+        matches
+            .into_iter()
+            .map(|(_, id, name)| (id, name))
+            .collect()
     }
 
     pub fn find_hero(&self, query: &str) -> Option<HeroId> {
@@ -735,7 +749,11 @@ impl AppSession {
     }
 
     /// Evaluates top enemy draft candidates for `enemy_role` using neutral comfort (`0.0`).
-    pub fn recommend_enemy_heroes(&self, enemy_role: Role, top_n: usize) -> Vec<HeroRecommendation> {
+    pub fn recommend_enemy_heroes(
+        &self,
+        enemy_role: Role,
+        top_n: usize,
+    ) -> Vec<HeroRecommendation> {
         let mut enemy_draft = DraftState {
             ally_faction: self.draft.ally_faction.opposite(),
             allies: self.draft.enemies,

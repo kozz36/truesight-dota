@@ -1,5 +1,5 @@
 #[cfg(target_os = "linux")]
-use super::{parse_ppm_p6, RgbFrame, ScreenFrameSource};
+use super::{RgbFrame, ScreenFrameSource, parse_ppm_p6};
 #[cfg(target_os = "linux")]
 use std::process::Command;
 #[cfg(target_os = "linux")]

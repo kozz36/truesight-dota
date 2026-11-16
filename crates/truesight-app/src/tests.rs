@@ -19,11 +19,17 @@ fn interactive_commands_update_5v5_table_and_recommendations() {
     assert!(rendered.contains("1. Anti-Mage"));
 
     assert!(execute_command(&mut session, "faction dire").unwrap());
-    assert_eq!(session.draft.ally_faction, truesight_core::domain::Faction::Dire);
+    assert_eq!(
+        session.draft.ally_faction,
+        truesight_core::domain::Faction::Dire
+    );
     session.apply_event(truesight_core::ports::DraftEvent::FactionDetected {
         faction: truesight_core::domain::Faction::Radiant,
     });
-    assert_eq!(session.draft.ally_faction, truesight_core::domain::Faction::Radiant);
+    assert_eq!(
+        session.draft.ally_faction,
+        truesight_core::domain::Faction::Radiant
+    );
 
     assert!(execute_command(&mut session, "account none").unwrap());
     assert_eq!(session.cache_mgr.player_account_id, None);
@@ -146,7 +152,10 @@ fn pick_detected_assigns_roles_by_affinity_preserves_user_locks_and_tracks_local
     assert!(session.enemy_locked_slots[4]);
     assert!(session.enemy_locked_slots[2]);
     assert_eq!(session.draft.enemies[4].unwrap().hero_id, HeroId(47));
-    assert_eq!(session.draft.enemies[4].unwrap().role, Some(Role::HardSupport));
+    assert_eq!(
+        session.draft.enemies[4].unwrap().role,
+        Some(Role::HardSupport)
+    );
     assert_eq!(session.draft.enemies[2].unwrap().hero_id, HeroId(38));
     assert_eq!(session.draft.enemies[2].unwrap().role, Some(Role::Offlane));
 
@@ -190,7 +199,11 @@ fn cli_argument_and_command_parsers_validate_swap_ban_clear_and_invalid_inputs()
     let args_unlinked = vec!["truesight-dota".into(), "--account-id=none".into()];
     assert_eq!(parse_account_id_arg(&args_unlinked), Ok(Some(None)));
 
-    let args_auto = vec!["truesight-dota".into(), "--account-id".into(), "auto".into()];
+    let args_auto = vec![
+        "truesight-dota".into(),
+        "--account-id".into(),
+        "auto".into(),
+    ];
     assert_eq!(parse_account_id_arg(&args_auto), Ok(None));
 
     let args_steam64 = vec![
@@ -198,7 +211,10 @@ fn cli_argument_and_command_parsers_validate_swap_ban_clear_and_invalid_inputs()
         "--account-id".into(),
         "76561198087521469".into(),
     ];
-    assert_eq!(parse_account_id_arg(&args_steam64), Ok(Some(Some(127_255_741))));
+    assert_eq!(
+        parse_account_id_arg(&args_steam64),
+        Ok(Some(Some(127_255_741)))
+    );
 
     let args_invalid = vec!["truesight-dota".into(), "--account-id=not_a_number".into()];
     assert!(parse_account_id_arg(&args_invalid).is_err());
@@ -223,7 +239,10 @@ fn cli_argument_and_command_parsers_validate_swap_ban_clear_and_invalid_inputs()
     assert!(session.draft.allies[0].is_none());
 
     assert!(execute_command(&mut session, "faction dire").unwrap());
-    assert_eq!(session.draft.ally_faction, truesight_core::domain::Faction::Dire);
+    assert_eq!(
+        session.draft.ally_faction,
+        truesight_core::domain::Faction::Dire
+    );
 
     assert!(execute_command(&mut session, "swap ally 1 9").is_err());
     assert!(execute_command(&mut session, "role 99").is_err());
@@ -360,10 +379,24 @@ fn draft_reset_and_new_match_transition_reset_vision_worker_without_mid_draft_wi
     let rad_heroes = [1_u16, 13, 97, 79, 5];
     let dire_heroes = [94_u16, 17, 2, 100, 30];
     for (slot, hid) in rad_heroes.iter().enumerate() {
-        paint_slot(&mut rgb, w, rad_r[slot], &atlas.heroes[&HeroId(*hid)], atlas.hero_width, atlas.hero_height);
+        paint_slot(
+            &mut rgb,
+            w,
+            rad_r[slot],
+            &atlas.heroes[&HeroId(*hid)],
+            atlas.hero_width,
+            atlas.hero_height,
+        );
     }
     for (slot, hid) in dire_heroes.iter().enumerate() {
-        paint_slot(&mut rgb, w, dire_r[slot], &atlas.heroes[&HeroId(*hid)], atlas.hero_width, atlas.hero_height);
+        paint_slot(
+            &mut rgb,
+            w,
+            dire_r[slot],
+            &atlas.heroes[&HeroId(*hid)],
+            atlas.hero_width,
+            atlas.hero_height,
+        );
     }
     let mut worker = BoundedVisionWorker::spawn_with_source(StationarySource(RgbFrame {
         width: w,
@@ -580,8 +613,20 @@ fn faction_change_atomically_swaps_teams_and_enemy_scout_uses_neutral_comfort() 
             role: Role::ALL.get(slot).copied(),
         });
     }
-    let expected_rad: Vec<HeroId> = session.draft.allies.iter().flatten().map(|p| p.hero_id).collect();
-    let expected_dire: Vec<HeroId> = session.draft.enemies.iter().flatten().map(|p| p.hero_id).collect();
+    let expected_rad: Vec<HeroId> = session
+        .draft
+        .allies
+        .iter()
+        .flatten()
+        .map(|p| p.hero_id)
+        .collect();
+    let expected_dire: Vec<HeroId> = session
+        .draft
+        .enemies
+        .iter()
+        .flatten()
+        .map(|p| p.hero_id)
+        .collect();
     assert_eq!(session.draft.ally_faction, Faction::Radiant);
     assert_eq!(expected_rad.len(), 5);
     assert_eq!(expected_dire.len(), 5);
@@ -591,10 +636,24 @@ fn faction_change_atomically_swaps_teams_and_enemy_scout_uses_neutral_comfort() 
     assert!(session.enemy_locked_slots[0]);
 
     // Switching faction to Dire via GSI event swaps 5v5 teams and locks atomically without dropping heroes
-    session.apply_event(DraftEvent::FactionDetected { faction: Faction::Dire });
+    session.apply_event(DraftEvent::FactionDetected {
+        faction: Faction::Dire,
+    });
     assert_eq!(session.draft.ally_faction, Faction::Dire);
-    let allies_after: Vec<HeroId> = session.draft.allies.iter().flatten().map(|p| p.hero_id).collect();
-    let enemies_after: Vec<HeroId> = session.draft.enemies.iter().flatten().map(|p| p.hero_id).collect();
+    let allies_after: Vec<HeroId> = session
+        .draft
+        .allies
+        .iter()
+        .flatten()
+        .map(|p| p.hero_id)
+        .collect();
+    let enemies_after: Vec<HeroId> = session
+        .draft
+        .enemies
+        .iter()
+        .flatten()
+        .map(|p| p.hero_id)
+        .collect();
     assert_eq!(allies_after, expected_dire);
     assert_eq!(enemies_after, expected_rad);
     assert!(session.ally_locked_slots[0]);
@@ -604,15 +663,25 @@ fn faction_change_atomically_swaps_teams_and_enemy_scout_uses_neutral_comfort() 
     assert!(execute_command(&mut session, "faction radiant").unwrap());
     assert_eq!(session.draft.ally_faction, Faction::Radiant);
     assert_eq!(
-        session.draft.allies.iter().flatten().map(|p| p.hero_id).collect::<Vec<_>>(),
+        session
+            .draft
+            .allies
+            .iter()
+            .flatten()
+            .map(|p| p.hero_id)
+            .collect::<Vec<_>>(),
         expected_rad
     );
 
     // Clear Enemy Pos 1 so we can scout enemy options; confirm repeated BanDetected is idempotent
     session.clear_slot_manual(Side::Enemies, 0);
     let ban_target = session.find_hero("invoker").unwrap();
-    session.apply_event(DraftEvent::BanDetected { hero_id: ban_target });
-    session.apply_event(DraftEvent::BanDetected { hero_id: ban_target });
+    session.apply_event(DraftEvent::BanDetected {
+        hero_id: ban_target,
+    });
+    session.apply_event(DraftEvent::BanDetected {
+        hero_id: ban_target,
+    });
     assert!(session.draft.bans.contains(&Some(ban_target)));
 
     let scout_recs = session.recommend_enemy_heroes(Role::Carry, 5);
@@ -653,7 +722,8 @@ fn gsi_http_listener_reconciles_full_session_state_after_overflow_when_peer_stop
 
     let post_json = |body: &str| {
         let mut s = TcpStream::connect(addr).unwrap();
-        s.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+        s.set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
         write!(
             s,
             "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -664,11 +734,16 @@ fn gsi_http_listener_reconciles_full_session_state_after_overflow_when_peer_stop
         s.flush().unwrap();
         let mut resp = String::new();
         let _ = s.read_to_string(&mut resp);
-        assert!(resp.starts_with("HTTP/1.1 200"), "Expected 200 OK, got: {resp}");
+        assert!(
+            resp.starts_with("HTTP/1.1 200"),
+            "Expected 200 OK, got: {resp}"
+        );
     };
 
     // 1. Pre-reset match traffic (old hero + in-progress state)
-    post_json(r#"{"map":{"game_state":"DOTA_GAMERULES_STATE_GAME_IN_PROGRESS","clock_time":1200},"truesight_pick":{"side":"ally","slot":0,"hero_id":67}}"#);
+    post_json(
+        r#"{"map":{"game_state":"DOTA_GAMERULES_STATE_GAME_IN_PROGRESS","clock_time":1200},"truesight_pick":{"side":"ally","slot":0,"hero_id":67}}"#,
+    );
 
     // 2. Match transition reset + Dire faction + SteamID + 16 distinct bans (exceeds 16-item capacity)
     post_json(concat!(
@@ -701,7 +776,10 @@ fn gsi_http_listener_reconciles_full_session_state_after_overflow_when_peer_stop
     // 4. Single poll_live_sources drains overflowed HTTP queue and reconciles coherent 5v5 + 16 bans
     assert!(session.poll_live_sources(Some(&mut listener), None));
     let stats_after_first = listener.queue_stats();
-    assert!(stats_after_first.dropped > 0, "Expected overflow drops: {stats_after_first:?}");
+    assert!(
+        stats_after_first.dropped > 0,
+        "Expected overflow drops: {stats_after_first:?}"
+    );
     assert_eq!(stats_after_first.recovered_resyncs, 1);
     assert_eq!(session.draft.ally_faction, Faction::Dire);
     assert_eq!(session.cache_mgr.player_account_id, Some(127_255_741));
@@ -709,7 +787,12 @@ fn gsi_http_listener_reconciles_full_session_state_after_overflow_when_peer_stop
     assert_eq!(session.draft.enemies.iter().flatten().count(), 5);
     assert_eq!(session.draft.bans.iter().flatten().count(), 16);
     assert!(
-        !session.draft.allies.iter().flatten().any(|p| p.hero_id.0 == 67),
+        !session
+            .draft
+            .allies
+            .iter()
+            .flatten()
+            .any(|p| p.hero_id.0 == 67),
         "Pre-reset hero 67 must not leak into reconciled new match"
     );
 
@@ -719,16 +802,15 @@ fn gsi_http_listener_reconciles_full_session_state_after_overflow_when_peer_stop
 }
 
 #[test]
-fn sync_coordinator_serializes_generations_rejects_stale_writes_and_preserves_valid_cache_on_corruption() {
+fn sync_coordinator_serializes_generations_rejects_stale_writes_and_preserves_valid_cache_on_corruption()
+ {
     use std::time::Duration;
     use truesight_adapters::sync::LocalCacheManager;
     use truesight_core::domain::{Bracket, HeroId};
     use truesight_core::ports::StatsRepository;
 
-    let tmp_dir = std::env::temp_dir().join(format!(
-        "truesight_sync_gen_coord_{}",
-        std::process::id()
-    ));
+    let tmp_dir =
+        std::env::temp_dir().join(format!("truesight_sync_gen_coord_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp_dir);
 
     let mut session = AppSession::new().unwrap();
@@ -748,7 +830,11 @@ fn sync_coordinator_serializes_generations_rejects_stale_writes_and_preserves_va
         let _ = started1_tx.send(());
         let _ = gate1_rx.recv();
         let res = mgr
-            .write_cached_files(Some(stale_meta), Some(acct1_player), now_base.saturating_add(50))
+            .write_cached_files(
+                Some(stale_meta),
+                Some(acct1_player),
+                now_base.saturating_add(50),
+            )
             .map_err(|e| e.0);
         let _ = w1_res_tx.send(res.clone());
         res.map(|_| "Worker 1".into())
@@ -780,7 +866,10 @@ fn sync_coordinator_serializes_generations_rejects_stale_writes_and_preserves_va
     // 3. Release stale Worker 1: generation fence must reject its write instead of overwriting Worker 2
     gate1_tx.send(()).unwrap();
     let w1_res = w1_res_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-    assert!(w1_res.is_err(), "Stale Worker 1 write must be fenced out: {w1_res:?}");
+    assert!(
+        w1_res.is_err(),
+        "Stale Worker 1 write must be fenced out: {w1_res:?}"
+    );
 
     session.reload_repository();
     assert!(
@@ -795,11 +884,16 @@ fn sync_coordinator_serializes_generations_rejects_stale_writes_and_preserves_va
     assert_eq!(session.matrix.hero(HeroId(2)).unwrap().personal_matches, 50);
 
     // 4. Truncated/corrupt payload must be rejected without touching valid cache or advancing timestamps
-    let err = session
-        .cache_mgr
-        .write_cached_files(Some(r#"[{"id": 1, "1_pick": 1000"#), None, now_base + 9_999);
+    let err = session.cache_mgr.write_cached_files(
+        Some(r#"[{"id": 1, "1_pick": 1000"#),
+        None,
+        now_base + 9_999,
+    );
     assert!(err.is_err(), "Truncated JSON payload must be rejected");
-    assert_ne!(session.cache_mgr.read_timestamps().0, Some(now_base + 9_999));
+    assert_ne!(
+        session.cache_mgr.read_timestamps().0,
+        Some(now_base + 9_999)
+    );
     let still_valid = session
         .cache_mgr
         .build_repository()
@@ -856,8 +950,22 @@ fn session_suppresses_vision_during_wait_for_players_and_resumes_in_hero_selecti
     let (w, h) = (1920usize, 1080usize);
     let mut rgb = vec![0u8; w * h * 3];
     let (rad_r, dire_r) = compute_topbar_slot_rects(w, h);
-    paint_slot(&mut rgb, w, rad_r[0], &atlas.heroes[&HeroId(1)], atlas.hero_width, atlas.hero_height);
-    paint_slot(&mut rgb, w, dire_r[0], &atlas.heroes[&HeroId(94)], atlas.hero_width, atlas.hero_height);
+    paint_slot(
+        &mut rgb,
+        w,
+        rad_r[0],
+        &atlas.heroes[&HeroId(1)],
+        atlas.hero_width,
+        atlas.hero_height,
+    );
+    paint_slot(
+        &mut rgb,
+        w,
+        dire_r[0],
+        &atlas.heroes[&HeroId(94)],
+        atlas.hero_width,
+        atlas.hero_height,
+    );
 
     let mut worker = BoundedVisionWorker::spawn_with_source(StationarySource(RgbFrame {
         width: w,
@@ -910,7 +1018,8 @@ fn live_gsi_init_and_custom_setup_suppress_vision_and_restore_across_match_trans
     use std::time::Duration;
     use truesight_adapters::gsi::BoundedGsiListener;
     use truesight_adapters::vision::{
-        BoundedVisionWorker, RgbFrame, ScreenFrameSource, compute_topbar_slot_rects, parse_hero_atlas,
+        BoundedVisionWorker, RgbFrame, ScreenFrameSource, compute_topbar_slot_rects,
+        parse_hero_atlas,
     };
     use truesight_core::domain::{HeroId, Side};
 
@@ -944,8 +1053,22 @@ fn live_gsi_init_and_custom_setup_suppress_vision_and_restore_across_match_trans
     let (w, h) = (1920usize, 1080usize);
     let mut rgb = vec![0u8; w * h * 3];
     let (rad_r, dire_r) = compute_topbar_slot_rects(w, h);
-    paint_slot(&mut rgb, w, rad_r[0], &atlas.heroes[&HeroId(1)], atlas.hero_width, atlas.hero_height);
-    paint_slot(&mut rgb, w, dire_r[0], &atlas.heroes[&HeroId(94)], atlas.hero_width, atlas.hero_height);
+    paint_slot(
+        &mut rgb,
+        w,
+        rad_r[0],
+        &atlas.heroes[&HeroId(1)],
+        atlas.hero_width,
+        atlas.hero_height,
+    );
+    paint_slot(
+        &mut rgb,
+        w,
+        dire_r[0],
+        &atlas.heroes[&HeroId(94)],
+        atlas.hero_width,
+        atlas.hero_height,
+    );
 
     let mut listener = BoundedGsiListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr();
@@ -957,12 +1080,16 @@ fn live_gsi_init_and_custom_setup_suppress_vision_and_restore_across_match_trans
             body
         );
         let mut s = TcpStream::connect(addr).unwrap();
-        s.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+        s.set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
         s.write_all(req.as_bytes()).unwrap();
         s.flush().unwrap();
         let mut resp = String::new();
         let _ = s.read_to_string(&mut resp);
-        assert!(resp.starts_with("HTTP/1.1 200"), "Expected 200 OK, got: {resp}");
+        assert!(
+            resp.starts_with("HTTP/1.1 200"),
+            "Expected 200 OK, got: {resp}"
+        );
     };
 
     let mut worker = BoundedVisionWorker::spawn_with_source(StationarySource(RgbFrame {
@@ -1006,7 +1133,11 @@ fn live_gsi_init_and_custom_setup_suppress_vision_and_restore_across_match_trans
         session.poll_live_sources(Some(&mut listener), Some(&mut worker));
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert!(session.last_gsi_state.contains("DOTA_GAMERULES_STATE_CUSTOM_GAME_SETUP"));
+    assert!(
+        session
+            .last_gsi_state
+            .contains("DOTA_GAMERULES_STATE_CUSTOM_GAME_SETUP")
+    );
     assert_eq!(
         session.draft.allies.iter().flatten().count(),
         0,
@@ -1033,7 +1164,10 @@ fn live_gsi_init_and_custom_setup_suppress_vision_and_restore_across_match_trans
     ] {
         send_state(state, clock);
         session.poll_live_sources(Some(&mut listener), Some(&mut worker));
-        assert!(session.last_gsi_state.contains(state), "Expected state {state}");
+        assert!(
+            session.last_gsi_state.contains(state),
+            "Expected state {state}"
+        );
     }
 
     // 4. Existing draft picks stay preserved across INIT / CUSTOM_GAME_SETUP / POST_GAME / DISCONNECT
@@ -1052,7 +1186,10 @@ fn live_gsi_init_and_custom_setup_suppress_vision_and_restore_across_match_trans
             session.poll_live_sources(Some(&mut listener), Some(&mut worker));
             std::thread::sleep(Duration::from_millis(15));
         }
-        assert!(session.last_gsi_state.contains(state), "Expected state {state}");
+        assert!(
+            session.last_gsi_state.contains(state),
+            "Expected state {state}"
+        );
         assert!(
             session.draft.allies[3].is_some(),
             "Prior draft picks must stay preserved during {state}"
@@ -1091,7 +1228,10 @@ fn session_and_cli_surface_capture_availability_and_allow_manual_picks_when_unav
     // Manual draft entry & polling with vision_worker = None must remain completely functional.
     assert!(crate::execute_command(&mut session, "ally 1 anti-mage").is_ok());
     session.poll_live_sources(None, None);
-    assert_eq!(session.draft.allies[0].map(|p| p.hero_id), Some(truesight_core::domain::HeroId(1)));
+    assert_eq!(
+        session.draft.allies[0].map(|p| p.hero_id),
+        Some(truesight_core::domain::HeroId(1))
+    );
 
     let cli_out = crate::render_dashboard_string(&session, false);
     assert!(

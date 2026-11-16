@@ -107,8 +107,7 @@ fn seeded_meta_repository_loads_heroes_and_matchup_deltas() {
     // have populated non-zero empirical counter & synergy deltas from the 15,966-pair table.
     let slardar_vs_silencer = matrix.cell(HeroId(28), HeroId(75));
     assert!(
-        slardar_vs_silencer.vs_matches > 0
-            && slardar_vs_silencer.counter_delta.abs() > 0.0001,
+        slardar_vs_silencer.vs_matches > 0 && slardar_vs_silencer.counter_delta.abs() > 0.0001,
         "Slardar vs Silencer must have empirical matchup data: {:?}",
         slardar_vs_silencer
     );
@@ -269,7 +268,13 @@ fn eight_individual_brackets_dynamically_update_meta_counter_and_synergy_edges()
     .enumerate()
     {
         base_draft
-            .set_ally(slot, Some(DraftPick { hero_id: hid, role: Some(role) }))
+            .set_ally(
+                slot,
+                Some(DraftPick {
+                    hero_id: hid,
+                    role: Some(role),
+                }),
+            )
             .unwrap();
     }
     for (slot, (hid, role)) in [
@@ -283,7 +288,13 @@ fn eight_individual_brackets_dynamically_update_meta_counter_and_synergy_edges()
     .enumerate()
     {
         base_draft
-            .set_enemy(slot, Some(DraftPick { hero_id: hid, role: Some(role) }))
+            .set_enemy(
+                slot,
+                Some(DraftPick {
+                    hero_id: hid,
+                    role: Some(role),
+                }),
+            )
             .unwrap();
     }
 
@@ -350,13 +361,16 @@ fn eight_individual_brackets_dynamically_update_meta_counter_and_synergy_edges()
 fn local_cache_manager_enforces_24h_meta_ttl_1h_player_ttl_and_applies_cached_comfort() {
     use crate::sync::{LocalCacheManager, META_TTL_SECS, PLAYER_TTL_SECS};
 
-    assert_eq!(META_TTL_SECS, 86_400, "Meta DB TTL must be 24 hours (86400s)");
-    assert_eq!(PLAYER_TTL_SECS, 3_600, "Player comfort TTL must be 1 hour (3600s)");
+    assert_eq!(
+        META_TTL_SECS, 86_400,
+        "Meta DB TTL must be 24 hours (86400s)"
+    );
+    assert_eq!(
+        PLAYER_TTL_SECS, 3_600,
+        "Player comfort TTL must be 1 hour (3600s)"
+    );
 
-    let tmp_dir = std::env::temp_dir().join(format!(
-        "truesight_cache_test_{}",
-        std::process::id()
-    ));
+    let tmp_dir = std::env::temp_dir().join(format!("truesight_cache_test_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp_dir);
     let mgr = LocalCacheManager::with_dir(tmp_dir.clone(), 100_000_001);
 
@@ -374,23 +388,50 @@ fn local_cache_manager_enforces_24h_meta_ttl_1h_player_ttl_and_applies_cached_co
     mgr.write_cached_files(Some(sample_meta_json), Some(sample_player_json), now)
         .unwrap();
 
-    assert!(!mgr.is_meta_stale(now + 3600), "Meta cache at +1h must be fresh (<24h)");
-    assert!(mgr.is_meta_stale(now + 86_401), "Meta cache at +24h1s must be stale (>24h)");
-    assert!(!mgr.is_player_stale(now + 1800), "Player cache at +30m must be fresh (<1h)");
-    assert!(mgr.is_player_stale(now + 3601), "Player cache at +60m1s must be stale (>1h)");
+    assert!(
+        !mgr.is_meta_stale(now + 3600),
+        "Meta cache at +1h must be fresh (<24h)"
+    );
+    assert!(
+        mgr.is_meta_stale(now + 86_401),
+        "Meta cache at +24h1s must be stale (>24h)"
+    );
+    assert!(
+        !mgr.is_player_stale(now + 1800),
+        "Player cache at +30m must be fresh (<1h)"
+    );
+    assert!(
+        mgr.is_player_stale(now + 3601),
+        "Player cache at +60m1s must be stale (>1h)"
+    );
 
     let repo = mgr.build_repository_at(now);
     let mat = repo.load_matrix(Bracket::Legend).unwrap();
     let am = mat.hero(HeroId(1)).unwrap();
     assert_eq!(am.personal_matches, 50);
     assert_eq!(am.personal_wins, 40);
-    assert!(am.comfort_decay > 0.98, "Recently played Anti-Mage must have ~1.0 decay");
-    assert!(am.role_winrates[0] > 0.59, "Cached heroStats 60% winrate must override snapshot: {}", am.role_winrates[0]);
-    assert!(am.trend_delta > 0.01, "Cached 7-day trend jump must populate trend_delta: {}", am.trend_delta);
+    assert!(
+        am.comfort_decay > 0.98,
+        "Recently played Anti-Mage must have ~1.0 decay"
+    );
+    assert!(
+        am.role_winrates[0] > 0.59,
+        "Cached heroStats 60% winrate must override snapshot: {}",
+        am.role_winrates[0]
+    );
+    assert!(
+        am.trend_delta > 0.01,
+        "Cached 7-day trend jump must populate trend_delta: {}",
+        am.trend_delta
+    );
 
     let jugg = mat.hero(HeroId(8)).unwrap();
     assert_eq!(jugg.personal_matches, 30);
-    assert!(jugg.comfort_decay < 0.50, "Stale Juggernaut games must decay: {}", jugg.comfort_decay);
+    assert!(
+        jugg.comfort_decay < 0.50,
+        "Stale Juggernaut games must decay: {}",
+        jugg.comfort_decay
+    );
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
@@ -703,7 +744,11 @@ fn vision_capture_adapter_recognizes_topbar_10_slots_and_maps_radiant_dire_sides
     let mut adapter = VisionCaptureAdapter::new(source, catalog);
     adapter.set_ally_faction(Faction::Radiant);
     let evs1 = adapter.poll_events().unwrap();
-    assert_eq!(evs1.len(), 3, "Frame 1 must detect 3 picked heroes and ignore 7 dark slots");
+    assert_eq!(
+        evs1.len(),
+        3,
+        "Frame 1 must detect 3 picked heroes and ignore 7 dark slots"
+    );
     assert!(evs1.contains(&DraftEvent::PickDetected {
         side: Side::Allies,
         slot: 0,
@@ -743,8 +788,7 @@ fn vision_capture_adapter_recognizes_topbar_10_slots_and_maps_radiant_dire_sides
 #[test]
 fn steam32_resolver_supports_explicit_override_gsi_steam64_and_loginusers_vdf() {
     use crate::sync::{
-        LocalCacheManager, normalize_steam32_id, parse_loginusers_vdf,
-        resolve_steam32_account_id,
+        LocalCacheManager, normalize_steam32_id, parse_loginusers_vdf, resolve_steam32_account_id,
     };
 
     let sample_vdf = r#"
@@ -763,7 +807,10 @@ fn steam32_resolver_supports_explicit_override_gsi_steam64_and_loginusers_vdf() 
     }
     "#;
 
-    assert_eq!(normalize_steam32_id(76_561_198_061_460_213), Some(101_194_485));
+    assert_eq!(
+        normalize_steam32_id(76_561_198_061_460_213),
+        Some(101_194_485)
+    );
     assert_eq!(normalize_steam32_id(101_194_485), Some(101_194_485));
     assert_eq!(parse_loginusers_vdf(sample_vdf), Some(101_194_485));
 
@@ -822,8 +869,14 @@ fn steam32_resolver_supports_explicit_override_gsi_steam64_and_loginusers_vdf() 
         )
         .unwrap();
 
-    let mat_a = mgr_a.build_repository().load_matrix(Bracket::Legend).unwrap();
-    let mat_b = mgr_b.build_repository().load_matrix(Bracket::Legend).unwrap();
+    let mat_a = mgr_a
+        .build_repository()
+        .load_matrix(Bracket::Legend)
+        .unwrap();
+    let mat_b = mgr_b
+        .build_repository()
+        .load_matrix(Bracket::Legend)
+        .unwrap();
     assert!(
         mat_a.hero(HeroId(1)).unwrap().comfort_delta()
             > mat_b.hero(HeroId(1)).unwrap().comfort_delta(),
@@ -944,7 +997,11 @@ fn vision_catalog_matches_pickphase_upper_crop_and_rejects_flat_medal_slots() {
     }]));
     let mut adapter = VisionCaptureAdapter::new(source, catalog);
     let events = adapter.poll_events().unwrap();
-    assert_eq!(events.len(), 8, "Expected 8 picks and 0 empty medal slots: {events:?}");
+    assert_eq!(
+        events.len(),
+        8,
+        "Expected 8 picks and 0 empty medal slots: {events:?}"
+    );
 
     for &(slot, hid) in &expected_rad {
         assert!(
@@ -997,9 +1054,7 @@ fn vision_guard_rejects_non_dota_wm_class_single_slot_noise_and_dead_hero_overwr
 
     struct QueueSource(VecDeque<RgbFrame>);
     impl ScreenFrameSource for QueueSource {
-        fn capture_frame(
-            &mut self,
-        ) -> Result<Option<RgbFrame>, truesight_core::ports::PortError> {
+        fn capture_frame(&mut self) -> Result<Option<RgbFrame>, truesight_core::ports::PortError> {
             Ok(self.0.pop_front())
         }
     }
@@ -1011,31 +1066,29 @@ fn vision_guard_rejects_non_dota_wm_class_single_slot_noise_and_dead_hero_overwr
     let virtual_h = 1440_usize;
     let (rad_game, _) = compute_ingame_topbar_slot_rects(frame_w, virtual_h);
 
-    let paint_ingame = |buf: &mut [u8],
-                        rect: crate::vision::TopBarSlotRect,
-                        hid: u16,
-                        chroma_scale: f32| {
-        let hero_rgb = &atlas.heroes[&HeroId(hid)];
-        let src_x0 = 4_usize;
-        let src_w = atlas.hero_width - 8;
-        let src_y0 = 2_usize;
-        let src_h = atlas.hero_height - 4;
-        for dy in 0..rect.height {
-            let sy = src_y0 + (dy * src_h) / rect.height;
-            for dx in 0..rect.width {
-                let sx = src_x0 + (dx * src_w) / rect.width;
-                let src_idx = (sy * atlas.hero_width + sx) * 3;
-                let r = f32::from(hero_rgb[src_idx]);
-                let g = f32::from(hero_rgb[src_idx + 1]);
-                let b = f32::from(hero_rgb[src_idx + 2]);
-                let luma = (r + g + b) / 3.0;
-                let dst_idx = ((rect.y + dy) * frame_w + (rect.x + dx)) * 3;
-                buf[dst_idx] = (luma + (r - luma) * chroma_scale).clamp(0.0, 255.0) as u8;
-                buf[dst_idx + 1] = (luma + (g - luma) * chroma_scale).clamp(0.0, 255.0) as u8;
-                buf[dst_idx + 2] = (luma + (b - luma) * chroma_scale).clamp(0.0, 255.0) as u8;
+    let paint_ingame =
+        |buf: &mut [u8], rect: crate::vision::TopBarSlotRect, hid: u16, chroma_scale: f32| {
+            let hero_rgb = &atlas.heroes[&HeroId(hid)];
+            let src_x0 = 4_usize;
+            let src_w = atlas.hero_width - 8;
+            let src_y0 = 2_usize;
+            let src_h = atlas.hero_height - 4;
+            for dy in 0..rect.height {
+                let sy = src_y0 + (dy * src_h) / rect.height;
+                for dx in 0..rect.width {
+                    let sx = src_x0 + (dx * src_w) / rect.width;
+                    let src_idx = (sy * atlas.hero_width + sx) * 3;
+                    let r = f32::from(hero_rgb[src_idx]);
+                    let g = f32::from(hero_rgb[src_idx + 1]);
+                    let b = f32::from(hero_rgb[src_idx + 2]);
+                    let luma = (r + g + b) / 3.0;
+                    let dst_idx = ((rect.y + dy) * frame_w + (rect.x + dx)) * 3;
+                    buf[dst_idx] = (luma + (r - luma) * chroma_scale).clamp(0.0, 255.0) as u8;
+                    buf[dst_idx + 1] = (luma + (g - luma) * chroma_scale).clamp(0.0, 255.0) as u8;
+                    buf[dst_idx + 2] = (luma + (b - luma) * chroma_scale).clamp(0.0, 255.0) as u8;
+                }
             }
-        }
-    };
+        };
 
     // 2. Single-slot noise frame (menu banner / partial splash) must be ignored (< 2 slots quorum)
     let mut single_slot_rgb = vec![14_u8; frame_w * frame_h * 3];
@@ -1091,7 +1144,11 @@ fn vision_guard_rejects_non_dota_wm_class_single_slot_noise_and_dead_hero_overwr
     );
 
     let ev_valid = adapter.poll_events().unwrap();
-    assert_eq!(ev_valid.len(), 2, "Valid 2-slot frame must emit both heroes: {ev_valid:?}");
+    assert_eq!(
+        ev_valid.len(),
+        2,
+        "Valid 2-slot frame must emit both heroes: {ev_valid:?}"
+    );
 
     let ev_dead = adapter.poll_events().unwrap();
     assert!(
@@ -1153,12 +1210,18 @@ fn gsi_replay_payload_maps_player_steamid_to_faction_and_rejects_out_of_range_pi
 
 #[test]
 fn sync_stratz_synergy_parser_and_steam_id_normalizer_handle_edge_cases() {
-    use crate::sync::{normalize_steam32_id, parse_stratz_with_synergy_json, STEAM64_OFFSET};
+    use crate::sync::{STEAM64_OFFSET, normalize_steam32_id, parse_stratz_with_synergy_json};
 
     assert_eq!(normalize_steam32_id(0), None);
     assert_eq!(normalize_steam32_id(127_255_741), Some(127_255_741));
-    assert_eq!(normalize_steam32_id(76_561_198_087_521_469), Some(127_255_741));
-    assert_eq!(normalize_steam32_id(STEAM64_OFFSET + u64::from(u32::MAX) + 1), None);
+    assert_eq!(
+        normalize_steam32_id(76_561_198_087_521_469),
+        Some(127_255_741)
+    );
+    assert_eq!(
+        normalize_steam32_id(STEAM64_OFFSET + u64::from(u32::MAX) + 1),
+        None
+    );
 
     let json = r#"{
         "data": {
@@ -1171,10 +1234,17 @@ fn sync_stratz_synergy_parser_and_steam_id_normalizer_handle_edge_cases() {
         }
     }"#;
     let rows = parse_stratz_with_synergy_json(json);
-    assert_eq!(rows.len(), 2, "self-pair and zero-id entries must be skipped");
+    assert_eq!(
+        rows.len(),
+        2,
+        "self-pair and zero-id entries must be skipped"
+    );
     assert_eq!(rows[0].0, HeroId(1));
     assert_eq!(rows[0].1, HeroId(97));
-    assert!((rows[0].2 - 0.15).abs() < 1e-6, "synergy must clamp to +0.15");
+    assert!(
+        (rows[0].2 - 0.15).abs() < 1e-6,
+        "synergy must clamp to +0.15"
+    );
     assert_eq!(rows[1].0, HeroId(14));
     assert_eq!(rows[1].1, HeroId(27));
     assert!(rows[1].2 > 0.05 && rows[1].2 <= 0.15);
@@ -1188,9 +1258,8 @@ fn comfort_v3_decays_against_wall_clock_now_unix_and_handles_edge_timestamps() {
     let stale_ts = now_unix - 300 * 86_400;
 
     // 1 match played 300 days ago (tau = 75d => expected decay = exp(-4) ~= 0.0183156, not 1.0)
-    let one_stale_hero = format!(
-        r#"[{{"hero_id": 1, "last_played": {stale_ts}, "games": 1, "win": 1}}]"#
-    );
+    let one_stale_hero =
+        format!(r#"[{{"hero_id": 1, "last_played": {stale_ts}, "games": 1, "win": 1}}]"#);
     let one_stale_match = format!(
         r#"[{{"hero_id": 1, "start_time": {stale_ts}, "player_slot": 0, "radiant_win": true}}]"#
     );
@@ -1217,9 +1286,8 @@ fn comfort_v3_decays_against_wall_clock_now_unix_and_handles_edge_timestamps() {
 
     // Frozen history evaluated across advancing wall-clock timestamps strictly decays to 0.0
     let t0 = 1_750_000_000_u64;
-    let frozen_heroes = format!(
-        r#"[{{"hero_id": 19, "last_played": {t0}, "games": 6, "win": 4}}]"#
-    );
+    let frozen_heroes =
+        format!(r#"[{{"hero_id": 19, "last_played": {t0}, "games": 6, "win": 4}}]"#);
     let mut frozen_match_objs = Vec::new();
     for k in 0..5_u64 {
         let st = t0 - k * 2 * 86_400;
@@ -1244,9 +1312,18 @@ fn comfort_v3_decays_against_wall_clock_now_unix_and_handles_edge_timestamps() {
         let mat = repo.load_matrix(Bracket::Legend).unwrap();
         deltas.push(mat.hero(HeroId(19)).unwrap().comfort_delta());
     }
-    assert!(decays[0] > decays[1] && decays[1] > decays[2], "decays={decays:?}");
-    assert!(deltas[0] > deltas[1] && deltas[1] > deltas[2], "deltas={deltas:?}");
-    assert_eq!(deltas[2], 0.0, "after 300d without matches comfort_delta must decay to 0.0");
+    assert!(
+        decays[0] > decays[1] && decays[1] > decays[2],
+        "decays={decays:?}"
+    );
+    assert!(
+        deltas[0] > deltas[1] && deltas[1] > deltas[2],
+        "deltas={deltas:?}"
+    );
+    assert_eq!(
+        deltas[2], 0.0,
+        "after 300d without matches comfort_delta must decay to 0.0"
+    );
 
     // Edge cases: future timestamp clamped, missing last_played -> 0.0, games == 0 -> 0.0,
     // and high-volume old career hero with 0 recent matches does not revive g_eff >= 0.15.
@@ -1262,11 +1339,8 @@ fn comfort_v3_decays_against_wall_clock_now_unix_and_handles_edge_timestamps() {
     let edge_matches = format!(
         r#"[{{"hero_id": 2, "start_time": {future_ts}, "player_slot": 0, "radiant_win": true}}]"#
     );
-    let edge_parsed = parse_player_comfort_with_matches_at_json(
-        &edge_heroes,
-        Some(&edge_matches),
-        now_unix,
-    );
+    let edge_parsed =
+        parse_player_comfort_with_matches_at_json(&edge_heroes, Some(&edge_matches), now_unix);
     let by_id = |id: u16| {
         edge_parsed
             .iter()
@@ -1275,9 +1349,20 @@ fn comfort_v3_decays_against_wall_clock_now_unix_and_handles_edge_timestamps() {
             .unwrap()
     };
 
-    assert!((by_id(2).3 - 0.5).abs() < 1e-4, "1 future match out of 2 games clamps age_days to 0.0 => decay 0.5");
-    assert_eq!(by_id(3).3, 0.0, "missing last_played with 0 recent matches must have 0.0 decay");
-    assert_eq!(by_id(4), (HeroId(4), 0, 0, 0.0), "zero games must emit neutral 0.0");
+    assert!(
+        (by_id(2).3 - 0.5).abs() < 1e-4,
+        "1 future match out of 2 games clamps age_days to 0.0 => decay 0.5"
+    );
+    assert_eq!(
+        by_id(3).3,
+        0.0,
+        "missing last_played with 0 recent matches must have 0.0 decay"
+    );
+    assert_eq!(
+        by_id(4),
+        (HeroId(4), 0, 0, 0.0),
+        "zero games must emit neutral 0.0"
+    );
     assert!(
         (by_id(5).1 as f32) * by_id(5).3 < 0.15,
         "stale 80-game hero with 0 recent matches must not revive g_eff >= 0.15 (decay={})",
@@ -1381,10 +1466,9 @@ fn vision_reset_clears_detector_state_drains_stale_queue_and_repopulates_station
     );
 
     // Worker-level reset drains queued events and wakes the loop to re-emit stationary picks
-    let mut worker = BoundedVisionWorker::spawn_with_source(StationaryFrameSource {
-        frame: stationary,
-    })
-    .expect("worker must spawn");
+    let mut worker =
+        BoundedVisionWorker::spawn_with_source(StationaryFrameSource { frame: stationary })
+            .expect("worker must spawn");
 
     let mut initial_seen = Vec::new();
     for _ in 0..40 {
@@ -1494,8 +1578,10 @@ fn gsi_structural_json_parser_handles_escapes_duplicates_and_truncation() {
         "Truncated JSON without closing braces must be rejected"
     );
     assert!(
-        parse_gsi_json_events(r#"{"map":{"game_state":"DOTA_GAMERULES_STATE_HERO_SELECTION"}} trailing"#)
-            .is_empty(),
+        parse_gsi_json_events(
+            r#"{"map":{"game_state":"DOTA_GAMERULES_STATE_HERO_SELECTION"}} trailing"#
+        )
+        .is_empty(),
         "Trailing non-whitespace garbage after root JSON object must be rejected"
     );
 }
@@ -1510,7 +1596,9 @@ fn gsi_http_framing_rejects_bad_method_missing_length_truncation_and_oversized_b
 
     let send_raw = |raw: &[u8]| -> String {
         let mut stream = TcpStream::connect(addr).unwrap();
-        stream.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
         stream.write_all(raw).unwrap();
         stream.flush().unwrap();
         let _ = stream.shutdown(Shutdown::Write);
@@ -1520,7 +1608,10 @@ fn gsi_http_framing_rejects_bad_method_missing_length_truncation_and_oversized_b
     };
 
     let resp_405 = send_raw(b"GET / HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}");
-    assert!(resp_405.starts_with("HTTP/1.1 405"), "Expected 405 for GET, got: {resp_405}");
+    assert!(
+        resp_405.starts_with("HTTP/1.1 405"),
+        "Expected 405 for GET, got: {resp_405}"
+    );
 
     let body_ok = r#"{"map":{"game_state":"DOTA_GAMERULES_STATE_HERO_SELECTION","clock_time":1}}"#;
     let resp_411 =
@@ -1530,9 +1621,8 @@ fn gsi_http_framing_rejects_bad_method_missing_length_truncation_and_oversized_b
         "Expected 411 without Content-Length, got: {resp_411}"
     );
 
-    let resp_400_trunc = send_raw(
-        format!("POST / HTTP/1.1\r\nContent-Length: 200\r\n\r\n{body_ok}").as_bytes(),
-    );
+    let resp_400_trunc =
+        send_raw(format!("POST / HTTP/1.1\r\nContent-Length: 200\r\n\r\n{body_ok}").as_bytes());
     assert!(
         resp_400_trunc.starts_with("HTTP/1.1 400"),
         "Expected 400 for truncated body < Content-Length, got: {resp_400_trunc}"
@@ -1561,39 +1651,67 @@ fn gsi_http_framing_rejects_bad_method_missing_length_truncation_and_oversized_b
 fn event_queues_coalesce_under_saturation_preserve_resets_and_recover_stationary_vision() {
     use crate::gsi::{BoundedDraftQueue, GSI_QUEUE_CAPACITY};
     use crate::vision::{
-        BoundedVisionWorker, RgbFrame, ScreenFrameSource, compute_topbar_slot_rects, parse_hero_atlas,
+        BoundedVisionWorker, RgbFrame, ScreenFrameSource, compute_topbar_slot_rects,
+        parse_hero_atlas,
     };
     use truesight_core::domain::Faction;
 
     // 1. GSI queue saturation: coalesces redundant updates and never drops critical reset/faction/steamid
     let q = BoundedDraftQueue::new(GSI_QUEUE_CAPACITY);
-    assert!(q.push_for_epoch(0, DraftEvent::GameRulesStateChanged {
-        state_name: "DOTA_GAMERULES_STATE_WAIT_FOR_PLAYERS_TO_LOAD".into(),
-        game_time_secs: -90,
-    }));
-    assert!(q.push_for_epoch(0, DraftEvent::FactionDetected { faction: Faction::Radiant }));
-    assert!(q.push_for_epoch(0, DraftEvent::FactionDetected { faction: Faction::Dire }));
-    assert!(q.push_for_epoch(0, DraftEvent::PlayerSteamIdDetected { steam32: 127_255_741 }));
+    assert!(q.push_for_epoch(
+        0,
+        DraftEvent::GameRulesStateChanged {
+            state_name: "DOTA_GAMERULES_STATE_WAIT_FOR_PLAYERS_TO_LOAD".into(),
+            game_time_secs: -90,
+        }
+    ));
+    assert!(q.push_for_epoch(
+        0,
+        DraftEvent::FactionDetected {
+            faction: Faction::Radiant
+        }
+    ));
+    assert!(q.push_for_epoch(
+        0,
+        DraftEvent::FactionDetected {
+            faction: Faction::Dire
+        }
+    ));
+    assert!(q.push_for_epoch(
+        0,
+        DraftEvent::PlayerSteamIdDetected {
+            steam32: 127_255_741
+        }
+    ));
     for round in 0..5_u16 {
         for slot in 0..5_usize {
-            let _ = q.push_for_epoch(0, DraftEvent::PickDetected {
-                side: Side::Allies,
-                slot,
-                hero_id: HeroId(10 + round * 10 + slot as u16),
-                role: Role::ALL.get(slot).copied(),
-            });
+            let _ = q.push_for_epoch(
+                0,
+                DraftEvent::PickDetected {
+                    side: Side::Allies,
+                    slot,
+                    hero_id: HeroId(10 + round * 10 + slot as u16),
+                    role: Role::ALL.get(slot).copied(),
+                },
+            );
         }
-        let _ = q.push_for_epoch(0, DraftEvent::GameRulesStateChanged {
-            state_name: "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS".into(),
-            game_time_secs: i32::from(round) * 60,
-        });
+        let _ = q.push_for_epoch(
+            0,
+            DraftEvent::GameRulesStateChanged {
+                state_name: "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS".into(),
+                game_time_secs: i32::from(round) * 60,
+            },
+        );
     }
     for k in 0..12_u64 {
-        let _ = q.push_for_epoch(0, DraftEvent::PlayerHeroMapped {
-            steam32: 5000 + k,
-            faction: Faction::Radiant,
-            hero_slug: "npc_dota_hero_axe".into(),
-        });
+        let _ = q.push_for_epoch(
+            0,
+            DraftEvent::PlayerHeroMapped {
+                steam32: 5000 + k,
+                faction: Faction::Radiant,
+                hero_slug: "npc_dota_hero_axe".into(),
+            },
+        );
     }
 
     let drained = q.drain();
@@ -1605,9 +1723,15 @@ fn event_queues_coalesce_under_saturation_preserve_resets_and_recover_stationary
     assert!(drained.iter().any(|e| matches!(
         e, DraftEvent::GameRulesStateChanged { state_name, .. } if state_name == "DOTA_GAMERULES_STATE_WAIT_FOR_PLAYERS_TO_LOAD"
     )));
-    assert!(drained.contains(&DraftEvent::FactionDetected { faction: Faction::Dire }));
-    assert!(!drained.contains(&DraftEvent::FactionDetected { faction: Faction::Radiant }));
-    assert!(drained.contains(&DraftEvent::PlayerSteamIdDetected { steam32: 127_255_741 }));
+    assert!(drained.contains(&DraftEvent::FactionDetected {
+        faction: Faction::Dire
+    }));
+    assert!(!drained.contains(&DraftEvent::FactionDetected {
+        faction: Faction::Radiant
+    }));
+    assert!(drained.contains(&DraftEvent::PlayerSteamIdDetected {
+        steam32: 127_255_741
+    }));
     let (epoch, should_resync) = q.begin_poll_cycle();
     assert!(should_resync);
     assert_eq!(
@@ -1631,7 +1755,14 @@ fn event_queues_coalesce_under_saturation_preserve_resets_and_recover_stationary
     let addr = listener.local_addr();
     let body = r#"{"truesight_pick":{"side":"ally","slot":0,"hero_id":1}}"#;
     let mut s = TcpStream::connect(addr).unwrap();
-    s.write_all(format!("POST / HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}", body.len()).as_bytes()).unwrap();
+    s.write_all(
+        format!(
+            "POST / HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .as_bytes(),
+    )
+    .unwrap();
     thread::sleep(Duration::from_millis(50));
     let _ = listener.poll_events().unwrap();
     assert!(listener.queue_stats().enqueued >= 1);
@@ -1647,13 +1778,17 @@ fn event_queues_coalesce_under_saturation_preserve_resets_and_recover_stationary
     let (w, h) = (1920usize, 1080usize);
     let mut rgb = vec![0u8; w * h * 3];
     let (rad_r, dire_r) = compute_topbar_slot_rects(w, h);
-    for (rects, heroes) in [(&rad_r, &[1_u16, 13, 97, 79, 5]), (&dire_r, &[94_u16, 17, 2, 100, 30])] {
+    for (rects, heroes) in [
+        (&rad_r, &[1_u16, 13, 97, 79, 5]),
+        (&dire_r, &[94_u16, 17, 2, 100, 30]),
+    ] {
         for (slot, hid) in heroes.iter().enumerate() {
             let (rect, hero_rgb) = (rects[slot], &atlas.heroes[&HeroId(*hid)]);
             for dy in 0..rect.height {
                 let sy = (dy * atlas.hero_height) / rect.height;
                 for dx in 0..rect.width {
-                    let src_idx = (sy * atlas.hero_width + (dx * atlas.hero_width) / rect.width) * 3;
+                    let src_idx =
+                        (sy * atlas.hero_width + (dx * atlas.hero_width) / rect.width) * 3;
                     let dst_idx = ((rect.y + dy) * w + (rect.x + dx)) * 3;
                     rgb[dst_idx..dst_idx + 3].copy_from_slice(&hero_rgb[src_idx..src_idx + 3]);
                 }
@@ -1661,14 +1796,20 @@ fn event_queues_coalesce_under_saturation_preserve_resets_and_recover_stationary
         }
     }
     let mut worker = BoundedVisionWorker::spawn_with_capacity(
-        StationarySource(RgbFrame { width: w, height: h, rgb }),
+        StationarySource(RgbFrame {
+            width: w,
+            height: h,
+            rgb,
+        }),
         8,
     )
     .unwrap();
     let mut first_batch = Vec::new();
     for _ in 0..40 {
         first_batch.extend(worker.poll_events().unwrap());
-        if first_batch.len() >= 8 { break; }
+        if first_batch.len() >= 8 {
+            break;
+        }
         thread::sleep(Duration::from_millis(20));
     }
     assert_eq!(first_batch.len(), 8);
@@ -1677,11 +1818,20 @@ fn event_queues_coalesce_under_saturation_preserve_resets_and_recover_stationary
     let mut resynced = Vec::new();
     for _ in 0..40 {
         resynced.extend(worker.poll_events().unwrap());
-        if worker.queue_stats().recovered_resyncs >= 1 && !resynced.is_empty() { break; }
+        if worker.queue_stats().recovered_resyncs >= 1 && !resynced.is_empty() {
+            break;
+        }
         thread::sleep(Duration::from_millis(20));
     }
-    assert!(worker.queue_stats().recovered_resyncs >= 1, "Expected automatic overflow resync: {:?}", worker.queue_stats());
-    assert!(!resynced.is_empty(), "Expected recovered vision picks after saturation");
+    assert!(
+        worker.queue_stats().recovered_resyncs >= 1,
+        "Expected automatic overflow resync: {:?}",
+        worker.queue_stats()
+    );
+    assert!(
+        !resynced.is_empty(),
+        "Expected recovered vision picks after saturation"
+    );
 }
 
 #[test]
@@ -1699,17 +1849,33 @@ fn gsi_parser_extracts_draft_bans_and_coalesces_duplicate_ban_events() {
         vec![
             DraftEvent::BanDetected { hero_id: HeroId(1) },
             DraftEvent::BanDetected { hero_id: HeroId(2) },
-            DraftEvent::BanDetected { hero_id: HeroId(94) },
-            DraftEvent::BanDetected { hero_id: HeroId(13) },
+            DraftEvent::BanDetected {
+                hero_id: HeroId(94)
+            },
+            DraftEvent::BanDetected {
+                hero_id: HeroId(13)
+            },
         ]
     );
 
     let queue = crate::gsi::BoundedDraftQueue::new(4);
-    assert!(queue.push_for_epoch(0, DraftEvent::BanDetected { hero_id: HeroId(94) }));
-    assert!(queue.push_for_epoch(0, DraftEvent::BanDetected { hero_id: HeroId(94) }));
+    assert!(queue.push_for_epoch(
+        0,
+        DraftEvent::BanDetected {
+            hero_id: HeroId(94)
+        }
+    ));
+    assert!(queue.push_for_epoch(
+        0,
+        DraftEvent::BanDetected {
+            hero_id: HeroId(94)
+        }
+    ));
     assert_eq!(
         queue.drain(),
-        vec![DraftEvent::BanDetected { hero_id: HeroId(94) }]
+        vec![DraftEvent::BanDetected {
+            hero_id: HeroId(94)
+        }]
     );
 }
 
@@ -1794,7 +1960,12 @@ fn vision_rejects_empty_pickphase_slots_and_dark_gradient_bars_that_matched_dark
     let (rad_game, dire_game) = compute_ingame_topbar_slot_rects(w4, h4);
     for (rect, hid) in [(rad_game[0], 39_u16), (dire_game[0], 2_u16)] {
         let hero_rgb = &atlas.heroes[&HeroId(hid)];
-        let (sx0, sw0, sy0, sh0) = (4_usize, atlas.hero_width - 8, 2_usize, atlas.hero_height - 4);
+        let (sx0, sw0, sy0, sh0) = (
+            4_usize,
+            atlas.hero_width - 8,
+            2_usize,
+            atlas.hero_height - 4,
+        );
         for dy in 0..rect.height {
             let sy = sy0 + (dy * sh0) / rect.height;
             for dx in 0..rect.width {
@@ -1808,24 +1979,53 @@ fn vision_rejects_empty_pickphase_slots_and_dark_gradient_bars_that_matched_dark
     let _ = vh1;
 
     let source = QueueSource(VecDeque::from([
-        RgbFrame { width: w1, height: h1, rgb: dark_gradient },
-        RgbFrame { width: w2, height: h2, rgb: empty_pick },
-        RgbFrame { width: w3, height: h3, rgb: gray_ui },
-        RgbFrame { width: w4, height: h4, rgb: valid_ingame_1280 },
+        RgbFrame {
+            width: w1,
+            height: h1,
+            rgb: dark_gradient,
+        },
+        RgbFrame {
+            width: w2,
+            height: h2,
+            rgb: empty_pick,
+        },
+        RgbFrame {
+            width: w3,
+            height: h3,
+            rgb: gray_ui,
+        },
+        RgbFrame {
+            width: w4,
+            height: h4,
+            rgb: valid_ingame_1280,
+        },
     ]));
     let mut adapter = VisionCaptureAdapter::new(source, catalog);
 
     let ev1 = adapter.poll_events().unwrap();
-    assert!(ev1.is_empty(), "Dark gradient top-bar must emit 0 picks, got {ev1:?}");
+    assert!(
+        ev1.is_empty(),
+        "Dark gradient top-bar must emit 0 picks, got {ev1:?}"
+    );
 
     let ev2 = adapter.poll_events().unwrap();
-    assert!(ev2.is_empty(), "Empty PickPhase slate slots must emit 0 picks, got {ev2:?}");
+    assert!(
+        ev2.is_empty(),
+        "Empty PickPhase slate slots must emit 0 picks, got {ev2:?}"
+    );
 
     let ev3 = adapter.poll_events().unwrap();
-    assert!(ev3.is_empty(), "Grayscale high-contrast UI boxes must emit 0 picks, got {ev3:?}");
+    assert!(
+        ev3.is_empty(),
+        "Grayscale high-contrast UI boxes must emit 0 picks, got {ev3:?}"
+    );
 
     let ev4 = adapter.poll_events().unwrap();
-    assert_eq!(ev4.len(), 2, "Valid InGame 1280x720 QoP + Axe frame must still detect both: {ev4:?}");
+    assert_eq!(
+        ev4.len(),
+        2,
+        "Valid InGame 1280x720 QoP + Axe frame must still detect both: {ev4:?}"
+    );
 }
 
 #[test]
@@ -1839,7 +2039,16 @@ fn vision_x11_import_args_include_silent_flag_to_prevent_xbell() {
     );
     assert_eq!(
         args,
-        ["-silent", "-window", "0x620013d", "-depth", "8", "-crop", "100%x8%+0+0", "ppm:-"]
+        [
+            "-silent",
+            "-window",
+            "0x620013d",
+            "-depth",
+            "8",
+            "-crop",
+            "100%x8%+0+0",
+            "ppm:-"
+        ]
     );
 }
 
@@ -1935,7 +2144,8 @@ fn vision_catalog_matches_all_arcana_and_persona_portraits_across_layouts() {
         height: alt_atlas.height,
     };
     for (idx, (expected_id, rgb)) in alt_atlas.entries.iter().enumerate() {
-        let matched = catalog.match_portrait_crop(rgb, alt_atlas.width, alt_atlas.height, exact_rect);
+        let matched =
+            catalog.match_portrait_crop(rgb, alt_atlas.width, alt_atlas.height, exact_rect);
         assert_eq!(
             matched,
             Some(*expected_id),
@@ -1971,9 +2181,30 @@ fn vision_catalog_matches_all_arcana_and_persona_portraits_across_layouts() {
     ] {
         let (rad_r, dire_r) = rects;
         let mut frame_rgb = vec![0u8; w * h * 3];
-        paint_rgb(&mut frame_rgb, w, rad_r[0], pudge_persona, alt_atlas.width, alt_atlas.height);
-        paint_rgb(&mut frame_rgb, w, rad_r[1], wisp_arcana, alt_atlas.width, alt_atlas.height);
-        paint_rgb(&mut frame_rgb, w, dire_r[0], pa_persona, alt_atlas.width, alt_atlas.height);
+        paint_rgb(
+            &mut frame_rgb,
+            w,
+            rad_r[0],
+            pudge_persona,
+            alt_atlas.width,
+            alt_atlas.height,
+        );
+        paint_rgb(
+            &mut frame_rgb,
+            w,
+            rad_r[1],
+            wisp_arcana,
+            alt_atlas.width,
+            alt_atlas.height,
+        );
+        paint_rgb(
+            &mut frame_rgb,
+            w,
+            dire_r[0],
+            pa_persona,
+            alt_atlas.width,
+            alt_atlas.height,
+        );
         // Leave rad_r[2..5] and dire_r[1..5] as dark empty/grayscale UI negative controls.
 
         let catalog = HeroVisionCatalog::from_embedded().expect("vision catalog must load");
@@ -2064,22 +2295,70 @@ fn vision_pickphase_and_ingame_adapter_detect_all_49_arcana_and_persona_variants
     let magnus = &base_atlas.heroes[&HeroId(97)];
     let medusa = &base_atlas.heroes[&HeroId(94)];
     let (w, h) = (1920usize, 1080usize);
-    let full_src = TopBarSlotRect { x: 0, y: 0, width: alt_atlas.width, height: alt_atlas.height };
-    let upper_src = TopBarSlotRect { x: 4, y: 2, width: alt_atlas.width - 8, height: 22 };
+    let full_src = TopBarSlotRect {
+        x: 0,
+        y: 0,
+        width: alt_atlas.width,
+        height: alt_atlas.height,
+    };
+    let upper_src = TopBarSlotRect {
+        x: 4,
+        y: 2,
+        width: alt_atlas.width - 8,
+        height: 22,
+    };
 
     let mut failures = Vec::new();
     for (idx, (expected_id, rgb)) in alt_atlas.entries.iter().enumerate() {
         let cases = [
-            (w, 160usize, true, full_src, compute_pickphase_topbar_slot_rects(w, h)),
-            (w, 160usize, true, upper_src, compute_pickphase_topbar_slot_rects(w, h)),
-            (2560usize, 160usize, true, upper_src, compute_pickphase_topbar_slot_rects(2560, 1440)),
-            (w, 160usize, false, full_src, compute_ingame_topbar_slot_rects(w, h)),
+            (
+                w,
+                160usize,
+                true,
+                full_src,
+                compute_pickphase_topbar_slot_rects(w, h),
+            ),
+            (
+                w,
+                160usize,
+                true,
+                upper_src,
+                compute_pickphase_topbar_slot_rects(w, h),
+            ),
+            (
+                2560usize,
+                160usize,
+                true,
+                upper_src,
+                compute_pickphase_topbar_slot_rects(2560, 1440),
+            ),
+            (
+                w,
+                160usize,
+                false,
+                full_src,
+                compute_ingame_topbar_slot_rects(w, h),
+            ),
         ];
         for (fw, fh, is_pickphase, crop, (rad_r, dire_r)) in cases {
             let mut frame_rgb = vec![0u8; fw * fh * 3];
             paint_rgb_crop(&mut frame_rgb, fw, rad_r[0], rgb, alt_atlas.width, crop);
-            paint_rgb_crop(&mut frame_rgb, fw, rad_r[1], magnus, base_atlas.hero_width, full_src);
-            paint_rgb_crop(&mut frame_rgb, fw, dire_r[0], medusa, base_atlas.hero_width, full_src);
+            paint_rgb_crop(
+                &mut frame_rgb,
+                fw,
+                rad_r[1],
+                magnus,
+                base_atlas.hero_width,
+                full_src,
+            );
+            paint_rgb_crop(
+                &mut frame_rgb,
+                fw,
+                dire_r[0],
+                medusa,
+                base_atlas.hero_width,
+                full_src,
+            );
 
             let mut adapter = VisionCaptureAdapter::new(
                 SingleFrameSource(Some(RgbFrame {
@@ -2206,8 +2485,8 @@ fn vision_recalls_dark_low_contrast_heroes_and_rejects_empty_slots_across_resolu
 
     // Dark/low-contrast trio from #25 paired with negative-control empty slate slots in R3..R4 and D1..D4.
     let targets = [
-        (0usize, HeroId(11), Role::Carry),   // Shadow Fiend
-        (1usize, HeroId(102), Role::Mid),    // Abaddon
+        (0usize, HeroId(11), Role::Carry),    // Shadow Fiend
+        (1usize, HeroId(102), Role::Mid),     // Abaddon
         (2usize, HeroId(109), Role::Offlane), // Terrorblade
     ];
 
@@ -2238,18 +2517,40 @@ fn vision_recalls_dark_low_contrast_heroes_and_rejects_empty_slots_across_resolu
                 for dx in 0..rect.width {
                     let border = dy < 3 || dy + 3 >= rect.height || dx < 4 || dx + 4 >= rect.width;
                     let idx = ((rect.y + dy) * w + (rect.x + dx)) * 3;
-                    rgb[idx..idx + 3].copy_from_slice(&if border { [32, 48, 66] } else { [18, 28, 42] });
+                    rgb[idx..idx + 3].copy_from_slice(&if border {
+                        [32, 48, 66]
+                    } else {
+                        [18, 28, 42]
+                    });
                 }
             }
         }
         for (slot, hid, _) in targets {
-            paint_slot_crop(&mut rgb, w, rad_r[slot], &atlas.heroes[&hid], atlas.hero_width, crop);
+            paint_slot_crop(
+                &mut rgb,
+                w,
+                rad_r[slot],
+                &atlas.heroes[&hid],
+                atlas.hero_width,
+                crop,
+            );
         }
         // Anti-Mage in Dire slot 0 to validate opposite side + zero phantom picks on empty slots.
-        paint_slot_crop(&mut rgb, w, dire_r[0], &atlas.heroes[&HeroId(1)], atlas.hero_width, crop);
+        paint_slot_crop(
+            &mut rgb,
+            w,
+            dire_r[0],
+            &atlas.heroes[&HeroId(1)],
+            atlas.hero_width,
+            crop,
+        );
 
         let mut adapter = VisionCaptureAdapter::new(
-            SingleFrame(Some(RgbFrame { width: w, height: fh, rgb })),
+            SingleFrame(Some(RgbFrame {
+                width: w,
+                height: fh,
+                rgb,
+            })),
             catalog.clone(),
         );
         adapter.set_ally_faction(Faction::Radiant);
@@ -2267,7 +2568,10 @@ fn vision_recalls_dark_low_contrast_heroes_and_rejects_empty_slots_across_resolu
                 role: Some(role),
             };
             if !events.contains(&expected) {
-                failures.push(format!("{w}x{h} pickphase={is_pickphase} crop={}x{}: missing {hid:?} in {events:?}", crop.width, crop.height));
+                failures.push(format!(
+                    "{w}x{h} pickphase={is_pickphase} crop={}x{}: missing {hid:?} in {events:?}",
+                    crop.width, crop.height
+                ));
             }
         }
         if events.len() != 4 {
@@ -2355,9 +2659,8 @@ fn capture_factory_detects_platform_capabilities_and_reports_actionable_degradat
 #[test]
 fn platform_paths_and_steam_vdf_support_windows_without_home_and_preserve_linux() {
     use crate::platform::{
-        PlatformEnv, build_curl_args, detect_steam_vdf_in_candidates,
-        parse_windows_reg_steam_path, resolve_cache_dir_for, resolve_config_file_path_for,
-        steam_vdf_candidates_for,
+        PlatformEnv, build_curl_args, detect_steam_vdf_in_candidates, parse_windows_reg_steam_path,
+        resolve_cache_dir_for, resolve_config_file_path_for, steam_vdf_candidates_for,
     };
     use std::path::{Path, PathBuf};
 
@@ -2455,16 +2758,30 @@ fn platform_paths_and_steam_vdf_support_windows_without_home_and_preserve_linux(
     let reg_stdout = "\r\nHKEY_CURRENT_USER\\Software\\Valve\\Steam\r\n    SteamPath    REG_SZ    D:/Games/Steam\r\n\r\n";
     let parsed_reg = parse_windows_reg_steam_path(reg_stdout);
     assert_eq!(parsed_reg.as_deref(), Some(Path::new("D:/Games/Steam")));
-    assert_eq!(parse_windows_reg_steam_path("ERROR: unable to find key"), None);
+    assert_eq!(
+        parse_windows_reg_steam_path("ERROR: unable to find key"),
+        None
+    );
 
     let win_candidates = steam_vdf_candidates_for("windows", &win_env, parsed_reg.as_deref());
     assert_eq!(
         win_candidates,
         vec![
-            PathBuf::from(r"C:\Program Files (x86)").join("Steam").join("config").join("loginusers.vdf"),
-            PathBuf::from(r"C:\Program Files").join("Steam").join("config").join("loginusers.vdf"),
-            PathBuf::from(r"C:\Users\Player\AppData\Local").join("Steam").join("config").join("loginusers.vdf"),
-            PathBuf::from("D:/Games/Steam").join("config").join("loginusers.vdf"),
+            PathBuf::from(r"C:\Program Files (x86)")
+                .join("Steam")
+                .join("config")
+                .join("loginusers.vdf"),
+            PathBuf::from(r"C:\Program Files")
+                .join("Steam")
+                .join("config")
+                .join("loginusers.vdf"),
+            PathBuf::from(r"C:\Users\Player\AppData\Local")
+                .join("Steam")
+                .join("config")
+                .join("loginusers.vdf"),
+            PathBuf::from("D:/Games/Steam")
+                .join("config")
+                .join("loginusers.vdf"),
         ]
     );
 
@@ -2482,13 +2799,21 @@ fn platform_paths_and_steam_vdf_support_windows_without_home_and_preserve_linux(
         ..PlatformEnv::default()
     };
     let candidates = steam_vdf_candidates_for("windows", &vdf_env, Some(&custom_steam));
-    assert_eq!(detect_steam_vdf_in_candidates(&candidates), Some(101_194_485));
+    assert_eq!(
+        detect_steam_vdf_in_candidates(&candidates),
+        Some(101_194_485)
+    );
     let _ = std::fs::remove_dir_all(&tmp_root);
 
     // 4. Shared curl argument builder unifies OpenDota GET & STRATZ POST invocations.
     assert_eq!(
         build_curl_args("https://api.opendota.com/api/heroStats", &[]),
-        vec!["-fsSL", "--max-time", "6", "https://api.opendota.com/api/heroStats"]
+        vec![
+            "-fsSL",
+            "--max-time",
+            "6",
+            "https://api.opendota.com/api/heroStats"
+        ]
     );
     assert_eq!(
         build_curl_args(

@@ -19,6 +19,7 @@ pub struct SnapshotHeroRow {
     pub comfort_decay: f32,
 }
 
+#[rustfmt::skip]
 pub const OPENDOTA_HERO_SNAPSHOT: &[SnapshotHeroRow] = &[
     SnapshotHeroRow { id: 1, slug: "npc_dota_hero_antimage", name: "Anti-Mage", primary_roles: &[Role::Carry], bracket_winrates: [0.5222, 0.5214, 0.5085, 0.5119, 0.5130, 0.5091, 0.5086, 0.5071], role_offsets: [0.008, -0.03, -0.03, -0.03, -0.03], personal_matches: 0, personal_wins: 0, attack_type: AttackType::Melee, has_disable: false, has_initiation: false, trend_delta: -0.0007, comfort_decay: 0.0000 },
     SnapshotHeroRow { id: 2, slug: "npc_dota_hero_axe", name: "Axe", primary_roles: &[Role::Offlane], bracket_winrates: [0.5163, 0.5156, 0.5115, 0.5064, 0.4982, 0.4920, 0.4865, 0.4824], role_offsets: [-0.03, -0.03, 0.008, -0.03, -0.03], personal_matches: 0, personal_wins: 0, attack_type: AttackType::Melee, has_disable: true, has_initiation: true, trend_delta: -0.0002, comfort_decay: 0.0000 },

@@ -1,7 +1,10 @@
 use super::theme::*;
 use super::viewmodel::*;
 use super::{MatrixTab, TrueSightGuiApp};
-use eframe::egui::{self, Align, Align2, Color32, FontId, Layout, Margin, Rect, RichText, Sense, Stroke, StrokeKind, Vec2, pos2, vec2};
+use eframe::egui::{
+    self, Align, Align2, Color32, FontId, Layout, Margin, Rect, RichText, Sense, Stroke,
+    StrokeKind, Vec2, pos2, vec2,
+};
 use truesight_core::domain::{HeroId, TEAM_SIZE};
 use truesight_core::math::DraftAnalysis5v5;
 
@@ -31,10 +34,11 @@ impl TrueSightGuiApp {
                     ] {
                         let is_on = self.matrix_tab == tab;
                         let btn = egui::Button::new(
-                            RichText::new(lbl)
-                                .size(10.0)
-                                .strong()
-                                .color(if is_on { P_VOID } else { P_MUTED }),
+                            RichText::new(lbl).size(10.0).strong().color(if is_on {
+                                P_VOID
+                            } else {
+                                P_MUTED
+                            }),
                         )
                         .fill(if is_on { P_GEM } else { P_INDIGO_2 })
                         .stroke(Stroke::new(1.0_f32, if is_on { P_GEM } else { P_LINE }));
@@ -72,7 +76,11 @@ impl TrueSightGuiApp {
         (vec2(side, side), h_gap, v_gap)
     }
 
-    fn render_counter_tab(&self, ui: &mut egui::Ui, analysis: &DraftAnalysis5v5) -> (Vec2, f32, f32, f32) {
+    fn render_counter_tab(
+        &self,
+        ui: &mut egui::Ui,
+        analysis: &DraftAnalysis5v5,
+    ) -> (Vec2, f32, f32, f32) {
         let (cell_sz, h_gap, v_gap) = Self::matrix_grid_metrics(ui);
 
         ui.vertical(|ui| {
@@ -134,8 +142,12 @@ impl TrueSightGuiApp {
                     let (rh_r, _) = ui.allocate_exact_size(cell_sz, Sense::hover());
                     if let Some(ap) = self.session.draft.allies[i] {
                         if let Some(t) = self.textures.heroes.get(&ap.hero_id).map(|s| &s.color) {
-                            ui.painter()
-                                .image(t.id(), rh_r, uv_aspect_crop(cell_sz), Color32::WHITE);
+                            ui.painter().image(
+                                t.id(),
+                                rh_r,
+                                uv_aspect_crop(cell_sz),
+                                Color32::WHITE,
+                            );
                         }
                         ui.painter().line_segment(
                             [pos2(rh_r.max.x, rh_r.min.y), rh_r.max],
@@ -229,7 +241,11 @@ impl TrueSightGuiApp {
         (cell_sz, h_gap, v_gap, note_resp.rect.max.y)
     }
 
-    fn render_synergy_tab(&self, ui: &mut egui::Ui, analysis: &DraftAnalysis5v5) -> (Vec2, f32, f32, f32) {
+    fn render_synergy_tab(
+        &self,
+        ui: &mut egui::Ui,
+        analysis: &DraftAnalysis5v5,
+    ) -> (Vec2, f32, f32, f32) {
         let (cell_sz, h_gap, v_gap) = Self::matrix_grid_metrics(ui);
 
         ui.vertical(|ui| {
@@ -261,10 +277,8 @@ impl TrueSightGuiApp {
                             P_GEM,
                         );
                     }
-                    ui.painter().line_segment(
-                        [pos2(r.min.x, r.max.y), r.max],
-                        Stroke::new(2.0_f32, P_GEM),
-                    );
+                    ui.painter()
+                        .line_segment([pos2(r.min.x, r.max.y), r.max], Stroke::new(2.0_f32, P_GEM));
                 }
                 let (avg_r, _) = ui.allocate_exact_size(cell_sz, Sense::hover());
                 ui.painter().rect_filled(avg_r, 0.0, P_INDIGO_2);
@@ -290,8 +304,12 @@ impl TrueSightGuiApp {
                     let (rh_r, _) = ui.allocate_exact_size(cell_sz, Sense::hover());
                     if let Some(ap) = self.session.draft.allies[i] {
                         if let Some(t) = self.textures.heroes.get(&ap.hero_id).map(|s| &s.color) {
-                            ui.painter()
-                                .image(t.id(), rh_r, uv_aspect_crop(cell_sz), Color32::WHITE);
+                            ui.painter().image(
+                                t.id(),
+                                rh_r,
+                                uv_aspect_crop(cell_sz),
+                                Color32::WHITE,
+                            );
                         }
                         ui.painter().line_segment(
                             [pos2(rh_r.max.x, rh_r.min.y), rh_r.max],
@@ -335,11 +353,7 @@ impl TrueSightGuiApp {
                             analysis.ally_synergy_grid[i][k],
                         ) {
                             let pct = syn * 100.0;
-                            let tex = self
-                                .textures
-                                .heroes
-                                .get(&partner.hero_id)
-                                .map(|s| &s.toned);
+                            let tex = self.textures.heroes.get(&partner.hero_id).map(|s| &s.toned);
                             paint_tinted_cell(ui, cell_sz, tex, pct, 11.0, 2.5);
                         } else {
                             let (er, _) = ui.allocate_exact_size(cell_sz, Sense::hover());
@@ -393,10 +407,8 @@ impl TrueSightGuiApp {
     }
 
     fn render_comp_tab(&self, ui: &mut egui::Ui, analysis: &DraftAnalysis5v5) {
-        let ally_diag =
-            compute_comp_diagnostic(&self.session.draft.allies, &self.session.matrix);
-        let enemy_diag =
-            compute_comp_diagnostic(&self.session.draft.enemies, &self.session.matrix);
+        let ally_diag = compute_comp_diagnostic(&self.session.draft.allies, &self.session.matrix);
+        let enemy_diag = compute_comp_diagnostic(&self.session.draft.enemies, &self.session.matrix);
         let ally_pct = ally_diag.score * 100.0;
         let enemy_pct = enemy_diag.score * 100.0;
         let comp_edge = analysis.total_composition_edge * 100.0;
@@ -505,15 +517,9 @@ impl TrueSightGuiApp {
                             for hid in a_ids {
                                 let (r, _) =
                                     ui.allocate_exact_size(vec2(20.0, 20.0), Sense::hover());
-                                if let Some(t) =
-                                    self.textures.heroes.get(hid).map(|s| &s.color)
-                                {
-                                    ui.painter().image(
-                                        t.id(),
-                                        r,
-                                        uv_square_crop(),
-                                        Color32::WHITE,
-                                    );
+                                if let Some(t) = self.textures.heroes.get(hid).map(|s| &s.color) {
+                                    ui.painter()
+                                        .image(t.id(), r, uv_square_crop(), Color32::WHITE);
                                 }
                                 ui.painter().rect_stroke(
                                     r,
@@ -549,15 +555,9 @@ impl TrueSightGuiApp {
                             for hid in e_ids {
                                 let (r, _) =
                                     ui.allocate_exact_size(vec2(20.0, 20.0), Sense::hover());
-                                if let Some(t) =
-                                    self.textures.heroes.get(hid).map(|s| &s.color)
-                                {
-                                    ui.painter().image(
-                                        t.id(),
-                                        r,
-                                        uv_square_crop(),
-                                        Color32::WHITE,
-                                    );
+                                if let Some(t) = self.textures.heroes.get(hid).map(|s| &s.color) {
+                                    ui.painter()
+                                        .image(t.id(), r, uv_square_crop(), Color32::WHITE);
                                 }
                                 ui.painter().rect_stroke(
                                     r,

@@ -1,7 +1,10 @@
 use super::theme::*;
 use super::viewmodel::*;
 use super::{PickerTarget, SlotTelemetry, TrueSightGuiApp};
-use eframe::egui::{self, Align, Align2, Color32, FontId, Id, Layout, Rect, RichText, Sense, Stroke, StrokeKind, pos2, vec2};
+use eframe::egui::{
+    self, Align, Align2, Color32, FontId, Id, Layout, Rect, RichText, Sense, Stroke, StrokeKind,
+    pos2, vec2,
+};
 use truesight_core::domain::{AttackType, Faction, Role, Side, TEAM_SIZE};
 use truesight_core::math::DraftAnalysis5v5;
 
@@ -70,7 +73,8 @@ impl TrueSightGuiApp {
 
                 let is_dragging_this = self.drag_slot == Some((side, slot));
                 let is_local_you = is_ally
-                    && current_pick.is_some_and(|p| self.session.local_player_hero == Some(p.hero_id));
+                    && current_pick
+                        .is_some_and(|p| self.session.local_player_hero == Some(p.hero_id));
                 let is_locked = match side {
                     Side::Allies => self.session.ally_locked_slots[slot],
                     Side::Enemies => self.session.enemy_locked_slots[slot],
@@ -148,7 +152,11 @@ impl TrueSightGuiApp {
                             Sense::click(),
                         )
                         .on_hover_text("Clear hero slot");
-                    let x_col = if clear_resp.hovered() { P_DIRE } else { P_MUTED };
+                    let x_col = if clear_resp.hovered() {
+                        P_DIRE
+                    } else {
+                        P_MUTED
+                    };
                     ui.painter().text(
                         cr.center(),
                         Align2::CENTER_CENTER,
@@ -178,7 +186,10 @@ impl TrueSightGuiApp {
                     None => r.max.x - 8.0,
                 };
                 let net_rect = Rect::from_min_max(
-                    pos2((net_right - 54.0).max(portrait_rect.max.x + 12.0), r.min.y + 10.0),
+                    pos2(
+                        (net_right - 54.0).max(portrait_rect.max.x + 12.0),
+                        r.min.y + 10.0,
+                    ),
                     pos2(net_right, r.max.y - 10.0),
                 );
                 {
@@ -256,14 +267,12 @@ impl TrueSightGuiApp {
                             }
                         });
 
-                        let hero_name =
-                            profile.map(|h| h.display_name.as_str()).unwrap_or("Unknown");
+                        let hero_name = profile
+                            .map(|h| h.display_name.as_str())
+                            .unwrap_or("Unknown");
                         ui.add(
                             egui::Label::new(
-                                RichText::new(hero_name)
-                                    .size(12.5)
-                                    .strong()
-                                    .color(P_GLINT),
+                                RichText::new(hero_name).size(12.5).strong().color(P_GLINT),
                             )
                             .truncate(),
                         );
@@ -307,7 +316,11 @@ impl TrueSightGuiApp {
                                 if is_picking { "PICKING" } else { "EMPTY" }
                             ))
                             .size(9.0)
-                            .color(if is_picking { P_GEM } else { P_MUTED }),
+                            .color(if is_picking {
+                                P_GEM
+                            } else {
+                                P_MUTED
+                            }),
                         );
                         ui.label(
                             RichText::new("Click to pick hero...")
@@ -366,9 +379,10 @@ impl TrueSightGuiApp {
 
                 // Restrict hit rect strictly left of the clear (`×`) button
                 let card_hit_rect = match clear_rect_opt {
-                    Some(cr) => {
-                        Rect::from_min_max(r.min, pos2((cr.min.x - 2.0).max(r.min.x + 40.0), r.max.y))
-                    }
+                    Some(cr) => Rect::from_min_max(
+                        r.min,
+                        pos2((cr.min.x - 2.0).max(r.min.x + 40.0), r.max.y),
+                    ),
                     None => r,
                 };
                 let card_resp = ui.interact(
@@ -402,5 +416,4 @@ impl TrueSightGuiApp {
             }
         })
     }
-
 }

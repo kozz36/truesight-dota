@@ -1,4 +1,7 @@
-use eframe::egui::{self, Align, Align2, Color32, CornerRadius, FontId, Layout, Margin, Rect, RichText, Sense, Shape, Stroke, StrokeKind, TextureHandle, TextureOptions, Vec2, pos2, vec2};
+use eframe::egui::{
+    self, Align, Align2, Color32, CornerRadius, FontId, Layout, Margin, Rect, RichText, Sense,
+    Shape, Stroke, StrokeKind, TextureHandle, TextureOptions, Vec2, pos2, vec2,
+};
 use std::collections::HashMap;
 use truesight_adapters::vision::parse_hero_atlas;
 use truesight_core::domain::HeroId;
@@ -75,7 +78,6 @@ pub fn fmt_pct(pct: f32) -> String {
     }
 }
 
-
 // =============================================================================
 // Texture Cache (Backed by Embedded Adapter Hero Atlas)
 // =============================================================================
@@ -103,7 +105,8 @@ impl GuiTextureCache {
             return;
         };
 
-        let gem_img = egui::ColorImage::from_rgb([atlas.gem_width, atlas.gem_height], &atlas.gem_rgb);
+        let gem_img =
+            egui::ColorImage::from_rgb([atlas.gem_width, atlas.gem_height], &atlas.gem_rgb);
         self.gem = Some(ctx.load_texture("truesight_gem", gem_img, TextureOptions::LINEAR));
 
         let size = [atlas.hero_width, atlas.hero_height];
@@ -114,9 +117,21 @@ impl GuiTextureCache {
             let banned_rgb = transform_rgb(&rgb, 0.90, 0.55);
             let banned_img = egui::ColorImage::from_rgb(size, &banned_rgb);
 
-            let color = ctx.load_texture(format!("h_col_{}", hid.0), color_img, TextureOptions::LINEAR);
-            let toned = ctx.load_texture(format!("h_ton_{}", hid.0), toned_img, TextureOptions::LINEAR);
-            let banned = ctx.load_texture(format!("h_ban_{}", hid.0), banned_img, TextureOptions::LINEAR);
+            let color = ctx.load_texture(
+                format!("h_col_{}", hid.0),
+                color_img,
+                TextureOptions::LINEAR,
+            );
+            let toned = ctx.load_texture(
+                format!("h_ton_{}", hid.0),
+                toned_img,
+                TextureOptions::LINEAR,
+            );
+            let banned = ctx.load_texture(
+                format!("h_ban_{}", hid.0),
+                banned_img,
+                TextureOptions::LINEAR,
+            );
             self.heroes.insert(
                 hid,
                 HeroTextureSet {
@@ -255,15 +270,9 @@ pub(super) fn paint_tinted_cell(
     let a = (delta_pct.abs() / 2.4).clamp(0.0, 1.0);
     let alpha = ((0.55 + 0.45 * a) * 0.50 * 255.0).round() as u8;
     let (tint_fill, ring_col) = if delta_pct >= EPS_PCT {
-        (
-            Color32::from_rgba_unmultiplied(46, 230, 122, alpha),
-            P_GEM,
-        )
+        (Color32::from_rgba_unmultiplied(46, 230, 122, alpha), P_GEM)
     } else if delta_pct <= -EPS_PCT {
-        (
-            Color32::from_rgba_unmultiplied(236, 78, 66, alpha),
-            P_DIRE,
-        )
+        (Color32::from_rgba_unmultiplied(236, 78, 66, alpha), P_DIRE)
     } else {
         (Color32::TRANSPARENT, P_LINE)
     };
@@ -395,37 +404,38 @@ pub(super) fn paint_total_corner_cell(ui: &mut egui::Ui, size: Vec2, edge_pct: f
 
 pub(super) fn paint_matrix_scale_bar(ui: &mut egui::Ui, left_label: &str, right_label: &str) {
     let w = ui.available_width();
-    ui.allocate_ui_with_layout(
-        vec2(w, 14.0),
-        Layout::left_to_right(Align::Center),
-        |ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            ui.label(RichText::new(left_label).size(9.0).color(P_MUTED));
-            let rem = (ui.available_width() - 62.0).max(40.0);
-            let (bar_r, _) = ui.allocate_exact_size(vec2(rem, 4.0), Sense::hover());
-            let mid = bar_r.center().x;
-            ui.painter().rect_filled(
-                Rect::from_min_max(bar_r.min, pos2(mid, bar_r.max.y)),
-                0.0,
-                P_DIRE,
-            );
-            ui.painter().rect_filled(
-                Rect::from_min_max(pos2(mid, bar_r.min.y), bar_r.max),
-                0.0,
-                P_GEM,
-            );
-            ui.painter().line_segment(
-                [pos2(mid, bar_r.min.y - 2.0), pos2(mid, bar_r.max.y + 2.0)],
-                Stroke::new(1.0_f32, P_GLINT),
-            );
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.label(RichText::new(right_label).size(9.0).color(P_MUTED));
-            });
-        },
-    );
+    ui.allocate_ui_with_layout(vec2(w, 14.0), Layout::left_to_right(Align::Center), |ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        ui.label(RichText::new(left_label).size(9.0).color(P_MUTED));
+        let rem = (ui.available_width() - 62.0).max(40.0);
+        let (bar_r, _) = ui.allocate_exact_size(vec2(rem, 4.0), Sense::hover());
+        let mid = bar_r.center().x;
+        ui.painter().rect_filled(
+            Rect::from_min_max(bar_r.min, pos2(mid, bar_r.max.y)),
+            0.0,
+            P_DIRE,
+        );
+        ui.painter().rect_filled(
+            Rect::from_min_max(pos2(mid, bar_r.min.y), bar_r.max),
+            0.0,
+            P_GEM,
+        );
+        ui.painter().line_segment(
+            [pos2(mid, bar_r.min.y - 2.0), pos2(mid, bar_r.max.y + 2.0)],
+            Stroke::new(1.0_f32, P_GLINT),
+        );
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.label(RichText::new(right_label).size(9.0).color(P_MUTED));
+        });
+    });
 }
 
-pub(super) fn paint_mini_badge(ui: &mut egui::Ui, text: &str, text_color: Color32, border_color: Color32) {
+pub(super) fn paint_mini_badge(
+    ui: &mut egui::Ui,
+    text: &str,
+    text_color: Color32,
+    border_color: Color32,
+) {
     egui::Frame::NONE
         .fill(P_INDIGO_1)
         .stroke(Stroke::new(1.0_f32, border_color))
@@ -463,7 +473,8 @@ pub(super) fn paint_trend_badge(ui: &mut egui::Ui, trend_pct: f32) {
                         pos2(tri_rect.center().x, tri_rect.max.y),
                     ]
                 };
-                ui.painter().add(Shape::convex_polygon(pts, col, Stroke::NONE));
+                ui.painter()
+                    .add(Shape::convex_polygon(pts, col, Stroke::NONE));
                 ui.label(
                     RichText::new(format!("{:.1}", trend_pct.abs()))
                         .size(8.5)
@@ -473,4 +484,3 @@ pub(super) fn paint_trend_badge(ui: &mut egui::Ui, trend_pct: f32) {
             });
         });
 }
-

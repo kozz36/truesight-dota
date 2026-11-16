@@ -424,7 +424,8 @@ impl HeroVisionCatalog {
         frame_h: usize,
         rect: TopBarSlotRect,
     ) -> Option<HeroId> {
-        let (query_desc, mean_intensity) = compute_descriptor_8x4(frame_rgb, frame_w, frame_h, rect)?;
+        let (query_desc, mean_intensity) =
+            compute_descriptor_8x4(frame_rgb, frame_w, frame_h, rect)?;
         if mean_intensity < DARK_INTENSITY_THRESHOLD {
             return None;
         }
@@ -444,7 +445,8 @@ impl HeroVisionCatalog {
         rect: TopBarSlotRect,
         layout: TopBarLayout,
     ) -> Option<(HeroId, f32, f32)> {
-        let (query_desc, mean_intensity) = compute_descriptor_8x4(frame_rgb, frame_w, frame_h, rect)?;
+        let (query_desc, mean_intensity) =
+            compute_descriptor_8x4(frame_rgb, frame_w, frame_h, rect)?;
         if mean_intensity < DARK_INTENSITY_THRESHOLD {
             return None;
         }
@@ -461,29 +463,29 @@ impl HeroVisionCatalog {
         let saturated_dark_border = ov >= 12.0 && ms >= 28.0 && os >= 28.0;
         let (entry_sets, threshold, has_portrait_detail): (DescriptorSets<'_>, f32, bool) =
             match layout {
-            TopBarLayout::SyntheticExact => (
-                &[&self.full_entries],
-                MATCH_L1_THRESHOLD,
-                tv >= 12.5 && ov >= 11.0,
-            ),
-            // PickPhase captures both nameplate-cropped upper cards and full/inner 16:9 slots.
-            TopBarLayout::PickPhase => (
-                &[&self.upper_entries, &self.inner_entries, &self.full_entries],
-                PICKPHASE_L1_THRESHOLD,
-                tv >= 13.5
-                    && (ov >= 13.5
-                        || (ov >= 12.5 && tv >= 18.0 && os >= 20.0)
-                        || saturated_dark_border
-                        || (ov >= 7.5 && os >= 35.0)),
-            ),
-            TopBarLayout::InGame => (
-                &[&self.inner_entries],
-                INGAME_L1_THRESHOLD,
-                tv >= 13.5
-                    && os >= 10.5
-                    && (ov >= 13.5 || saturated_dark_border || (ov >= 9.5 && os >= 35.0)),
-            ),
-        };
+                TopBarLayout::SyntheticExact => (
+                    &[&self.full_entries],
+                    MATCH_L1_THRESHOLD,
+                    tv >= 12.5 && ov >= 11.0,
+                ),
+                // PickPhase captures both nameplate-cropped upper cards and full/inner 16:9 slots.
+                TopBarLayout::PickPhase => (
+                    &[&self.upper_entries, &self.inner_entries, &self.full_entries],
+                    PICKPHASE_L1_THRESHOLD,
+                    tv >= 13.5
+                        && (ov >= 13.5
+                            || (ov >= 12.5 && tv >= 18.0 && os >= 20.0)
+                            || saturated_dark_border
+                            || (ov >= 7.5 && os >= 35.0)),
+                ),
+                TopBarLayout::InGame => (
+                    &[&self.inner_entries],
+                    INGAME_L1_THRESHOLD,
+                    tv >= 13.5
+                        && os >= 10.5
+                        && (ov >= 13.5 || saturated_dark_border || (ov >= 9.5 && os >= 35.0)),
+                ),
+            };
         if !has_portrait_detail {
             return None;
         }
@@ -566,9 +568,18 @@ pub fn parse_ppm_p6(bytes: &[u8]) -> Option<RgbFrame> {
     if next_token(&mut pos)? != b"P6" {
         return None;
     }
-    let width = std::str::from_utf8(next_token(&mut pos)?).ok()?.parse::<usize>().ok()?;
-    let height = std::str::from_utf8(next_token(&mut pos)?).ok()?.parse::<usize>().ok()?;
-    let maxval = std::str::from_utf8(next_token(&mut pos)?).ok()?.parse::<usize>().ok()?;
+    let width = std::str::from_utf8(next_token(&mut pos)?)
+        .ok()?
+        .parse::<usize>()
+        .ok()?;
+    let height = std::str::from_utf8(next_token(&mut pos)?)
+        .ok()?
+        .parse::<usize>()
+        .ok()?;
+    let maxval = std::str::from_utf8(next_token(&mut pos)?)
+        .ok()?
+        .parse::<usize>()
+        .ok()?;
     if width == 0 || height == 0 || maxval != 255 {
         return None;
     }
@@ -590,4 +601,3 @@ pub fn parse_ppm_p6(bytes: &[u8]) -> Option<RgbFrame> {
         rgb: bytes[pos..end].to_vec(),
     })
 }
-

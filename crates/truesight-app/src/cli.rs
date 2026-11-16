@@ -133,7 +133,9 @@ pub fn render_dashboard_string(session: &AppSession, color: bool) -> String {
         }
     }
     if !any_syn {
-        out.push_str(&format!("{d}Pick at least 2 allied heroes to see pairwise synergy deltas.{r}"));
+        out.push_str(&format!(
+            "{d}Pick at least 2 allied heroes to see pairwise synergy deltas.{r}"
+        ));
     }
     out.push_str("\n\n");
 
@@ -264,9 +266,7 @@ pub fn execute_command(session: &mut AppSession, line: &str) -> Result<bool, Str
                 "7" | "divine" => Bracket::Divine,
                 "8" | "immortal" => Bracket::Immortal,
                 _ => {
-                    return Err(
-                        "Bracket must be 1..8 or herald..immortal".into(),
-                    );
+                    return Err("Bracket must be 1..8 or herald..immortal".into());
                 }
             };
             session.set_bracket(bracket);
@@ -292,9 +292,9 @@ pub fn execute_command(session: &mut AppSession, line: &str) -> Result<bool, Str
             } else if lower == "none" || lower == "unlink" || lower == "unlinked" {
                 session.set_account_id(None, true);
             } else {
-                let raw = a_str
-                    .parse::<u64>()
-                    .map_err(|_| "Account ID must be a numeric Steam32/Steam64, 'auto', or 'none'".to_string())?;
+                let raw = a_str.parse::<u64>().map_err(|_| {
+                    "Account ID must be a numeric Steam32/Steam64, 'auto', or 'none'".to_string()
+                })?;
                 let s32 = normalize_steam32_id(raw)
                     .ok_or_else(|| "Invalid Steam32/Steam64 account ID".to_string())?;
                 session.set_account_id(Some(s32), true);
