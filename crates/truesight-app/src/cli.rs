@@ -86,8 +86,8 @@ pub fn render_dashboard_string(session: &AppSession, color: bool) -> String {
             .unwrap_or_else(|| format!("A{}: [Empty Slot]", i + 1));
         out.push_str(&format!(" {:<21}", ally_label));
 
-        for j in 0..TEAM_SIZE {
-            if let Some(delta) = analysis.counter_grid[i][j] {
+        for &cell in &analysis.counter_grid[i] {
+            if let Some(delta) = cell {
                 let pct = delta * 100.0;
                 let cell_color = if pct > 0.15 {
                     g
