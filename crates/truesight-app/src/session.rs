@@ -882,6 +882,7 @@ impl AppSession {
                 }
             }
         }
+        let previous_picks = [self.draft.allies, self.draft.enemies];
         for (index, side) in [Side::Allies, Side::Enemies].into_iter().enumerate() {
             let observed = self.vision_slots[index];
             let locked = match side {
@@ -945,7 +946,16 @@ impl AppSession {
                     self.vision_owned.push((side, hero_id));
                 }
             }
-            self.rebalance_unlocked_side_roles(side);
+        }
+        // Compare after both sides are processed: a pick can also remove a hero
+        // from the opposite side, even if the destination has no free slot.
+        for (side, previous) in [Side::Allies, Side::Enemies]
+            .into_iter()
+            .zip(previous_picks)
+        {
+            if self.side_picks(side) != &previous {
+                self.rebalance_unlocked_side_roles(side);
+            }
         }
     }
 

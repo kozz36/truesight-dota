@@ -1,6 +1,6 @@
 use super::*;
 use crate::gsi::{BoundedDraftQueue, EventQueueStats};
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -18,6 +18,7 @@ const MAX_OVERWRITE_L1_DIFF: f32 = 26.0;
 const OVERWRITE_CONFIRM_FRAMES: u8 = 2;
 
 type SlotCandidate = Option<(HeroId, f32, f32)>;
+type FrameCandidates = ([SlotCandidate; 5], [SlotCandidate; 5]);
 
 fn push_pick_event(events: &mut Vec<DraftEvent>, side: Side, slot: usize, hero_id: HeroId) {
     events.push(DraftEvent::PickDetected {
@@ -277,11 +278,19 @@ impl<S: ScreenFrameSource> VisionCaptureAdapter<S> {
     pub fn poll_events_with_health(
         &mut self,
     ) -> Result<(Vec<DraftEvent>, CaptureRuntimeHealth), PortError> {
+        let (candidates, health) = self.capture_candidates()?;
+        let events = candidates.map_or_else(Vec::new, |slots| self.accept_candidates(slots));
+        Ok((events, health))
+    }
+
+    fn capture_candidates(
+        &mut self,
+    ) -> Result<(Option<FrameCandidates>, CaptureRuntimeHealth), PortError> {
         if self.capture_mode == VisionCaptureMode::Suppressed {
-            return Ok((Vec::new(), CaptureRuntimeHealth::Suppressed));
+            return Ok((None, CaptureRuntimeHealth::Suppressed));
         }
         let Some(frame) = self.source.capture_frame()? else {
-            return Ok((Vec::new(), CaptureRuntimeHealth::WaitingForGame));
+            return Ok((None, CaptureRuntimeHealth::WaitingForGame));
         };
 
         let virtual_h = frame.source_height.unwrap_or_else(|| {
@@ -304,10 +313,12 @@ impl<S: ScreenFrameSource> VisionCaptureAdapter<S> {
             layout_batches.push(self.evaluate_layout_ranked(&frame, virtual_h, layout));
         }
 
-        let Some((_, best_rad, best_dire)) = select_best_layout_candidates(&layout_batches) else {
-            return Ok((Vec::new(), CaptureRuntimeHealth::Capturing));
-        };
+        let candidates = select_best_layout_candidates(&layout_batches)
+            .map(|(_, radiant, dire)| (radiant, dire));
+        Ok((candidates, CaptureRuntimeHealth::Capturing))
+    }
 
+    fn accept_candidates(&mut self, (best_rad, best_dire): FrameCandidates) -> Vec<DraftEvent> {
         let (rad_side, dire_side) = match self.ally_faction {
             Faction::Radiant => (Side::Allies, Side::Enemies),
             Faction::Dire => (Side::Enemies, Side::Allies),
@@ -337,7 +348,7 @@ impl<S: ScreenFrameSource> VisionCaptureAdapter<S> {
         }
 
         self.last_ally_faction = Some(self.ally_faction);
-        Ok((events, CaptureRuntimeHealth::Capturing))
+        events
     }
 }
 
@@ -352,11 +363,21 @@ impl<S: ScreenFrameSource> DraftEventSource for VisionCaptureAdapter<S> {
 const VISION_QUEUE_CAPACITY: usize = 32;
 const DROP_JOIN_TIMEOUT: Duration = Duration::from_millis(350);
 
+enum VisionReset {
+    Remap,
+    Clear,
+}
+
+struct VisionControl {
+    faction: Faction,
+    mode_code: u8,
+    pending_reset: Option<VisionReset>,
+}
+
 /// Bounded background worker polling Dota 2 top-bar frames at ~1 Hz.
 pub struct BoundedVisionWorker {
     queue: Arc<BoundedDraftQueue>,
-    ally_faction: Arc<Mutex<Faction>>,
-    capture_mode_code: Arc<AtomicU8>,
+    control: Arc<Mutex<VisionControl>>,
     runtime_health: Arc<Mutex<CaptureRuntimeHealth>>,
     shutdown: Arc<AtomicBool>,
     shutdown_sync: Arc<(Mutex<bool>, Condvar)>,
@@ -381,13 +402,15 @@ impl BoundedVisionWorker {
         let catalog = HeroVisionCatalog::from_embedded()?;
         let queue = Arc::new(BoundedDraftQueue::new(capacity));
         let queue_ref = Arc::clone(&queue);
-        let ally_faction = Arc::new(Mutex::new(Faction::Radiant));
-        let capture_mode_code = Arc::new(AtomicU8::new(VisionCaptureMode::Any as u8));
+        let control = Arc::new(Mutex::new(VisionControl {
+            faction: Faction::Radiant,
+            mode_code: VisionCaptureMode::Any as u8,
+            pending_reset: None,
+        }));
         let runtime_health = Arc::new(Mutex::new(CaptureRuntimeHealth::WaitingForGame));
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_sync = Arc::new((Mutex::new(false), Condvar::new()));
-        let faction_ref = Arc::clone(&ally_faction);
-        let mode_ref = Arc::clone(&capture_mode_code);
+        let control_ref = Arc::clone(&control);
         let health_ref = Arc::clone(&runtime_health);
         let shutdown_ref = Arc::clone(&shutdown);
         let sync_ref = Arc::clone(&shutdown_sync);
@@ -399,8 +422,7 @@ impl BoundedVisionWorker {
                     source,
                     catalog,
                     queue_ref,
-                    faction_ref,
-                    mode_ref,
+                    control_ref,
                     health_ref,
                     shutdown_ref,
                     sync_ref,
@@ -410,8 +432,7 @@ impl BoundedVisionWorker {
 
         Some(Self {
             queue,
-            ally_faction,
-            capture_mode_code,
+            control,
             runtime_health,
             shutdown,
             shutdown_sync,
@@ -429,26 +450,33 @@ impl BoundedVisionWorker {
 
     /// Invalidates queued and in-flight relative-side picks when the user's faction changes.
     pub fn set_ally_faction(&self, faction: Faction) {
-        let mut current = self.ally_faction.lock().unwrap_or_else(|e| e.into_inner());
-        if *current != faction {
-            *current = faction;
+        let mut control = self.control.lock().unwrap_or_else(|e| e.into_inner());
+        if control.faction != faction {
+            control.faction = faction;
+            if control.pending_reset.is_none() {
+                control.pending_reset = Some(VisionReset::Remap);
+            }
             self.queue.request_reset();
         }
     }
 
     pub fn set_capture_mode(&self, mode: VisionCaptureMode) {
+        let mut control = self.control.lock().unwrap_or_else(|e| e.into_inner());
         let next = mode as u8;
-        let prev = self.capture_mode_code.swap(next, Ordering::AcqRel);
+        let prev = std::mem::replace(&mut control.mode_code, next);
         if prev != next
             && (prev == VisionCaptureMode::Suppressed as u8
                 || mode == VisionCaptureMode::Suppressed)
         {
+            control.pending_reset = Some(VisionReset::Clear);
             self.queue.request_reset();
         }
     }
 
     /// Invalidates in-flight pre-reset polls, drains queued events, and resets detector state.
     pub fn reset(&mut self) {
+        let mut control = self.control.lock().unwrap_or_else(|e| e.into_inner());
+        control.pending_reset = Some(VisionReset::Clear);
         self.queue.request_reset();
     }
 
@@ -511,8 +539,7 @@ fn run_vision_loop<S: ScreenFrameSource>(
     source: S,
     catalog: HeroVisionCatalog,
     queue: Arc<BoundedDraftQueue>,
-    ally_faction: Arc<Mutex<Faction>>,
-    capture_mode_code: Arc<AtomicU8>,
+    control: Arc<Mutex<VisionControl>>,
     runtime_health: Arc<Mutex<CaptureRuntimeHealth>>,
     shutdown: Arc<AtomicBool>,
     shutdown_sync: Arc<(Mutex<bool>, Condvar)>,
@@ -520,31 +547,48 @@ fn run_vision_loop<S: ScreenFrameSource>(
     let _completion = LoopCompletionSignal(shutdown_sync);
     let mut adapter = VisionCaptureAdapter::new(source, catalog);
     while !shutdown.load(Ordering::Acquire) {
-        // Use the same lock/order as set_ally_faction: no poll may pair an old
-        // faction with a new epoch. Capture runs unlocked; a later faction change
-        // invalidates its results through the queue's existing epoch admission.
-        let (poll_seq, should_reset, faction) = {
-            let faction = ally_faction.lock().unwrap_or_else(|e| e.into_inner());
-            let (epoch, reset) = queue.begin_poll_cycle();
-            (epoch, reset, *faction)
-        };
-        if should_reset {
-            adapter.reset_state();
-        }
-        adapter.set_ally_faction(faction);
-        let mode = VisionCaptureMode::from_code(capture_mode_code.load(Ordering::Acquire));
-        adapter.set_capture_mode(mode);
-
-        let next_health = match adapter.poll_events_with_health() {
-            Ok((events, health)) => {
-                for ev in events {
-                    if !queue.push_for_epoch(poll_seq, ev) {
-                        return;
-                    }
+        // Always acquire control before the queue, both here and on invalidation.
+        let poll_seq = {
+            let mut control = control.lock().unwrap_or_else(|e| e.into_inner());
+            let (epoch, should_reset) = queue.begin_poll_cycle();
+            match control.pending_reset.take() {
+                Some(VisionReset::Remap) => {
+                    // Force replay even if several flips return to the same faction.
+                    adapter.last_ally_faction = None;
+                    adapter.pending_radiant = [None; 5];
+                    adapter.pending_dire = [None; 5];
                 }
-                health
+                Some(VisionReset::Clear) => adapter.reset_state(),
+                None if should_reset => adapter.reset_state(), // Queue overflow resync.
+                None => {}
             }
-            Err(err) => CaptureRuntimeHealth::CaptureError(err.to_string()),
+            adapter.set_ally_faction(control.faction);
+            adapter.set_capture_mode(VisionCaptureMode::from_code(control.mode_code));
+            epoch
+        };
+
+        // Capture and recognition run unlocked and cannot change accepted history.
+        let captured = adapter.capture_candidates();
+        let next_health = {
+            let control = control.lock().unwrap_or_else(|e| e.into_inner());
+            // Queue admission's boolean only indicates closure, not stale epochs.
+            // Reject a superseded capture before updating hysteresis or publishing.
+            if control.pending_reset.is_some() {
+                continue;
+            }
+            match captured {
+                Ok((candidates, health)) => {
+                    if let Some(slots) = candidates {
+                        for ev in adapter.accept_candidates(slots) {
+                            if !queue.push_for_epoch(poll_seq, ev) {
+                                return;
+                            }
+                        }
+                    }
+                    health
+                }
+                Err(err) => CaptureRuntimeHealth::CaptureError(err.to_string()),
+            }
         };
         {
             let mut guard = runtime_health.lock().unwrap_or_else(|e| e.into_inner());

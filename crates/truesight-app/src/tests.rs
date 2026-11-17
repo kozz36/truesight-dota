@@ -645,6 +645,20 @@ fn vision_cached_observations_do_not_undo_gsi_side_correction() {
     );
 }
 
+#[test]
+fn vision_idle_poll_preserves_manually_selected_role_after_gsi_identity() {
+    use truesight_core::domain::Role;
+    use truesight_core::ports::DraftEvent;
+    let mut session = AppSession::new().unwrap();
+    session.apply_event(DraftEvent::LocalPlayerHeroDetected {
+        hero_slug: "npc_dota_hero_night_stalker".into(),
+    });
+    assert_eq!(session.draft.target_role, Role::Offlane);
+    session.draft.target_role = Role::Mid;
+    session.apply_vision_events(vec![]);
+    assert_eq!(session.draft.target_role, Role::Mid);
+}
+
 // Each capture is gated so faction changes occur at a known worker batch boundary.
 struct VisionGatedSource {
     entered: std::sync::mpsc::Sender<()>,
@@ -684,6 +698,63 @@ fn vision_faction_frame(hero: u16) -> truesight_adapters::vision::RgbFrame {
         }
     }
     RgbFrame::new(w, h, rgb)
+}
+
+#[test]
+fn vision_worker_faction_flip_preserves_confirmed_portraits() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    use truesight_adapters::vision::BoundedVisionWorker;
+    use truesight_core::domain::{Faction, Side};
+    use truesight_core::ports::DraftEventSource;
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (frame_tx, frame_rx) = mpsc::channel();
+    let mut worker = BoundedVisionWorker::spawn_with_source(VisionGatedSource {
+        entered: entered_tx,
+        frames: frame_rx,
+    })
+    .unwrap();
+    let next_capture = || entered_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    next_capture();
+    frame_tx.send(vision_faction_frame(48)).unwrap();
+    next_capture();
+    assert_eq!(worker.poll_events().unwrap().len(), 2);
+
+    // A contradictory old-epoch capture must not count toward confirmation.
+    worker.set_ally_faction(Faction::Dire);
+    frame_tx.send(vision_faction_frame(88)).unwrap();
+    next_capture();
+    assert!(worker.poll_events().unwrap().is_empty());
+    frame_tx.send(vision_faction_frame(88)).unwrap();
+    next_capture();
+    let events = worker.poll_events().unwrap();
+    assert_eq!(
+        events,
+        vec![
+            visual_pick_with_role(Side::Enemies, 48),
+            visual_pick_with_role(Side::Allies, 2)
+        ]
+    );
+
+    frame_tx.send(vision_faction_frame(88)).unwrap();
+    next_capture();
+    assert_eq!(
+        worker.poll_events().unwrap(),
+        vec![visual_pick_with_role(Side::Enemies, 88)]
+    );
+    drop(frame_tx);
+}
+
+fn visual_pick_with_role(
+    side: truesight_core::domain::Side,
+    id: u16,
+) -> truesight_core::ports::DraftEvent {
+    truesight_core::ports::DraftEvent::PickDetected {
+        side,
+        slot: 0,
+        hero_id: truesight_core::domain::HeroId(id),
+        role: Some(truesight_core::domain::Role::ALL[0]),
+    }
 }
 
 #[test]
@@ -786,7 +857,9 @@ fn vision_worker_faction_flip_rejects_in_flight_old_epoch() {
     .unwrap();
     entered_rx.recv_timeout(Duration::from_secs(3)).unwrap();
     worker.set_ally_faction(Faction::Dire);
-    frame_tx.send(vision_faction_frame(48)).unwrap();
+    // Use a different hero in the invalidated first capture: it must never
+    // become an accepted identity that the first current-epoch frame must replace.
+    frame_tx.send(vision_faction_frame(88)).unwrap();
     entered_rx.recv_timeout(Duration::from_secs(3)).unwrap();
     assert!(
         worker.poll_events().unwrap().is_empty(),
