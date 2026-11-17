@@ -1,7 +1,8 @@
 use super::TrueSightGuiApp;
 use super::theme::*;
 use eframe::egui::{
-    self, Align, Align2, FontId, Layout, Rect, RichText, Sense, Stroke, StrokeKind, pos2, vec2,
+    self, Align, Align2, CornerRadius, FontId, Layout, Rect, RichText, Sense, Stroke, StrokeKind,
+    pos2, vec2,
 };
 use truesight_core::domain::{Role, Side, TEAM_SIZE};
 
@@ -10,7 +11,9 @@ pub(super) struct SuggestedRenderOutput {
     pub(super) last_col_max_x: f32,
     pub(super) comfort_hdr_max_x: f32,
     pub(super) row_rects: Vec<Rect>,
+    pub(super) vs_row_rects: Vec<Rect>,
     pub(super) pick_rects: Vec<Rect>,
+    pub(super) pick_stripe_rects: Vec<Option<Rect>>,
 }
 
 impl TrueSightGuiApp {
@@ -23,7 +26,9 @@ impl TrueSightGuiApp {
         let mut last_col_max_x = 0.0_f32;
         let mut comfort_hdr_max_x = 0.0_f32;
         let mut row_rects = Vec::new();
+        let mut vs_row_rects = Vec::new();
         let mut pick_rects = Vec::new();
+        let mut pick_stripe_rects = Vec::new();
 
         let card_rect = hud_card_fill(ui, |ui| {
             let card_w = ui.available_width();
@@ -309,32 +314,47 @@ impl TrueSightGuiApp {
                                                     // 3. Projected Win% + bar
                                                     let proj =
                                                         rec.projected_win_probability * 100.0;
-                                                    ui.horizontal(|ui| {
-                                                        ui.spacing_mut().item_spacing.x =
-                                                            if compact_tbl { 4.0 } else { 6.0 };
-                                                        ui.label(
-                                                            RichText::new(format!("{proj:4.1}%"))
+                                                    ui.allocate_ui_with_layout(
+                                                        vec2(
+                                                            ui.available_size_before_wrap().x,
+                                                            row_h,
+                                                        ),
+                                                        Layout::left_to_right(Align::Center),
+                                                        |ui| {
+                                                            ui.set_min_height(row_h);
+                                                            ui.spacing_mut().item_spacing.x =
+                                                                if compact_tbl { 4.0 } else { 6.0 };
+                                                            ui.label(
+                                                                RichText::new(format!(
+                                                                    "{proj:4.1}%"
+                                                                ))
                                                                 .size(body_font)
                                                                 .strong()
                                                                 .color(P_GLINT),
-                                                        );
-                                                        let (bar_r, _) = ui.allocate_exact_size(
-                                                            vec2(win_bar_w, 4.0),
-                                                            Sense::hover(),
-                                                        );
-                                                        ui.painter()
-                                                            .rect_filled(bar_r, 0.0, P_INDIGO_3);
-                                                        let fw = bar_r.width()
-                                                            * (proj / 100.0).clamp(0.0, 1.0);
-                                                        ui.painter().rect_filled(
-                                                            Rect::from_min_max(
-                                                                bar_r.min,
-                                                                pos2(bar_r.min.x + fw, bar_r.max.y),
-                                                            ),
-                                                            0.0,
-                                                            P_GEM,
-                                                        );
-                                                    });
+                                                            );
+                                                            let (bar_r, _) = ui
+                                                                .allocate_exact_size(
+                                                                    vec2(win_bar_w, 4.0),
+                                                                    Sense::hover(),
+                                                                );
+                                                            ui.painter().rect_filled(
+                                                                bar_r, 0.0, P_INDIGO_3,
+                                                            );
+                                                            let fw = bar_r.width()
+                                                                * (proj / 100.0).clamp(0.0, 1.0);
+                                                            ui.painter().rect_filled(
+                                                                Rect::from_min_max(
+                                                                    bar_r.min,
+                                                                    pos2(
+                                                                        bar_r.min.x + fw,
+                                                                        bar_r.max.y,
+                                                                    ),
+                                                                ),
+                                                                0.0,
+                                                                P_GEM,
+                                                            );
+                                                        },
+                                                    );
 
                                                     // 4. Draft Gain
                                                     let gain = rec.net_probability_delta * 100.0;
@@ -376,45 +396,68 @@ impl TrueSightGuiApp {
                                                         );
                                                     }
 
-                                                    // 7. VS Enemies (5 square tinted portraits)
-                                                    ui.horizontal(|ui| {
-                                                        ui.spacing_mut().item_spacing.x = vs_gap;
-                                                        for j in 0..TEAM_SIZE {
-                                                            if let Some(ep) =
-                                                                self.session.draft.enemies[j]
-                                                            {
-                                                                let d = self
-                                                                    .session
-                                                                    .matrix
-                                                                    .cell(rec.hero_id, ep.hero_id)
-                                                                    .counter_delta
-                                                                    * 100.0;
-                                                                let tex = self
-                                                                    .textures
-                                                                    .heroes
-                                                                    .get(&ep.hero_id)
-                                                                    .map(|s| &s.toned);
-                                                                paint_tinted_square_cell(
-                                                                    ui, vs_cell_sz, tex, d,
-                                                                    vs_font, 1.5,
-                                                                );
-                                                            } else {
-                                                                let (r, _) = ui
-                                                                    .allocate_exact_size(
-                                                                        vec2(
-                                                                            vs_cell_sz, vs_cell_sz,
+                                                    // 7. VS Enemies (5 square tinted portraits, aligned to row_h)
+                                                    let vs_total_w = TEAM_SIZE as f32 * vs_cell_sz
+                                                        + (TEAM_SIZE.saturating_sub(1)) as f32
+                                                            * vs_gap;
+                                                    let vs_cell = ui.allocate_ui_with_layout(
+                                                        vec2(vs_total_w, row_h),
+                                                        Layout::left_to_right(Align::Center),
+                                                        |ui| {
+                                                            ui.set_min_size(vec2(
+                                                                vs_total_w, row_h,
+                                                            ));
+                                                            ui.spacing_mut().item_spacing.x =
+                                                                vs_gap;
+                                                            let mut bounds = Rect::NOTHING;
+                                                            for j in 0..TEAM_SIZE {
+                                                                let cell_resp = if let Some(ep) =
+                                                                    self.session.draft.enemies[j]
+                                                                {
+                                                                    let d = self
+                                                                        .session
+                                                                        .matrix
+                                                                        .cell(
+                                                                            rec.hero_id,
+                                                                            ep.hero_id,
+                                                                        )
+                                                                        .counter_delta
+                                                                        * 100.0;
+                                                                    let tex = self
+                                                                        .textures
+                                                                        .heroes
+                                                                        .get(&ep.hero_id)
+                                                                        .map(|s| &s.toned);
+                                                                    paint_tinted_square_cell(
+                                                                        ui, vs_cell_sz, tex, d,
+                                                                        vs_font, 1.5,
+                                                                    )
+                                                                } else {
+                                                                    let (r, resp) = ui
+                                                                        .allocate_exact_size(
+                                                                            vec2(
+                                                                                vs_cell_sz,
+                                                                                vs_cell_sz,
+                                                                            ),
+                                                                            Sense::hover(),
+                                                                        );
+                                                                    ui.painter().rect_stroke(
+                                                                        r,
+                                                                        0.0,
+                                                                        Stroke::new(
+                                                                            1.0_f32, P_LINE,
                                                                         ),
-                                                                        Sense::hover(),
+                                                                        StrokeKind::Inside,
                                                                     );
-                                                                ui.painter().rect_stroke(
-                                                                    r,
-                                                                    0.0,
-                                                                    Stroke::new(1.0_f32, P_LINE),
-                                                                    StrokeKind::Inside,
-                                                                );
+                                                                    resp
+                                                                };
+                                                                bounds =
+                                                                    bounds.union(cell_resp.rect);
                                                             }
-                                                        }
-                                                    });
+                                                            bounds
+                                                        },
+                                                    );
+                                                    vs_row_rects.push(vs_cell.inner);
 
                                                     // 8. Avg Cnt
                                                     let cnt = rec.counter_delta_sum * 100.0;
@@ -436,21 +479,29 @@ impl TrueSightGuiApp {
 
                                                     // 10. Comfort (% + 5-pip cyan meter)
                                                     let com = rec.comfort_delta * 100.0;
-                                                    ui.horizontal(|ui| {
-                                                        ui.spacing_mut().item_spacing.x =
-                                                            if compact_tbl { 3.0 } else { 5.0 };
-                                                        ui.label(
-                                                            RichText::new(fmt_pct(com))
-                                                                .size(stat_font)
-                                                                .strong()
-                                                                .color(
-                                                                    tone_for_user(com, 1.0).color(),
-                                                                ),
-                                                        );
-                                                        let pips = ((com.max(0.0) / 0.5).round()
-                                                            as usize)
-                                                            .clamp(0, 5);
-                                                        ui.horizontal(|ui| {
+                                                    ui.allocate_ui_with_layout(
+                                                        vec2(
+                                                            ui.available_size_before_wrap().x,
+                                                            row_h,
+                                                        ),
+                                                        Layout::left_to_right(Align::Center),
+                                                        |ui| {
+                                                            ui.set_min_height(row_h);
+                                                            ui.spacing_mut().item_spacing.x =
+                                                                if compact_tbl { 3.0 } else { 5.0 };
+                                                            ui.label(
+                                                                RichText::new(fmt_pct(com))
+                                                                    .size(stat_font)
+                                                                    .strong()
+                                                                    .color(
+                                                                        tone_for_user(com, 1.0)
+                                                                            .color(),
+                                                                    ),
+                                                            );
+                                                            let pips =
+                                                                ((com.max(0.0) / 0.5).round()
+                                                                    as usize)
+                                                                    .clamp(0, 5);
                                                             ui.spacing_mut().item_spacing.x =
                                                                 if compact_tbl { 1.5 } else { 2.0 };
                                                             for k in 0..5 {
@@ -476,8 +527,8 @@ impl TrueSightGuiApp {
                                                                     },
                                                                 );
                                                             }
-                                                        });
-                                                    });
+                                                        },
+                                                    );
 
                                                     ui.end_row();
                                                 }
@@ -500,7 +551,29 @@ impl TrueSightGuiApp {
                             P_MUTED,
                         );
 
-                        for (&(_, rec), row_r) in filtered_recs.iter().zip(row_rects.iter()) {
+                        for (display_idx, (&(_, rec), row_r)) in
+                            filtered_recs.iter().zip(row_rects.iter()).enumerate()
+                        {
+                            // Match egui::Grid::striped(true) cadence: header is grid row 0,
+                            // so display_idx 0, 2, 4... correspond to odd striped rows.
+                            let is_striped = display_idx % 2 == 0;
+                            let row_bg = if is_striped {
+                                ui.visuals().faint_bg_color
+                            } else {
+                                P_INDIGO_1
+                            };
+                            let stripe_rect = if is_striped {
+                                let r = Rect::from_min_max(
+                                    pos2(pick_area.min.x, row_r.min.y - 0.5 * row_gap),
+                                    pos2(pick_area.max.x, row_r.max.y + 0.5 * row_gap),
+                                );
+                                ui.painter().rect_filled(r, CornerRadius::same(2), row_bg);
+                                Some(r)
+                            } else {
+                                None
+                            };
+                            pick_stripe_rects.push(stripe_rect);
+
                             let picked_name = self
                                 .session
                                 .matrix
@@ -514,7 +587,7 @@ impl TrueSightGuiApp {
                             let pick_btn = egui::Button::new(
                                 RichText::new("PICK").size(pick_font).strong().color(P_GEM),
                             )
-                            .fill(P_INDIGO_1)
+                            .fill(row_bg)
                             .stroke(Stroke::new(1.0_f32, P_GEM));
                             let pick_resp = ui.put(btn_rect, pick_btn);
                             last_col_max_x = last_col_max_x.max(pick_resp.rect.max.x);
@@ -541,7 +614,9 @@ impl TrueSightGuiApp {
             last_col_max_x,
             comfort_hdr_max_x,
             row_rects,
+            vs_row_rects,
             pick_rects,
+            pick_stripe_rects,
         }
     }
 }

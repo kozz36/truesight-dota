@@ -1019,3 +1019,80 @@ fn responsive_900px_topbar_slot_headroom_and_non_overlapping_modals() {
         acct_win
     );
 }
+
+#[test]
+fn suggested_vs_enemies_cells_align_and_pick_column_follows_row_stripes() {
+    let ctx = egui::Context::default();
+    for mut app in [
+        TrueSightGuiApp::new(AppSession::new().unwrap(), None, None),
+        TrueSightGuiApp::new(make_5v5_gui_session(), None, None),
+    ] {
+        for viewport in [
+            vec2(960.0, 680.0),
+            vec2(1468.0, 960.0),
+            vec2(1920.0, 1080.0),
+        ] {
+            let r = render_at_viewport(&mut app, &ctx, viewport);
+            assert!(
+                !r.suggested_row_rects.is_empty()
+                    && r.suggested_row_rects.len() == r.suggested_vs_row_rects.len()
+                    && r.suggested_row_rects.len() == r.suggested_pick_rects.len()
+                    && r.suggested_row_rects.len() == r.suggested_pick_stripe_rects.len(),
+                "viewport={viewport:?} suggested telemetry vector lengths mismatched"
+            );
+
+            for (idx, (row_r, vs_r)) in r
+                .suggested_row_rects
+                .iter()
+                .zip(r.suggested_vs_row_rects.iter())
+                .enumerate()
+            {
+                assert!(
+                    (vs_r.center().y - row_r.center().y).abs() <= 1.0
+                        && vs_r.min.y >= row_r.min.y - 0.5
+                        && vs_r.max.y <= row_r.max.y + 0.5,
+                    "viewport={viewport:?} row {idx} VS ENEMIES squares misaligned vertically: vs={:?} row={:?}",
+                    vs_r,
+                    row_r
+                );
+            }
+        }
+        for viewport in [
+            vec2(960.0, 680.0),
+            vec2(1468.0, 960.0),
+            vec2(1920.0, 1080.0),
+        ] {
+            let r = render_at_viewport(&mut app, &ctx, viewport);
+            for (idx, ((row_r, pick_r), stripe_r)) in r
+                .suggested_row_rects
+                .iter()
+                .zip(r.suggested_pick_rects.iter())
+                .zip(r.suggested_pick_stripe_rects.iter())
+                .enumerate()
+            {
+                if idx % 2 == 0 {
+                    let s = stripe_r.unwrap_or_else(|| {
+                        panic!(
+                            "viewport={viewport:?} row {idx} PICK cell missing striped background"
+                        )
+                    });
+                    assert!(
+                        s.contains_rect(*pick_r)
+                            && s.min.y <= row_r.min.y
+                            && s.max.y >= row_r.max.y,
+                        "viewport={viewport:?} row {idx} PICK stripe {:?} must cover PICK {:?} and row {:?}",
+                        s,
+                        pick_r,
+                        row_r
+                    );
+                } else {
+                    assert!(
+                        stripe_r.is_none(),
+                        "viewport={viewport:?} row {idx} PICK cell should stay unstriped: {:?}",
+                        stripe_r
+                    );
+                }
+            }
+        }
+    }
+}

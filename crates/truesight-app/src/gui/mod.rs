@@ -222,7 +222,9 @@ pub struct LayoutRects {
     pub suggested_last_col_max_x: f32,
     pub suggested_comfort_hdr_max_x: f32,
     pub suggested_row_rects: Vec<Rect>,
+    pub suggested_vs_row_rects: Vec<Rect>,
     pub suggested_pick_rects: Vec<Rect>,
+    pub suggested_pick_stripe_rects: Vec<Option<Rect>>,
     pub scrollable_fallback: bool,
 }
 
@@ -264,7 +266,9 @@ impl TrueSightGuiApp {
             suggested_last_col_max_x: 0.0,
             suggested_comfort_hdr_max_x: 0.0,
             suggested_row_rects: Vec::new(),
+            suggested_vs_row_rects: Vec::new(),
             suggested_pick_rects: Vec::new(),
+            suggested_pick_stripe_rects: Vec::new(),
             scrollable_fallback: false,
         };
 
@@ -445,7 +449,9 @@ impl TrueSightGuiApp {
                     rects.suggested_last_col_max_x = s_out.last_col_max_x;
                     rects.suggested_comfort_hdr_max_x = s_out.comfort_hdr_max_x;
                     rects.suggested_row_rects = s_out.row_rects;
+                    rects.suggested_vs_row_rects = s_out.vs_row_rects;
                     rects.suggested_pick_rects = s_out.pick_rects;
+                    rects.suggested_pick_stripe_rects = s_out.pick_stripe_rects;
                 },
             );
             let dock_comp = bottom_h >= 740.0;
