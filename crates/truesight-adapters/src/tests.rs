@@ -3492,9 +3492,9 @@ fn vision_layout_selection_scores_unique_top1_before_applying_collision_fallback
     let mut noisy_rad: [Vec<(HeroId, f32, f32)>; 5] = std::array::from_fn(|_| Vec::new());
     let noisy_dire: [Vec<(HeroId, f32, f32)>; 5] = std::array::from_fn(|_| Vec::new());
     noisy_rad[0] = vec![(HeroId(1), 20.0, 20.0), (HeroId(2), 23.0, 20.0)];
-    noisy_rad[1] = vec![(HeroId(1), 24.0, 20.0), (HeroId(2), 23.0, 20.0)];
+    noisy_rad[1] = vec![(HeroId(1), 22.0, 20.0), (HeroId(2), 23.0, 20.0)];
     noisy_rad[2] = vec![(HeroId(3), 24.0, 20.0), (HeroId(4), 25.0, 20.0)];
-    noisy_rad[3] = vec![(HeroId(3), 26.0, 20.0), (HeroId(4), 25.0, 20.0)];
+    noisy_rad[3] = vec![(HeroId(3), 25.0, 20.0), (HeroId(4), 25.0, 20.0)];
 
     // Layout B (clean InGame): two unique top-1 matches at diff 15.0 (score 41.0 > 27.0).
     let mut clean_rad: [Vec<(HeroId, f32, f32)>; 5] = std::array::from_fn(|_| Vec::new());
