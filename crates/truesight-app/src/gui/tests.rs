@@ -1078,11 +1078,25 @@ fn responsive_900px_topbar_slot_headroom_and_non_overlapping_modals() {
             opts_win
         );
         assert!(
-            !acct_win.intersects(r_modals.oracle)
-                && !acct_win.intersects(r_modals.enemies)
-                && !acct_win.intersects(r_modals.allies),
-            "vp={vp:?} STEAM ACCOUNT LINK window {:?} must not cover top-row cards",
+            modal_rect_shapes.iter().any(|s| {
+                (s.rect.min - acct_win.min).length() <= 1.5
+                    && (s.rect.max - acct_win.max).length() <= 1.5
+                    && s.corner_radius == egui::CornerRadius::ZERO
+                    && s.fill == P_INDIGO_1
+                    && s.stroke == Stroke::new(1.0_f32, P_LINE)
+            }),
+            "vp={vp:?} STEAM ACCOUNT LINK window {:?} must render a square (CornerRadius::ZERO) frame with P_INDIGO_1 fill and P_LINE stroke",
             acct_win
+        );
+        assert!(
+            (acct_win.min.y - opts_win.min.y).abs() <= 2.0
+                && !acct_win.intersects(r_modals.top_bar)
+                && acct_win.max.x <= opts_win.min.x - 4.0
+                && acct_win.min.x >= 0.0,
+            "vp={vp:?} STEAM ACCOUNT LINK {:?} must anchor beside OPTIONS {:?} below top_bar {:?}",
+            acct_win,
+            opts_win,
+            r_modals.top_bar
         );
         assert!(
             !opts_win.intersects(acct_win),
@@ -1091,6 +1105,20 @@ fn responsive_900px_topbar_slot_headroom_and_non_overlapping_modals() {
             acct_win
         );
     }
+    // Narrow fallback (640x480): OPTIONS + STEAM ACCOUNT LINK still never collide or clip out of viewport.
+    let r_narrow = render_at_viewport(&mut app, &ctx, vec2(640.0, 480.0));
+    let opts_narrow = r_narrow.options_window.expect("OPTIONS open at 640x480");
+    let acct_narrow = r_narrow
+        .account_window
+        .expect("STEAM ACCOUNT LINK open at 640x480");
+    assert!(
+        !opts_narrow.intersects(acct_narrow)
+            && acct_narrow.min.x >= 0.0
+            && acct_narrow.max.x <= 640.0,
+        "640x480 OPTIONS {:?} and STEAM ACCOUNT LINK {:?} must not collide or overflow horizontally",
+        opts_narrow,
+        acct_narrow
+    );
     assert!(
         two_row_bar_h > one_row_bar_h + 10.0,
         "860x680 must exercise wrapped two-row top_bar ({two_row_bar_h} vs {one_row_bar_h})"

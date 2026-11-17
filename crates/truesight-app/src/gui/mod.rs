@@ -19,7 +19,7 @@ use eframe::egui::{
 };
 use theme::{
     GuiTextureCache, P_GEM, P_GEM_DEEP, P_INDIGO_1, P_INDIGO_2, P_INDIGO_3, P_LINE, P_SILVER,
-    P_VOID,
+    P_VOID, hud_modal_frame, paint_hud_corner_ticks,
 };
 use truesight_adapters::gsi::BoundedGsiListener;
 use truesight_adapters::sync::{AccountLinkConfig, normalize_steam32_id, save_account_config};
@@ -325,12 +325,49 @@ impl TrueSightGuiApp {
         }
 
         if self.account_editor_open {
-            let mut close_modal = false;
+            let mut close_modal = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+            let screen = ctx.screen_rect();
+            let top_anchor_y =
+                (rects.top_bar.max.y + 4.0).clamp(14.0, (screen.height() - 120.0).max(14.0));
+            let (anchor_offset, max_acct_w, input_w) = if let Some(opts_rect) = rects.options_window
+            {
+                let left_space = opts_rect.min.x - screen.left() - 20.0;
+                if left_space >= 270.0 {
+                    let mw = left_space.min(340.0);
+                    let iw = if mw >= 310.0 {
+                        240.0
+                    } else {
+                        (mw - 70.0).max(160.0)
+                    };
+                    (
+                        vec2(
+                            opts_rect.min.x - screen.right() - 8.0,
+                            opts_rect.min.y - screen.top(),
+                        ),
+                        mw,
+                        iw,
+                    )
+                } else {
+                    let mw = (screen.width() - 24.0).clamp(240.0, 340.0);
+                    (
+                        vec2(-12.0, opts_rect.max.y + 8.0 - screen.top()),
+                        mw,
+                        240.0_f32.min((mw - 40.0).max(160.0)),
+                    )
+                }
+            } else {
+                let mw = (screen.width() - 24.0).clamp(260.0, 340.0);
+                (vec2(-12.0, top_anchor_y - screen.top()), mw, 240.0)
+            };
+
             let acct_resp = egui::Window::new("STEAM ACCOUNT LINK")
                 .collapsible(false)
                 .resizable(false)
-                .anchor(Align2::LEFT_BOTTOM, vec2(12.0, -12.0))
-                .constrain_to(ctx.screen_rect())
+                .fade_in(false)
+                .anchor(Align2::RIGHT_TOP, anchor_offset)
+                .constrain_to(screen)
+                .frame(hud_modal_frame(ctx))
+                .max_width(max_acct_w)
                 .show(ctx, |ui| {
                     ui.label(
                         RichText::new(
@@ -343,7 +380,7 @@ impl TrueSightGuiApp {
                     let enter_pressed = ui
                         .add(
                             egui::TextEdit::singleline(&mut self.account_input)
-                                .desired_width(240.0)
+                                .desired_width(input_w)
                                 .hint_text("e.g. Steam32 or 7656119..."),
                         )
                         .lost_focus()
@@ -374,6 +411,10 @@ impl TrueSightGuiApp {
                 });
             if close_modal {
                 self.account_editor_open = false;
+            }
+            if let Some(r) = &acct_resp {
+                let painter = ctx.layer_painter(r.response.layer_id);
+                paint_hud_corner_ticks(&painter, r.response.rect, P_GEM);
             }
             rects.account_window = acct_resp.map(|r| r.response.rect);
         }

@@ -310,14 +310,7 @@ impl TrueSightGuiApp {
             .fade_in(false)
             .anchor(Align2::RIGHT_TOP, vec2(-12.0, anchor_y))
             .constrain_to(ctx.screen_rect())
-            .frame(
-                egui::Frame::window(&ctx.style())
-                    .fill(P_INDIGO_1)
-                    .stroke(Stroke::new(1.0_f32, P_LINE))
-                    .corner_radius(CornerRadius::ZERO)
-                    .shadow(egui::Shadow::NONE)
-                    .inner_margin(Margin::same(10)),
-            )
+            .frame(hud_modal_frame(ctx))
             .default_width(max_opt_w)
             .max_width(max_opt_w)
             .show(ctx, |ui| {
