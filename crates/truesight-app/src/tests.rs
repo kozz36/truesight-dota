@@ -1792,3 +1792,39 @@ fn reapplying_same_account_preserves_in_flight_sync_while_switching_cancels_it()
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+#[test]
+fn windows_console_attach_policy_preserves_gui_and_piped_cli_streams() {
+    use super::{should_attach_parent_console, wants_cli_console};
+
+    let s = |items: &[&str]| items.iter().map(|v| (*v).to_string()).collect::<Vec<_>>();
+
+    // GUI launches (with or without --account-id) never request a parent console.
+    assert!(!wants_cli_console(&s(&["truesight-dota.exe"])));
+    assert!(!wants_cli_console(&s(&[
+        "truesight-dota.exe",
+        "--account-id",
+        "127255741"
+    ])));
+    assert!(!should_attach_parent_console(
+        &s(&["truesight-dota.exe"]),
+        false
+    ));
+
+    // CLI modes request parent console ONLY when stdout is not already piped/redirected.
+    for flag in ["--cli", "--tui", "--demo", "--sync"] {
+        let args = s(&["truesight-dota.exe", flag, "--no-color"]);
+        assert!(
+            wants_cli_console(&args),
+            "flag {flag} must want CLI console"
+        );
+        assert!(
+            should_attach_parent_console(&args, false),
+            "flag {flag} without inherited stdout must attach parent console"
+        );
+        assert!(
+            !should_attach_parent_console(&args, true),
+            "flag {flag} with redirected/piped stdout must preserve inherited stream"
+        );
+    }
+}

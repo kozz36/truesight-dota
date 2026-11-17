@@ -1,3 +1,8 @@
+#![cfg_attr(
+    all(target_os = "windows", feature = "gui"),
+    windows_subsystem = "windows"
+)]
+
 mod cli;
 #[cfg(feature = "gui")]
 mod gui;
@@ -16,11 +21,49 @@ use truesight_adapters::gsi::BoundedGsiListener;
 use truesight_adapters::sync::LocalCacheManager;
 use truesight_adapters::vision::spawn_platform_worker;
 
+#[cfg(any(test, all(target_os = "windows", feature = "gui")))]
+pub(crate) fn wants_cli_console(args: &[String]) -> bool {
+    args.iter()
+        .any(|a| matches!(a.as_str(), "--cli" | "--tui" | "--demo" | "--sync"))
+}
+
+#[cfg(any(test, all(target_os = "windows", feature = "gui")))]
+pub(crate) fn should_attach_parent_console(args: &[String], has_inherited_stdout: bool) -> bool {
+    wants_cli_console(args) && !has_inherited_stdout
+}
+
+#[cfg(all(target_os = "windows", feature = "gui"))]
+fn attach_parent_console(args: &[String], force: bool) {
+    use winsafe::{AttachConsole, HSTD, PidParent, co, prelude::Handle};
+
+    let has_inherited_stdout = match HSTD::GetStdHandle(co::STD_HANDLE::OUTPUT) {
+        Ok(mut guard) => {
+            // Leak the guard so Drop never calls CloseHandle on the inherited stdout handle.
+            let handle = guard.leak();
+            handle != HSTD::NULL && handle != HSTD::INVALID
+        }
+        Err(_) => false,
+    };
+    let should_attach = if force {
+        !has_inherited_stdout
+    } else {
+        should_attach_parent_console(args, has_inherited_stdout)
+    };
+    if should_attach {
+        let _ = AttachConsole(PidParent::Parent);
+    }
+}
+
+#[cfg(not(all(target_os = "windows", feature = "gui")))]
+fn attach_parent_console(_args: &[String], _force: bool) {}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    attach_parent_console(&args, false);
     let mut session = match AppSession::new() {
         Ok(s) => s,
         Err(e) => {
+            attach_parent_console(&args, true);
             let _ = writeln!(io::stderr(), "Failed to initialize truesight-dota: {e}");
             std::process::exit(1);
         }
@@ -29,6 +72,7 @@ fn main() {
         Ok(Some(opt_id)) => session.set_account_id(opt_id, true),
         Ok(None) => {}
         Err(e) => {
+            attach_parent_console(&args, true);
             let _ = writeln!(io::stderr(), "{e}");
             std::process::exit(1);
         }
