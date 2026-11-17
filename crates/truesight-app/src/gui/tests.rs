@@ -1105,20 +1105,47 @@ fn responsive_900px_topbar_slot_headroom_and_non_overlapping_modals() {
             acct_win
         );
     }
-    // Narrow fallback (640x480): OPTIONS + STEAM ACCOUNT LINK still never collide or clip out of viewport.
-    let r_narrow = render_at_viewport(&mut app, &ctx, vec2(640.0, 480.0));
-    let opts_narrow = r_narrow.options_window.expect("OPTIONS open at 640x480");
-    let acct_narrow = r_narrow
-        .account_window
-        .expect("STEAM ACCOUNT LINK open at 640x480");
-    assert!(
-        !opts_narrow.intersects(acct_narrow)
-            && acct_narrow.min.x >= 0.0
-            && acct_narrow.max.x <= 640.0,
-        "640x480 OPTIONS {:?} and STEAM ACCOUNT LINK {:?} must not collide or overflow horizontally",
-        opts_narrow,
-        acct_narrow
-    );
+    // Narrow / min supported viewport bounds (640x480 and min_inner_size 640x440):
+    // OPTIONS + STEAM ACCOUNT LINK never collide, and APPLY/CLOSE/DEMO 5V5 remain visible and reachable.
+    for min_vp in [vec2(640.0, 480.0), vec2(640.0, 440.0)] {
+        let r_narrow = render_at_viewport(&mut app, &ctx, min_vp);
+        let opts_narrow = r_narrow.options_window.expect("OPTIONS open at min vp");
+        let demo_narrow = r_narrow
+            .options_demo_button
+            .expect("DEMO 5V5 open at min vp");
+        let acct_narrow = r_narrow
+            .account_window
+            .expect("STEAM ACCOUNT LINK open at min vp");
+        let apply_btn = r_narrow
+            .account_apply_button
+            .expect("APPLY button must be rendered inside STEAM ACCOUNT LINK");
+        let close_btn = r_narrow
+            .account_close_button
+            .expect("CLOSE button must be rendered inside STEAM ACCOUNT LINK");
+        assert!(
+            !opts_narrow.intersects(acct_narrow)
+                && !opts_narrow.intersects(r_narrow.top_bar)
+                && !acct_narrow.intersects(r_narrow.top_bar)
+                && acct_narrow.min.x >= 0.0
+                && acct_narrow.max.x <= min_vp.x
+                && opts_narrow.max.y <= min_vp.y
+                && acct_narrow.max.y <= min_vp.y,
+            "vp={min_vp:?} OPTIONS {:?} and STEAM ACCOUNT LINK {:?} must not collide or overflow below top_bar {:?}",
+            opts_narrow,
+            acct_narrow,
+            r_narrow.top_bar
+        );
+        assert!(
+            acct_narrow.contains_rect(apply_btn)
+                && acct_narrow.contains_rect(close_btn)
+                && apply_btn.max.y <= min_vp.y
+                && close_btn.max.y <= min_vp.y
+                && close_btn.max.x <= min_vp.x
+                && opts_narrow.contains_rect(demo_narrow)
+                && demo_narrow.max.y <= min_vp.y,
+            "vp={min_vp:?} buttons APPLY={apply_btn:?}, CLOSE={close_btn:?}, DEMO={demo_narrow:?} must stay reachable inside viewport"
+        );
+    }
     assert!(
         two_row_bar_h > one_row_bar_h + 10.0,
         "860x680 must exercise wrapped two-row top_bar ({two_row_bar_h} vs {one_row_bar_h})"

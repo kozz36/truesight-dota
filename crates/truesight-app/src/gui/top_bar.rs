@@ -301,7 +301,12 @@ impl TrueSightGuiApp {
             !self.account_editor_open && ctx.input(|i| i.key_pressed(egui::Key::Escape));
         let mut demo_btn_rect = None;
 
-        let max_opt_w = (ctx.screen_rect().width() - 24.0).clamp(260.0, 370.0);
+        let screen_w = ctx.screen_rect().width();
+        let max_opt_w = if screen_w < 700.0 {
+            (screen_w - 24.0).clamp(240.0, 286.0)
+        } else {
+            (screen_w - 24.0).clamp(260.0, 370.0)
+        };
         let anchor_y =
             (top_bar_bottom_y + 4.0).clamp(14.0, (ctx.screen_rect().height() - 120.0).max(14.0));
         let resp = egui::Window::new("OPTIONS · DEV & TELEMETRY")

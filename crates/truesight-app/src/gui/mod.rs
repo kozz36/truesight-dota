@@ -209,6 +209,8 @@ pub struct LayoutRects {
     pub options_window: Option<Rect>,
     pub options_demo_button: Option<Rect>,
     pub account_window: Option<Rect>,
+    pub account_apply_button: Option<Rect>,
+    pub account_close_button: Option<Rect>,
     pub allies: Rect,
     pub oracle: Rect,
     pub enemies: Rect,
@@ -253,6 +255,8 @@ impl TrueSightGuiApp {
             options_window: None,
             options_demo_button: None,
             account_window: None,
+            account_apply_button: None,
+            account_close_button: None,
             allies: Rect::NOTHING,
             oracle: Rect::NOTHING,
             enemies: Rect::NOTHING,
@@ -332,12 +336,12 @@ impl TrueSightGuiApp {
             let (anchor_offset, max_acct_w, input_w) = if let Some(opts_rect) = rects.options_window
             {
                 let left_space = opts_rect.min.x - screen.left() - 20.0;
-                if left_space >= 270.0 {
-                    let mw = left_space.min(340.0);
+                if left_space >= 260.0 {
+                    let mw = (left_space - 22.0).clamp(238.0, 340.0);
                     let iw = if mw >= 310.0 {
                         240.0
                     } else {
-                        (mw - 70.0).max(160.0)
+                        (mw - 40.0).clamp(160.0, 240.0)
                     };
                     (
                         vec2(
@@ -369,12 +373,15 @@ impl TrueSightGuiApp {
                 .frame(hud_modal_frame(ctx))
                 .max_width(max_acct_w)
                 .show(ctx, |ui| {
-                    ui.label(
-                        RichText::new(
-                            "Enter Steam32 or Steam64 ID (leave Auto for GSI + Steam VDF):",
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(
+                                "Enter Steam32 or Steam64 ID (leave Auto for GSI + Steam VDF):",
+                            )
+                            .size(11.0)
+                            .color(P_SILVER),
                         )
-                        .size(11.0)
-                        .color(P_SILVER),
+                        .wrap(),
                     );
                     ui.add_space(4.0);
                     let enter_pressed = ui
@@ -386,8 +393,12 @@ impl TrueSightGuiApp {
                         .lost_focus()
                         && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     ui.add_space(6.0);
+                    let mut apply_rect = None;
+                    let mut close_rect = None;
                     ui.horizontal(|ui| {
-                        if ui.button("APPLY").clicked() || enter_pressed {
+                        let apply_resp = ui.button("APPLY");
+                        apply_rect = Some(apply_resp.rect);
+                        if apply_resp.clicked() || enter_pressed {
                             if let Some(cfg) = self.apply_account_input() {
                                 let _ = save_account_config(cfg);
                                 close_modal = true;
@@ -404,10 +415,13 @@ impl TrueSightGuiApp {
                             self.status_banner = "Account unlinked (neutral 0.0% comfort).".into();
                             close_modal = true;
                         }
-                        if ui.button("CLOSE").clicked() {
+                        let close_resp = ui.button("CLOSE");
+                        close_rect = Some(close_resp.rect);
+                        if close_resp.clicked() {
                             close_modal = true;
                         }
                     });
+                    (apply_rect, close_rect)
                 });
             if close_modal {
                 self.account_editor_open = false;
@@ -415,6 +429,10 @@ impl TrueSightGuiApp {
             if let Some(r) = &acct_resp {
                 let painter = ctx.layer_painter(r.response.layer_id);
                 paint_hud_corner_ticks(&painter, r.response.rect, P_GEM);
+                if let Some((apply_r, close_r)) = r.inner {
+                    rects.account_apply_button = apply_r;
+                    rects.account_close_button = close_r;
+                }
             }
             rects.account_window = acct_resp.map(|r| r.response.rect);
         }
