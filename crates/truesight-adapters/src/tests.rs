@@ -3291,6 +3291,118 @@ fn platform_paths_and_steam_vdf_support_windows_without_home_and_preserve_linux(
 }
 
 #[test]
+fn vision_rejects_false_hero_under_interior_glow() {
+    use crate::vision::{
+        HeroVisionCatalog, RgbFrame, ScreenFrameSource, VisionCaptureAdapter,
+        compute_ingame_topbar_slot_rects, parse_hero_atlas,
+    };
+    use truesight_core::domain::{Role, Side};
+    use truesight_core::ports::{DraftEvent, DraftEventSource, PortError};
+
+    struct Once(Option<RgbFrame>);
+    impl ScreenFrameSource for Once {
+        fn capture_frame(&mut self) -> Result<Option<RgbFrame>, PortError> {
+            Ok(self.0.take())
+        }
+    }
+    let atlas = parse_hero_atlas().unwrap();
+    let ids = [88, 48, 100, 74, 72, 5, 1, 2, 94, 17];
+    let (w, h) = (1920, 1080);
+    let (rad, dire) = compute_ingame_topbar_slot_rects(w, h);
+    let rects: Vec<_> = rad.into_iter().chain(dire).collect();
+    let mut baseline = vec![16; w * h * 3];
+    for (rect, id) in rects.iter().zip(ids) {
+        let src = &atlas.heroes[&HeroId(id)];
+        for y in 0..33 {
+            for x in 0..57 {
+                let dst = ((rect.y + y) * w + rect.x + x) * 3;
+                baseline[dst..dst + 3].copy_from_slice(&[36, 40, 48]);
+            }
+        }
+        // Pillow NEAREST uses pixel centers, not floor(dx * source / destination).
+        for y in 0..27 {
+            for x in 0..47 {
+                let sy = 2 + ((2 * y + 1) * 32) / 54;
+                let sx = 4 + ((2 * x + 1) * 56) / 94;
+                let src_idx = (sy * atlas.hero_width + sx) * 3;
+                let dst = ((rect.y + 5 + y) * w + rect.x + 5 + x) * 3;
+                baseline[dst..dst + 3].copy_from_slice(&src[src_idx..src_idx + 3]);
+            }
+        }
+    }
+    for case in ["baseline", "thin", "blank", "glow"] {
+        let mut rgb = baseline.clone();
+        let rect = rects[0];
+        for y in 0..33_usize {
+            for x in 0..57_usize {
+                let d = x.min(56 - x).min(y).min(32 - y);
+                let dst = ((rect.y + y) * w + rect.x + x) * 3;
+                if case == "blank" {
+                    let color = if d >= 3 {
+                        [16, 16, 16]
+                    } else if (17 * x + 31 * y) % 7 < 3 {
+                        [255, 220, 80]
+                    } else {
+                        [10, 70, 130]
+                    };
+                    rgb[dst..dst + 3].copy_from_slice(&color);
+                } else {
+                    let a = if case == "glow" {
+                        0.5 * (1.0 - d as f64 / 16.0).max(0.0)
+                    } else if case == "thin" && d < 3 {
+                        0.5
+                    } else {
+                        0.0
+                    };
+                    for (channel, overlay) in [255, 240, 100].into_iter().enumerate() {
+                        rgb[dst + channel] = ((1.0 - a) * f64::from(rgb[dst + channel])
+                            + a * f64::from(overlay))
+                        .round_ties_even() as u8;
+                    }
+                }
+            }
+        }
+        let mut adapter = VisionCaptureAdapter::new(
+            Once(Some(RgbFrame::new(w, h, rgb))),
+            HeroVisionCatalog::from_embedded().unwrap(),
+        );
+        let events = adapter.poll_events().unwrap();
+        eprintln!("{case}: {events:?}");
+        for (index, id) in ids.into_iter().enumerate() {
+            let side = if index < 5 {
+                Side::Allies
+            } else {
+                Side::Enemies
+            };
+            let slot = index % 5;
+            let expected = DraftEvent::PickDetected {
+                side,
+                slot,
+                hero_id: HeroId(id),
+                role: Some(Role::ALL[slot]),
+            };
+            if index != 0 || case == "baseline" || case == "thin" {
+                assert!(events.contains(&expected), "{case}: missing {expected:?}");
+            }
+            assert!(
+                events.iter().all(|event| match event {
+                    DraftEvent::PickDetected {
+                        side: s,
+                        slot: n,
+                        hero_id,
+                        ..
+                    } if *s == side && *n == slot =>
+                        *hero_id == HeroId(id) && !(case == "blank" && index == 0),
+                    _ => true,
+                }),
+                "{case}: false identity in {events:?}"
+            );
+        }
+        assert!(adapter.poll_events().unwrap().is_empty());
+    }
+}
+
+#[test]
 fn vision_ingame_excludes_player_color_strip_and_spectator_borders() {
     use crate::hero_alt_atlas::parse_hero_alt_atlas;
     use crate::vision::{
