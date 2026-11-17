@@ -38,6 +38,15 @@
                                Value="1"
                                KeyPath="yes" />
             </Component>
+            <Component Id="GuiExecutable" Guid="B9A1D4E0-3C72-4F55-A2C4-12F7F6B81A07">
+                <File Id="TrueSightGuiExe" Source="$(var.StageDir)\truesight-dota-gui.exe" />
+                <RegistryValue Root="HKCU"
+                               Key="Software\kozz36\TrueSightDota\Components"
+                               Name="GuiExecutable"
+                               Type="integer"
+                               Value="1"
+                               KeyPath="yes" />
+            </Component>
             <Component Id="GsiConfigFile" Guid="C2D3E5F1-8A41-4E88-B912-34A9C1D2E302">
                 <File Id="GsiCfg" Source="$(var.StageDir)\gamestate_integration_truesight.cfg" />
                 <RegistryValue Root="HKCU"
@@ -81,7 +90,7 @@
                 <Shortcut Id="LaunchTrueSight"
                           Name="TrueSight Dota"
                           Description="Launch TrueSight Dota 5v5 Draft Oracle"
-                          Target="[INSTALLFOLDER]truesight-dota.exe"
+                          Target="[INSTALLFOLDER]truesight-dota-gui.exe"
                           WorkingDirectory="INSTALLFOLDER"
                           Icon="TrueSightGem.ico" />
                 <RemoveFolder Id="CleanProgramsFolder" Directory="ApplicationProgramsFolder" On="uninstall" />

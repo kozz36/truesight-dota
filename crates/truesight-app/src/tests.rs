@@ -1792,3 +1792,64 @@ fn reapplying_same_account_preserves_in_flight_sync_while_switching_cancels_it()
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+#[test]
+fn windows_packaging_separates_console_cli_and_console_free_gui_entrypoints() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("workspace root");
+
+    let app_toml =
+        std::fs::read_to_string(manifest_dir.join("Cargo.toml")).expect("read app Cargo.toml");
+    assert!(
+        !app_toml.contains("winsafe"),
+        "console/GUI entrypoint split must not require winsafe"
+    );
+    assert!(
+        app_toml.contains("name = \"truesight-dota-gui\"")
+            && app_toml.contains("src/bin/truesight-dota-gui.rs")
+            && app_toml.contains("required-features = [\"gui\"]"),
+        "truesight-app Cargo.toml must declare the gui-only truesight-dota-gui binary"
+    );
+
+    let main_rs =
+        std::fs::read_to_string(manifest_dir.join("src/main.rs")).expect("read src/main.rs");
+    assert!(
+        !main_rs.contains("windows_subsystem"),
+        "truesight-dota CLI/default entrypoint must stay in the Windows console subsystem"
+    );
+    assert!(
+        main_rs.contains("truesight_app::run_app()"),
+        "src/main.rs must delegate to shared truesight_app::run_app()"
+    );
+
+    let gui_rs = std::fs::read_to_string(manifest_dir.join("src/bin/truesight-dota-gui.rs"))
+        .expect("read src/bin/truesight-dota-gui.rs");
+    assert!(
+        gui_rs.contains("#![cfg_attr(target_os = \"windows\", windows_subsystem = \"windows\")]"),
+        "truesight-dota-gui must opt into the Windows GUI subsystem to suppress the console window"
+    );
+    assert!(
+        gui_rs.contains("truesight_app::run_app()"),
+        "src/bin/truesight-dota-gui.rs must delegate to shared truesight_app::run_app()"
+    );
+
+    let pkg_script =
+        std::fs::read_to_string(repo_root.join("packaging/windows/build-release-packages.ps1"))
+            .expect("read build-release-packages.ps1");
+    assert!(
+        pkg_script.contains("truesight-dota-gui.exe"),
+        "Windows packaging script must stage truesight-dota-gui.exe alongside truesight-dota.exe"
+    );
+
+    let wxs = std::fs::read_to_string(repo_root.join("packaging/windows/Package.wxs"))
+        .expect("read Package.wxs");
+    assert!(
+        wxs.contains("GuiExecutable")
+            && wxs.contains("[INSTALLFOLDER]truesight-dota-gui.exe")
+            && wxs.contains("LaunchTrueSight"),
+        "MSI installer must ship truesight-dota-gui.exe and point the Start Menu shortcut to it"
+    );
+}

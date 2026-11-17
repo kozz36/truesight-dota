@@ -119,6 +119,7 @@ jobs:
         run: |
           .\packaging\windows\build-release-packages.ps1 `
             -ExePath ".\target\release\truesight-dota.exe" `
+            -GuiExePath ".\target\release\truesight-dota-gui.exe" `
             -Version $env:RELEASE_TAG `
             -OutDir ".\dist-windows"
 

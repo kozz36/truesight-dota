@@ -11,6 +11,11 @@ default-run = "truesight-dota"
 name = "truesight-dota"
 path = "src/main.rs"
 
+[[bin]]
+name = "truesight-dota-gui"
+path = "src/bin/truesight-dota-gui.rs"
+required-features = ["gui"]
+
 [features]
 default = ["gui"]
 gui = ["dep:eframe"]
