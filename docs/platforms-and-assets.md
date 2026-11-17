@@ -23,7 +23,7 @@ This document defines the tested OS support matrix, per-platform runtime depende
   - **Capture backend**: Built-in Win32/GDI (`xcap`), zero extra runtime downloads, no WGC yellow capture border. Run Dota 2 in **Borderless Window** (recommended) or **Windowed** mode; exclusive fullscreen may yield blank/unreadable `PrintWindow` frames and fall back to manual input.
   - **Process & HTTP sync**: Built-in Windows `System32\tasklist.exe` (resolved via `%SystemRoot%` / `%WINDIR%` to verify owning `dota2.exe` PID) and `curl.exe` (`System32\curl.exe` / `PATH`, invoked with `CREATE_NO_WINDOW`).
   - **Steam detection**: Reads `%ProgramFiles(x86)%\Steam\config\loginusers.vdf`, `%ProgramFiles%\Steam\config\loginusers.vdf`, `%LOCALAPPDATA%\Steam\config\loginusers.vdf`, and `HKCU\Software\Valve\Steam\SteamPath`.
-  - **Console UX note**: Default Windows release binaries preserve the console subsystem so `--cli`, `--demo`, and `--sync` retain full stdin/stdout/stderr and exit codes. Launching from Explorer/Start Menu opens a companion console window behind the GUI until separate GUI launcher packaging is added.
+  - **Dual Windows entrypoints (GUI & CLI)**: Release packages ship two binaries sharing the same application logic: `truesight-dota-gui.exe` (Windows GUI subsystem, console-free launcher targeted by the MSI Start Menu shortcut and intended for Explorer launches) and `truesight-dota.exe` (Windows console subsystem entrypoint preserving stdin/stdout/stderr and exit codes for `--cli`, `--demo`, and `--sync`).
   - **Windows SmartScreen / Unsigned Binaries**: Release `.exe` and `.msi` files are open-source community builds and are **not EV/Authenticode code-signed**. Windows SmartScreen may show *"Windows protected your PC"* on first run; verify integrity against the release `SHA256SUMS` file before choosing *More info -> Run anyway*.
 
 ---
@@ -43,8 +43,8 @@ TrueSight Dota listens on loopback `http://127.0.0.1:4001/` (`TRUESIGHT_GSI_ADDR
 Tagged `v*` builds in [`.github/workflows/release.yml`](../.github/workflows/release.yml) run full format/Clippy/test gates and release `--demo --no-color` smoke tests before publishing:
 
 - `truesight-dota-linux-x86_64.tar.gz` (`truesight-dota`, `gamestate_integration_truesight.cfg`, `truesight-dota.desktop`, `install-desktop.sh`, `truesight-dota.png`, `LICENSE`, `README.md`)
-- `truesight-dota-windows-x86_64.msi` (per-user WiX v4 MSI installer into `%LOCALAPPDATA%\Programs\TrueSight Dota` + Start Menu shortcut with Gem icon, no admin UAC required)
-- `truesight-dota-windows-x86_64.zip` (portable archive including `truesight-dota.exe`, `gamestate_integration_truesight.cfg`, `install-gsi.ps1`, `truesight-dota.ico`, `LICENSE`, `README.md`)
+- `truesight-dota-windows-x86_64.msi` (per-user WiX v4 MSI installer into `%LOCALAPPDATA%\Programs\TrueSight Dota` shipping `truesight-dota-gui.exe` and `truesight-dota.exe`, with Start Menu shortcut pointing to `truesight-dota-gui.exe` and Gem icon, no admin UAC required)
+- `truesight-dota-windows-x86_64.zip` (portable archive including `truesight-dota-gui.exe`, `truesight-dota.exe`, `gamestate_integration_truesight.cfg`, `install-gsi.ps1`, `truesight-dota.ico`, `LICENSE`, `README.md`)
 - `SHA256SUMS` (unified SHA-256 checksums for all artifacts in the release)
 
 Verify checksums locally after download:
