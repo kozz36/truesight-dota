@@ -3289,3 +3289,239 @@ fn platform_paths_and_steam_vdf_support_windows_without_home_and_preserve_linux(
         ]
     );
 }
+
+#[test]
+fn vision_ingame_excludes_player_color_strip_and_spectator_borders() {
+    use crate::hero_alt_atlas::parse_hero_alt_atlas;
+    use crate::vision::{
+        HeroVisionCatalog, RgbFrame, ScreenFrameSource, TopBarSlotRect, VisionCaptureAdapter,
+        VisionCaptureMode, compute_ingame_topbar_slot_rects, parse_hero_atlas,
+    };
+    use truesight_core::domain::{Faction, Side};
+
+    struct SingleFrameSource(Option<RgbFrame>);
+    impl ScreenFrameSource for SingleFrameSource {
+        fn capture_frame(&mut self) -> Result<Option<RgbFrame>, truesight_core::ports::PortError> {
+            Ok(self.0.take())
+        }
+    }
+
+    let atlas = parse_hero_atlas().expect("base atlas must load");
+    let alt_atlas = parse_hero_alt_atlas().expect("alt atlas must load");
+    let catalog = HeroVisionCatalog::from_embedded().expect("vision catalog must load");
+
+    let (w, h) = (1920_usize, 1080_usize);
+    let (rad_rects, dire_rects) = compute_ingame_topbar_slot_rects(w, h);
+    let mut frame_rgb = vec![16_u8; w * h * 3];
+
+    let player_colors: [[u8; 3]; 10] = [
+        [46, 115, 230],  // Blue
+        [102, 255, 192], // Teal
+        [191, 0, 191],   // Purple
+        [243, 240, 11],  // Yellow
+        [255, 107, 0],   // Orange
+        [254, 134, 194], // Pink
+        [161, 180, 71],  // Olive
+        [101, 217, 247], // Light Blue
+        [0, 131, 33],    // Dark Green
+        [164, 105, 0],   // Brown
+    ];
+
+    let paint_contaminated_slot =
+        |buf: &mut [u8], rect: TopBarSlotRect, src_rgb: &[u8], strip_rgb: [u8; 3], glow: bool| {
+            // Paint bright spectator border / bottom bar / Dota Plus corner triangles across full slot
+            for dy in 0..rect.height {
+                for dx in 0..rect.width {
+                    let px = rect.x + dx;
+                    let py = rect.y + dy;
+                    let dst = (py * w + px) * 3;
+                    if dy < 6 {
+                        buf[dst..dst + 3].copy_from_slice(&strip_rgb);
+                    } else if glow {
+                        buf[dst..dst + 3].copy_from_slice(&[245, 230, 165]);
+                    } else {
+                        buf[dst..dst + 3].copy_from_slice(&[36, 40, 48]);
+                    }
+                }
+            }
+            // Paint the actual portrait inside the clean inner core (x+5..w-5, y+5..h-1)
+            let inner = TopBarSlotRect {
+                x: rect.x + 5,
+                y: rect.y + 5,
+                width: rect.width.saturating_sub(10),
+                height: rect.height.saturating_sub(6),
+            };
+            let (sx0, sw0, sy0, sh0) = (
+                4_usize,
+                atlas.hero_width - 8,
+                2_usize,
+                atlas.hero_height - 4,
+            );
+            for dy in 0..inner.height {
+                let sy = sy0 + (dy * sh0) / inner.height;
+                for dx in 0..inner.width {
+                    let sx = sx0 + (dx * sw0) / inner.width;
+                    let si = (sy * atlas.hero_width + sx) * 3;
+                    let di = ((inner.y + dy) * w + (inner.x + dx)) * 3;
+                    buf[di..di + 3].copy_from_slice(&src_rgb[si..si + 3]);
+                }
+            }
+        };
+
+    // Match 1 failing Radiant heroes from #43: Nyx(88), Luna(48), Tusk(100), Invoker(74), Gyro(72)
+    let rad_ids = [88_u16, 48, 100, 74, 72];
+    // Dire includes Crystal Maiden(5) + Anti-Mage Persona(1) + Axe(2) + Medusa(94) + Storm(17)
+    let am_persona = &alt_atlas
+        .entries
+        .iter()
+        .find(|(id, _)| *id == HeroId(1))
+        .expect("AM persona must exist")
+        .1;
+
+    for (slot, &hid) in rad_ids.iter().enumerate() {
+        paint_contaminated_slot(
+            &mut frame_rgb,
+            rad_rects[slot],
+            &atlas.heroes[&HeroId(hid)],
+            player_colors[slot],
+            slot == 3, // Invoker has active spectator selection glow
+        );
+    }
+
+    let dire_ids = [5_u16, 1, 2, 94, 17];
+    for (slot, &hid) in dire_ids.iter().enumerate() {
+        let src: &[u8] = if hid == 1 {
+            am_persona
+        } else {
+            &atlas.heroes[&HeroId(hid)]
+        };
+        paint_contaminated_slot(
+            &mut frame_rgb,
+            dire_rects[slot],
+            src,
+            player_colors[5 + slot],
+            slot == 1, // AM Persona has active spectator glow
+        );
+    }
+
+    let mut adapter = VisionCaptureAdapter::new(
+        SingleFrameSource(Some(RgbFrame {
+            width: w,
+            height: h,
+            source_height: None,
+            rgb: frame_rgb,
+        })),
+        catalog,
+    );
+    adapter.set_ally_faction(Faction::Radiant);
+    adapter.set_capture_mode(VisionCaptureMode::Any);
+
+    let events = adapter.poll_events().expect("poll_events must succeed");
+    for (slot, &hid) in rad_ids.iter().enumerate() {
+        assert!(
+            events.contains(&truesight_core::ports::DraftEvent::PickDetected {
+                side: Side::Allies,
+                slot,
+                hero_id: HeroId(hid),
+                role: Some(truesight_core::domain::Role::ALL[slot]),
+            }),
+            "Radiant slot {slot} must detect HeroId({hid}) despite color strip & spectator glow; got {events:?}"
+        );
+    }
+    for (slot, &hid) in dire_ids.iter().enumerate() {
+        assert!(
+            events.contains(&truesight_core::ports::DraftEvent::PickDetected {
+                side: Side::Enemies,
+                slot,
+                hero_id: HeroId(hid),
+                role: Some(truesight_core::domain::Role::ALL[slot]),
+            }),
+            "Dire slot {slot} must detect HeroId({hid}) despite color strip & spectator glow; got {events:?}"
+        );
+    }
+}
+
+#[test]
+fn vision_dedup_resolves_two_slot_collision_via_next_best_and_drops_uniform_flood() {
+    use crate::vision::dedup_layout_candidates;
+
+    // Radiant slot 2 (Tusk 100) accidentally scores CM(5) #1 at 31.0 and Tusk(100) #2 at 32.5,
+    // while Dire slot 0 (CM 5) scores CM(5) #1 tighter at 21.0.
+    let mut rad_ranked: [Vec<(HeroId, f32, f32)>; 5] = std::array::from_fn(|_| Vec::new());
+    let mut dire_ranked: [Vec<(HeroId, f32, f32)>; 5] = std::array::from_fn(|_| Vec::new());
+    rad_ranked[0] = vec![(HeroId(88), 24.0, 28.0)];
+    rad_ranked[2] = vec![(HeroId(5), 31.0, 22.0), (HeroId(100), 32.5, 25.0)];
+    dire_ranked[0] = vec![(HeroId(5), 21.0, 26.0), (HeroId(64), 29.0, 20.0)];
+    // Radiant slot 4 also collides on HeroId(88) with no unallocated fallback -> drops to None.
+    rad_ranked[4] = vec![(HeroId(88), 28.0, 22.0)];
+
+    let (rad, dire) = dedup_layout_candidates(&rad_ranked, &dire_ranked);
+    assert_eq!(rad[0].map(|c| c.0), Some(HeroId(88)));
+    assert_eq!(dire[0].map(|c| c.0), Some(HeroId(5)));
+    assert_eq!(
+        rad[2].map(|c| c.0),
+        Some(HeroId(100)),
+        "Colliding slot must fall back to next-best unallocated candidate within threshold"
+    );
+    assert_eq!(
+        rad[4], None,
+        "Colliding slot with no unallocated fallback must remain None"
+    );
+
+    // Uniform-background flood guard: >= 3 slots sharing top-1 hero must drop all flooded slots.
+    let mut flood_rad: [Vec<(HeroId, f32, f32)>; 5] = std::array::from_fn(|_| Vec::new());
+    let flood_dire: [Vec<(HeroId, f32, f32)>; 5] = std::array::from_fn(|_| Vec::new());
+    flood_rad[0] = vec![(HeroId(61), 25.0, 18.0), (HeroId(14), 28.0, 18.0)];
+    flood_rad[1] = vec![(HeroId(61), 26.0, 18.0), (HeroId(74), 29.0, 18.0)];
+    flood_rad[2] = vec![(HeroId(61), 27.0, 18.0), (HeroId(88), 30.0, 18.0)];
+    flood_rad[3] = vec![(HeroId(48), 22.0, 24.0)];
+
+    let (f_rad, _) = dedup_layout_candidates(&flood_rad, &flood_dire);
+    assert_eq!(f_rad[0], None);
+    assert_eq!(f_rad[1], None);
+    assert_eq!(f_rad[2], None);
+    assert_eq!(f_rad[3].map(|c| c.0), Some(HeroId(48)));
+}
+
+#[test]
+fn vision_layout_selection_scores_unique_top1_before_applying_collision_fallbacks() {
+    use crate::vision::{TopBarLayout, select_best_layout_candidates};
+
+    // Layout A (noisy PickPhase): two duplicate top-1 pairs retain 20 and 24 (score 27.0),
+    // whereas recovery fallbacks at 23 and 25 would inflate it to 50.0.
+    let mut noisy_rad: [Vec<(HeroId, f32, f32)>; 5] = std::array::from_fn(|_| Vec::new());
+    let noisy_dire: [Vec<(HeroId, f32, f32)>; 5] = std::array::from_fn(|_| Vec::new());
+    noisy_rad[0] = vec![(HeroId(1), 20.0, 20.0), (HeroId(2), 23.0, 20.0)];
+    noisy_rad[1] = vec![(HeroId(1), 22.0, 20.0), (HeroId(2), 23.0, 20.0)];
+    noisy_rad[2] = vec![(HeroId(3), 24.0, 20.0), (HeroId(4), 25.0, 20.0)];
+    noisy_rad[3] = vec![(HeroId(3), 25.0, 20.0), (HeroId(4), 25.0, 20.0)];
+
+    // Layout B (clean InGame): two unique top-1 matches at diff 15.0 (score 41.0 > 27.0).
+    let mut clean_rad: [Vec<(HeroId, f32, f32)>; 5] = std::array::from_fn(|_| Vec::new());
+    let clean_dire: [Vec<(HeroId, f32, f32)>; 5] = std::array::from_fn(|_| Vec::new());
+    clean_rad[0] = vec![(HeroId(88), 15.0, 25.0)];
+    clean_rad[1] = vec![(HeroId(48), 15.0, 25.0)];
+
+    let (selected, sel_rad, _) = select_best_layout_candidates(&[
+        (
+            TopBarLayout::PickPhase,
+            noisy_rad.clone(),
+            noisy_dire.clone(),
+        ),
+        (TopBarLayout::InGame, clean_rad, clean_dire),
+    ])
+    .expect("clean layout must win on unique top-1 evidence");
+    assert_eq!(selected, TopBarLayout::InGame);
+    assert_eq!(sel_rad[0].map(|c| c.0), Some(HeroId(88)));
+    assert_eq!(sel_rad[1].map(|c| c.0), Some(HeroId(48)));
+
+    // When the colliding layout itself wins (no cleaner layout), collision recovery still runs on it.
+    let (selected_only, rec_rad, _) =
+        select_best_layout_candidates(&[(TopBarLayout::InGame, noisy_rad, noisy_dire)])
+            .expect("selected winning layout must apply collision recovery");
+    assert_eq!(selected_only, TopBarLayout::InGame);
+    assert_eq!(rec_rad[0].map(|c| c.0), Some(HeroId(1)));
+    assert_eq!(rec_rad[1].map(|c| c.0), Some(HeroId(2)));
+    assert_eq!(rec_rad[2].map(|c| c.0), Some(HeroId(3)));
+    assert_eq!(rec_rad[3].map(|c| c.0), Some(HeroId(4)));
+}
