@@ -27,8 +27,8 @@ use truesight_adapters::vision::BoundedVisionWorker;
 use truesight_core::domain::{Role, Side, TEAM_SIZE};
 use truesight_core::math::DraftAnalysis5v5;
 
-const MIN_UNSCROLLED_W: f32 = 940.0;
-const MIN_UNSCROLLED_H: f32 = 660.0;
+const MIN_UNSCROLLED_W: f32 = 880.0;
+const MIN_UNSCROLLED_H: f32 = 640.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MatrixTab {
@@ -176,6 +176,7 @@ pub struct SlotTelemetry {
     pub row: Rect,
     pub portrait: Rect,
     pub mid: Rect,
+    pub mid_content_bottom: f32,
     pub net: Rect,
     pub clear: Option<Rect>,
 }
@@ -186,6 +187,7 @@ impl Default for SlotTelemetry {
             row: Rect::NOTHING,
             portrait: Rect::NOTHING,
             mid: Rect::NOTHING,
+            mid_content_bottom: 0.0,
             net: Rect::NOTHING,
             clear: None,
         }
@@ -201,6 +203,7 @@ pub struct LayoutRects {
     pub bracket_bar: Rect,
     pub options_window: Option<Rect>,
     pub options_demo_button: Option<Rect>,
+    pub account_window: Option<Rect>,
     pub allies: Rect,
     pub oracle: Rect,
     pub enemies: Rect,
@@ -242,6 +245,7 @@ impl TrueSightGuiApp {
             bracket_bar: Rect::NOTHING,
             options_window: None,
             options_demo_button: None,
+            account_window: None,
             allies: Rect::NOTHING,
             oracle: Rect::NOTHING,
             enemies: Rect::NOTHING,
@@ -273,13 +277,15 @@ impl TrueSightGuiApp {
             .show(ctx, |ui| {
                 let avail_w = ui.available_width();
                 let avail_h = ui.available_height();
-                let needs_scroll = avail_w < MIN_UNSCROLLED_W || avail_h < MIN_UNSCROLLED_H;
+                let needs_h_scroll = avail_w < MIN_UNSCROLLED_W;
+                let needs_v_scroll = avail_h < MIN_UNSCROLLED_H;
+                let needs_scroll = needs_h_scroll || needs_v_scroll;
                 rects.scrollable_fallback = needs_scroll;
 
                 let layout_w = avail_w.max(MIN_UNSCROLLED_W);
                 let layout_h = avail_h.max(MIN_UNSCROLLED_H);
                 if needs_scroll {
-                    egui::ScrollArea::both()
+                    egui::ScrollArea::new([needs_h_scroll, needs_v_scroll])
                         .id_salt("truesight_viewport_fallback_scroll")
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
@@ -311,10 +317,11 @@ impl TrueSightGuiApp {
 
         if self.account_editor_open {
             let mut close_modal = false;
-            egui::Window::new("STEAM ACCOUNT LINK")
+            let acct_resp = egui::Window::new("STEAM ACCOUNT LINK")
                 .collapsible(false)
                 .resizable(false)
-                .anchor(Align2::CENTER_TOP, vec2(0.0, 62.0))
+                .anchor(Align2::LEFT_BOTTOM, vec2(12.0, -12.0))
+                .constrain_to(ctx.screen_rect())
                 .show(ctx, |ui| {
                     ui.label(
                         RichText::new(
@@ -359,6 +366,7 @@ impl TrueSightGuiApp {
             if close_modal {
                 self.account_editor_open = false;
             }
+            rects.account_window = acct_resp.map(|r| r.response.rect);
         }
 
         rects
@@ -419,8 +427,8 @@ impl TrueSightGuiApp {
         ui.add_space(if compact_h { 8.0 } else { 10.0 });
 
         // 3. Bottom Row: Suggested Picks (flex) | 5v5 Matrix / Comp (square-coupled)
-        let bottom_h = ui.available_height().max(240.0);
-        let ideal_cell = ((bottom_h - 122.0) / 7.0).floor().clamp(22.0, 56.0);
+        let bottom_h = ui.available_height().max(220.0);
+        let ideal_cell = ((bottom_h - 122.0) / 7.0).floor().clamp(20.0, 56.0);
         let matrix_min_w = if total_w < 1100.0 { 276.0 } else { 360.0 };
         let matrix_max_w = (total_w * 0.36).max(matrix_min_w);
         let matrix_w = (7.0 * ideal_cell + 6.0 * 4.0 + 24.0).clamp(matrix_min_w, matrix_max_w);
@@ -503,7 +511,7 @@ impl eframe::App for TrueSightGuiApp {
 pub(super) fn build_viewport_builder() -> egui::ViewportBuilder {
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1180.0, 700.0])
-        .with_min_inner_size([640.0, 440.0])
+        .with_min_inner_size([MIN_UNSCROLLED_W + 20.0, 500.0])
         .with_app_id("truesight-dota")
         .with_title("TrueSight Dota — 5v5 Live Draft Oracle");
     if let Some(icon) = theme::build_gem_window_icon() {

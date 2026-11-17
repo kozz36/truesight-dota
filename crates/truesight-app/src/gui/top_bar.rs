@@ -107,6 +107,9 @@ impl TrueSightGuiApp {
 
     fn render_bracket_buttons(&mut self, ui: &mut egui::Ui, compact: bool, reverse: bool) -> Rect {
         ui.spacing_mut().item_spacing.x = 1.0;
+        if compact {
+            ui.spacing_mut().button_padding = vec2(3.5, 2.0);
+        }
         let mut union_rect = Rect::NOTHING;
         let brackets: [Bracket; 8] = if reverse {
             let mut arr = Bracket::ALL;
@@ -233,19 +236,22 @@ impl TrueSightGuiApp {
             let avail_w = ui.available_width();
             let compact = avail_w < 1120.0;
 
-            if avail_w >= 860.0 {
+            if avail_w >= 910.0 {
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = if compact { 6.0 } else { 8.0 };
+                    ui.spacing_mut().item_spacing.x = if compact { 4.0 } else { 8.0 };
+                    if compact {
+                        ui.spacing_mut().button_padding = vec2(4.0, 2.0);
+                    }
                     self.render_brand_block(ui, compact);
                     self.render_faction_button(ui, compact);
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.spacing_mut().item_spacing.x = if compact { 5.0 } else { 6.0 };
+                        ui.spacing_mut().item_spacing.x = if compact { 4.0 } else { 6.0 };
                         reset_btn_rect = self.render_reset_button(ui, compact);
                         options_btn_rect = self.render_options_button(ui, compact);
-                        ui.add_space(if compact { 4.0 } else { 6.0 });
+                        ui.add_space(if compact { 2.0 } else { 6.0 });
                         Self::paint_top_bar_separator(ui);
-                        ui.add_space(if compact { 4.0 } else { 6.0 });
+                        ui.add_space(if compact { 2.0 } else { 6.0 });
                         bracket_bar_rect = self.render_bracket_buttons(ui, compact, true);
                     });
                 });
@@ -294,7 +300,8 @@ impl TrueSightGuiApp {
         let resp = egui::Window::new("OPTIONS · DEV & TELEMETRY")
             .collapsible(false)
             .resizable(false)
-            .anchor(Align2::RIGHT_TOP, vec2(-12.0, 56.0))
+            .anchor(Align2::RIGHT_BOTTOM, vec2(-12.0, -12.0))
+            .constrain_to(ctx.screen_rect())
             .default_width(max_opt_w)
             .max_width(max_opt_w)
             .show(ctx, |ui| {

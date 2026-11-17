@@ -43,8 +43,8 @@ impl TrueSightGuiApp {
             let card_w = ui.available_width();
             let compact_w = card_w < 305.0;
             let compact_h = ui.available_height() < 340.0;
-            let slot_h = if compact_h { 50.0 } else { 56.0 };
-            let slot_gap = if compact_h { 6.0 } else { 8.0 };
+            let slot_h = if compact_h { 52.0 } else { 56.0 };
+            let slot_gap = if compact_h { 5.0 } else { 8.0 };
             let portrait_sz = if compact_w {
                 vec2(48.0, 27.0)
             } else if compact_h {
@@ -243,15 +243,16 @@ impl TrueSightGuiApp {
                 let mid_rect = Rect::from_min_max(
                     pos2(
                         portrait_rect.max.x + if compact_w { 6.0 } else { 8.0 },
-                        r.min.y + 4.0,
+                        r.min.y + 2.0,
                     ),
                     pos2(
                         (net_rect.min.x - if compact_w { 4.0 } else { 6.0 })
                             .max(portrait_rect.max.x + 24.0),
-                        r.max.y - 4.0,
+                        r.max.y - 2.0,
                     ),
                 );
                 let tight_mid = mid_rect.width() < 165.0;
+                let mid_content_bottom;
                 {
                     let mut child = ui.new_child(
                         egui::UiBuilder::new()
@@ -261,8 +262,8 @@ impl TrueSightGuiApp {
                     let ui = &mut child;
                     ui.set_clip_rect(mid_rect);
                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                    ui.spacing_mut().interact_size.y = 12.0;
-                    ui.spacing_mut().item_spacing.y = 1.5;
+                    ui.spacing_mut().interact_size.y = 11.0;
+                    ui.spacing_mut().item_spacing.y = 0.5;
                     let badge_font = if tight_mid { 7.0 } else { 8.5 };
                     let badge_pad = if tight_mid { 1 } else { 4 };
                     if let Some(pick) = current_pick {
@@ -431,12 +432,14 @@ impl TrueSightGuiApp {
                                 .color(P_MUTED),
                         );
                     }
+                    mid_content_bottom = ui.min_rect().max.y;
                 }
 
                 slots_out[slot] = SlotTelemetry {
                     row: r,
                     portrait: portrait_rect,
                     mid: mid_rect,
+                    mid_content_bottom,
                     net: net_rect,
                     clear: clear_rect_opt,
                 };
