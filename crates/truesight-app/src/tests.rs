@@ -494,6 +494,222 @@ fn draft_reset_and_new_match_transition_reset_vision_worker_without_mid_draft_wi
     assert!(!session.ally_locked_slots[0]);
 }
 
+#[test]
+fn vision_replaces_hero_in_same_portrait_slot() {
+    use truesight_adapters::vision::{
+        HeroVisionCatalog, RgbFrame, ScreenFrameSource, VisionCaptureAdapter,
+        compute_topbar_slot_rects, parse_hero_atlas,
+    };
+    use truesight_core::domain::HeroId;
+    use truesight_core::ports::{DraftEventSource, PortError};
+
+    struct Frames(std::collections::VecDeque<RgbFrame>);
+    impl ScreenFrameSource for Frames {
+        fn capture_frame(&mut self) -> Result<Option<RgbFrame>, PortError> {
+            Ok(self.0.pop_front())
+        }
+    }
+    let atlas = parse_hero_atlas().unwrap();
+    let frame = |hero| {
+        let (w, h) = (1920, 1080);
+        let mut rgb = vec![0; w * h * 3];
+        let (rects, _) = compute_topbar_slot_rects(w, h);
+        for (slot, id) in [(0, hero), (1, 2)] {
+            let rect = rects[slot];
+            let portrait = &atlas.heroes[&HeroId(id)];
+            for y in 0..rect.height {
+                for x in 0..rect.width {
+                    let src = ((y * atlas.hero_height / rect.height) * atlas.hero_width
+                        + x * atlas.hero_width / rect.width)
+                        * 3;
+                    let dst = ((rect.y + y) * w + rect.x + x) * 3;
+                    rgb[dst..dst + 3].copy_from_slice(&portrait[src..src + 3]);
+                }
+            }
+        }
+        RgbFrame::new(w, h, rgb)
+    };
+    let luna = frame(48);
+    let nyx = frame(88);
+    let blank = RgbFrame::new(1920, 1080, vec![0; 1920 * 1080 * 3]);
+    let mut adapter = VisionCaptureAdapter::new(
+        Frames([luna.clone(), luna, blank, nyx.clone(), nyx.clone(), nyx].into()),
+        HeroVisionCatalog::from_embedded().unwrap(),
+    );
+    let mut session = AppSession::new().unwrap();
+    for _ in 0..4 {
+        session.apply_vision_events(adapter.poll_events().unwrap());
+        assert!(
+            session
+                .draft
+                .allies
+                .iter()
+                .flatten()
+                .any(|p| p.hero_id == HeroId(48))
+        );
+        assert_eq!(session.draft.allies.iter().flatten().count(), 2);
+    }
+    session.apply_vision_events(adapter.poll_events().unwrap());
+    let ids = || {
+        session
+            .draft
+            .allies
+            .iter()
+            .flatten()
+            .map(|p| p.hero_id)
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        !ids().contains(&HeroId(48)),
+        "Confirmed replacement must retire stale Luna"
+    );
+    assert!(ids().contains(&HeroId(88)));
+    assert!(ids().contains(&HeroId(2)));
+    assert_eq!(ids().len(), 2);
+    let before = session.draft;
+    session.apply_vision_events(adapter.poll_events().unwrap());
+    assert_eq!(session.draft.allies, before.allies);
+    session.reset_draft();
+    adapter.reset_state();
+    assert_eq!(session.draft.allies.iter().flatten().count(), 0);
+}
+
+fn visual_pick(
+    side: truesight_core::domain::Side,
+    slot: usize,
+    id: u16,
+) -> truesight_core::ports::DraftEvent {
+    truesight_core::ports::DraftEvent::PickDetected {
+        side,
+        slot,
+        hero_id: truesight_core::domain::HeroId(id),
+        role: None,
+    }
+}
+
+#[test]
+fn vision_reconciles_full_drafts_movements_faction_and_reset() {
+    use truesight_core::domain::{Faction, HeroId, Side};
+    let mut session = AppSession::new().unwrap();
+    let heroes = [48, 2, 5, 13, 27];
+    session.apply_vision_events(
+        heroes
+            .into_iter()
+            .enumerate()
+            .map(|(s, id)| visual_pick(Side::Allies, s, id))
+            .collect(),
+    );
+    // Full-team simultaneous reordering must not temporarily delete moved heroes.
+    session.apply_vision_events(
+        [2, 48, 5, 13, 27]
+            .into_iter()
+            .enumerate()
+            .map(|(s, id)| visual_pick(Side::Allies, s, id))
+            .collect(),
+    );
+    assert_eq!(session.draft.allies.iter().flatten().count(), 5);
+    for id in heroes {
+        assert!(
+            session
+                .draft
+                .allies
+                .iter()
+                .flatten()
+                .any(|p| p.hero_id == HeroId(id))
+        );
+    }
+    session.set_ally_faction(Faction::Dire);
+    session.apply_vision_events(vec![visual_pick(Side::Enemies, 1, 88)]);
+    assert_eq!(session.draft.enemies.iter().flatten().count(), 5);
+    assert!(
+        !session
+            .draft
+            .enemies
+            .iter()
+            .flatten()
+            .any(|p| p.hero_id == HeroId(48))
+    );
+    assert!(
+        session
+            .draft
+            .enemies
+            .iter()
+            .flatten()
+            .any(|p| p.hero_id == HeroId(88))
+    );
+    let before = session.draft;
+    session.apply_vision_events(vec![visual_pick(Side::Enemies, 5, 1)]);
+    session.apply_vision_events(vec![]);
+    assert_eq!(session.draft.enemies, before.enemies);
+    session.reset_draft();
+    session.apply_vision_events(vec![visual_pick(Side::Enemies, 1, 48)]);
+    assert_eq!(session.draft.enemies.iter().flatten().count(), 1);
+    assert_eq!(
+        session
+            .draft
+            .enemies
+            .iter()
+            .flatten()
+            .next()
+            .unwrap()
+            .hero_id,
+        HeroId(48)
+    );
+}
+
+#[test]
+fn vision_replacement_protects_manual_edits_dismissals_and_gsi_authority() {
+    use truesight_core::domain::{HeroId, Side};
+    use truesight_core::ports::DraftEvent;
+    let mut session = AppSession::new().unwrap();
+    session.apply_vision_events(vec![visual_pick(Side::Allies, 0, 48)]);
+    session.set_slot_manual(Side::Allies, 4, HeroId(48));
+    session.apply_vision_events(vec![visual_pick(Side::Allies, 0, 88)]);
+    assert_eq!(session.draft.allies[4].unwrap().hero_id, HeroId(48));
+    session.clear_slot_manual(Side::Allies, 4);
+    session.apply_vision_events(vec![visual_pick(Side::Allies, 0, 48)]);
+    assert!(
+        !session
+            .draft
+            .allies
+            .iter()
+            .flatten()
+            .any(|p| p.hero_id == HeroId(48))
+    );
+    session.reset_draft();
+    session.apply_vision_events(vec![visual_pick(Side::Allies, 0, 48)]);
+    session.apply_event(DraftEvent::LocalPlayerHeroDetected {
+        hero_slug: "npc_dota_hero_luna".into(),
+    });
+    session.apply_vision_events(vec![visual_pick(Side::Allies, 0, 88)]);
+    assert_eq!(session.local_player_hero, Some(HeroId(48)));
+    assert!(
+        session
+            .draft
+            .allies
+            .iter()
+            .flatten()
+            .any(|p| p.hero_id == HeroId(48))
+    );
+    session.reset_draft();
+    // A shared GSI PickDetected is not a visual slot overwrite and relinquishes
+    // visual ownership even if it confirms an already present automatic hero.
+    session.apply_vision_events(vec![visual_pick(Side::Allies, 0, 48)]);
+    session.apply_event(visual_pick(Side::Allies, 0, 48));
+    session.apply_event(visual_pick(Side::Allies, 0, 2));
+    session.apply_vision_events(vec![visual_pick(Side::Allies, 0, 88)]);
+    for id in [48, 2, 88] {
+        assert!(
+            session
+                .draft
+                .allies
+                .iter()
+                .flatten()
+                .any(|p| p.hero_id == HeroId(id))
+        );
+    }
+}
+
 #[derive(Clone, Default)]
 struct SharedBuffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
