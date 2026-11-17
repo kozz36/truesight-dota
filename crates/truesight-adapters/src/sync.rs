@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
-use truesight_core::domain::HeroId;
+use truesight_core::domain::{Bracket, HeroId};
 use truesight_core::ports::PortError;
 
 /// OpenDota `/api/heroStats` refreshes its rolling daily window once per 24h UTC.
@@ -23,6 +23,34 @@ pub enum AccountLinkConfig {
     Auto,
     Explicit(u64),
     Unlinked,
+}
+
+/// Persisted bracket selection policy stored in `config.toml`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BracketConfig {
+    /// Follow OpenDota `/api/players/{id}` `rank_tier` when linked, defaulting to `Legend`.
+    #[default]
+    Auto,
+    /// Preserve the user's explicit medal selection across restarts and account syncs.
+    Explicit(Bracket),
+}
+
+/// Unified user configuration loaded from and saved to `config.toml`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppConfig {
+    /// Persisted Steam account linking mode.
+    pub account_link: AccountLinkConfig,
+    /// Persisted medal bracket selection mode.
+    pub bracket: BracketConfig,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            account_link: AccountLinkConfig::Auto,
+            bracket: BracketConfig::Auto,
+        }
+    }
 }
 
 /// Converts either a Steam64 (`7656119...`) or Steam32 (`u32`) identifier into a valid Steam32 ID.
@@ -177,63 +205,110 @@ pub fn resolve_steam32_account_id(
         .or_else(|| vdf_content.and_then(parse_loginusers_vdf))
 }
 
-fn config_file_path() -> PathBuf {
+pub fn config_file_path() -> PathBuf {
     resolve_config_file_path_for(std::env::consts::OS, &PlatformEnv::from_process())
 }
 
-pub fn load_account_config() -> AccountLinkConfig {
-    if let Ok(env_val) = std::env::var("TRUESIGHT_STEAM32_ID") {
-        let trimmed = env_val.trim();
-        if trimmed.eq_ignore_ascii_case("none") || trimmed.eq_ignore_ascii_case("unlinked") {
-            return AccountLinkConfig::Unlinked;
-        }
-        if let Ok(raw) = trimmed.parse::<u64>() {
-            if let Some(id) = normalize_steam32_id(raw) {
-                return AccountLinkConfig::Explicit(id);
-            }
-        }
-    }
-
-    let Ok(content) = fs::read_to_string(config_file_path()) else {
-        return AccountLinkConfig::Auto;
+/// Loads unified `AppConfig` (`account_id` + `bracket`) from an explicit `config.toml` path.
+pub fn load_app_config_from(path: &Path) -> AppConfig {
+    let mut cfg = AppConfig::default();
+    let Ok(content) = fs::read_to_string(path) else {
+        return cfg;
     };
     for line in content.lines() {
         let line = line.trim();
         if line.starts_with('#') || line.is_empty() {
             continue;
         }
-        if let Some((k, v)) = line.split_once('=') {
-            if k.trim() == "account_id" {
-                let cleaned = v.trim().trim_matches('"');
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        let key = k.trim();
+        let cleaned = v.trim().trim_matches('"');
+        match key {
+            "account_id" => {
                 if cleaned.eq_ignore_ascii_case("none") || cleaned.eq_ignore_ascii_case("unlinked")
                 {
-                    return AccountLinkConfig::Unlinked;
-                }
-                if cleaned.eq_ignore_ascii_case("auto") {
-                    return AccountLinkConfig::Auto;
-                }
-                if let Ok(raw) = cleaned.parse::<u64>() {
+                    cfg.account_link = AccountLinkConfig::Unlinked;
+                } else if cleaned.eq_ignore_ascii_case("auto") {
+                    cfg.account_link = AccountLinkConfig::Auto;
+                } else if let Ok(raw) = cleaned.parse::<u64>() {
                     if let Some(id) = normalize_steam32_id(raw) {
-                        return AccountLinkConfig::Explicit(id);
+                        cfg.account_link = AccountLinkConfig::Explicit(id);
                     }
                 }
             }
+            "bracket" => {
+                if cleaned.eq_ignore_ascii_case("auto") {
+                    cfg.bracket = BracketConfig::Auto;
+                } else if let Some(b) = Bracket::parse_label(cleaned) {
+                    cfg.bracket = BracketConfig::Explicit(b);
+                }
+            }
+            _ => {}
         }
     }
-    AccountLinkConfig::Auto
+    cfg
 }
 
-pub fn save_account_config(mode: AccountLinkConfig) -> Result<(), PortError> {
-    let path = config_file_path();
+/// Loads unified `AppConfig` from the OS `config.toml`, honoring `TRUESIGHT_STEAM32_ID`.
+pub fn load_app_config() -> AppConfig {
+    let mut cfg = load_app_config_from(&config_file_path());
+    if let Ok(env_val) = std::env::var("TRUESIGHT_STEAM32_ID") {
+        let trimmed = env_val.trim();
+        if trimmed.eq_ignore_ascii_case("none") || trimmed.eq_ignore_ascii_case("unlinked") {
+            cfg.account_link = AccountLinkConfig::Unlinked;
+        } else if let Ok(raw) = trimmed.parse::<u64>() {
+            if let Some(id) = normalize_steam32_id(raw) {
+                cfg.account_link = AccountLinkConfig::Explicit(id);
+            }
+        }
+    }
+    cfg
+}
+
+pub fn load_account_config() -> AccountLinkConfig {
+    load_app_config().account_link
+}
+
+fn save_app_config_to(path: &Path, cfg: AppConfig) -> Result<(), PortError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| PortError(e.to_string()))?;
     }
-    let val = match mode {
+    let acct_val = match cfg.account_link {
         AccountLinkConfig::Auto => "\"auto\"".to_string(),
         AccountLinkConfig::Unlinked => "\"none\"".to_string(),
         AccountLinkConfig::Explicit(id) => id.to_string(),
     };
-    fs::write(path, format!("account_id = {val}\n")).map_err(|e| PortError(e.to_string()))
+    let bracket_val = match cfg.bracket {
+        BracketConfig::Auto => "auto".to_string(),
+        BracketConfig::Explicit(b) => b.label().to_ascii_lowercase(),
+    };
+    let body = format!("account_id = {acct_val}\nbracket = \"{bracket_val}\"\n");
+    atomic_write_file(path, &body)
+}
+
+/// Updates `account_id` in `path` while preserving any persisted `bracket` selection.
+pub fn save_account_config_to(path: &Path, mode: AccountLinkConfig) -> Result<(), PortError> {
+    let mut cfg = load_app_config_from(path);
+    cfg.account_link = mode;
+    save_app_config_to(path, cfg)
+}
+
+pub fn save_account_config(mode: AccountLinkConfig) -> Result<(), PortError> {
+    save_account_config_to(&config_file_path(), mode)
+}
+
+/// Updates `bracket` in `path` while preserving any persisted `account_id` setting.
+pub fn save_bracket_config_to(path: &Path, mode: BracketConfig) -> Result<(), PortError> {
+    let mut cfg = load_app_config_from(path);
+    cfg.bracket = mode;
+    save_app_config_to(path, cfg)
+}
+
+/// Updates `bracket` in the default OS `config.toml` while preserving `account_id`.
+pub fn save_bracket_config(mode: BracketConfig) -> Result<(), PortError> {
+    save_bracket_config_to(&config_file_path(), mode)
 }
 
 pub fn detect_local_steam_vdf() -> Option<u64> {
@@ -411,6 +486,40 @@ impl LocalCacheManager {
         self.player_dir().map(|d| d.join("player_matches.json"))
     }
 
+    fn player_profile_json_path(&self) -> Option<PathBuf> {
+        self.player_dir().map(|d| d.join("player_profile.json"))
+    }
+
+    /// Reads the linked player's cached OpenDota profile (`player_profile.json`) and maps
+    /// `rank_tier` to a `Bracket`, returning `None` when absent or uncalibrated.
+    pub fn read_cached_player_bracket(&self) -> Option<Bracket> {
+        let p_path = self.player_profile_json_path()?;
+        let content = fs::read_to_string(p_path).ok()?;
+        parse_player_rank_tier_json(&content)
+    }
+
+    /// Persists an OpenDota `/api/players/{id}` JSON object into the linked player's cache.
+    pub fn write_cached_profile_json(&self, profile_json: &str) -> Result<(), PortError> {
+        let trimmed = profile_json.trim();
+        if !(trimmed.starts_with('{') && trimmed.ends_with('}')) {
+            return Err(PortError(
+                "Invalid or truncated player profile JSON payload".into(),
+            ));
+        }
+        let Some(p_dir) = self.player_dir() else {
+            return Err(PortError(
+                "Cannot cache player profile without a linked account".into(),
+            ));
+        };
+        let Some(prof_path) = self.player_profile_json_path() else {
+            return Err(PortError(
+                "Cannot resolve player profile cache path without a linked account".into(),
+            ));
+        };
+        fs::create_dir_all(&p_dir).map_err(|e| PortError(e.to_string()))?;
+        atomic_write_file(&prof_path, profile_json)
+    }
+
     pub fn read_timestamps(&self) -> (Option<u64>, Option<u64>) {
         let mut meta_ts = None;
         if let Ok(content) = fs::read_to_string(self.metadata_path()) {
@@ -461,11 +570,16 @@ impl LocalCacheManager {
         stratz_json: Option<&str>,
         player_json: Option<&str>,
         player_matches_json: Option<&str>,
+        player_profile_json: Option<&str>,
         now_unix: u64,
     ) -> Result<(), PortError> {
         let is_arr = |s: &str| {
             let t = s.trim();
             t.starts_with('[') && t.ends_with(']')
+        };
+        let is_obj = |s: &str| {
+            let t = s.trim();
+            t.starts_with('{') && t.ends_with('}')
         };
         if let Some(m) = meta_json.filter(|m| !is_arr(m) || parse_hero_stats_json(m).is_empty()) {
             let _ = m;
@@ -490,6 +604,11 @@ impl LocalCacheManager {
         if player_matches_json.is_some_and(|pm| self.player_account_id.is_none() || !is_arr(pm)) {
             return Err(PortError(
                 "Invalid or truncated player matches JSON payload".into(),
+            ));
+        }
+        if player_profile_json.is_some_and(|pp| self.player_account_id.is_none() || !is_obj(pp)) {
+            return Err(PortError(
+                "Invalid or truncated player profile JSON payload".into(),
             ));
         }
 
@@ -518,16 +637,20 @@ impl LocalCacheManager {
             state.latest_committed_meta_gen =
                 state.latest_committed_meta_gen.max(self.sync_generation);
         }
-        if player_json.is_some() || player_matches_json.is_some() {
-            if let (Some(p_dir), Some(p_path), Some(pm_meta), Some(m_path)) = (
+        if player_json.is_some() || player_matches_json.is_some() || player_profile_json.is_some() {
+            if let (Some(p_dir), Some(p_path), Some(pm_meta), Some(m_path), Some(prof_path)) = (
                 self.player_dir(),
                 self.player_json_path(),
                 self.player_metadata_path(),
                 self.player_matches_json_path(),
+                self.player_profile_json_path(),
             ) {
                 fs::create_dir_all(&p_dir).map_err(|e| PortError(e.to_string()))?;
                 if let Some(pm_body) = player_matches_json {
                     atomic_write_file(&m_path, pm_body)?;
+                }
+                if let Some(prof_body) = player_profile_json {
+                    atomic_write_file(&prof_path, prof_body)?;
                 }
                 if let Some(p_body) = player_json {
                     atomic_write_file(&p_path, p_body)?;
@@ -544,7 +667,7 @@ impl LocalCacheManager {
         player_json: Option<&str>,
         now_unix: u64,
     ) -> Result<(), PortError> {
-        self.publish_staged_cache(meta_json, None, player_json, None, now_unix)
+        self.publish_staged_cache(meta_json, None, player_json, None, None, now_unix)
     }
 
     /// Synchronizes stale or forced endpoints from OpenDota (and optional STRATZ token) with a 6s timeout.
@@ -563,8 +686,17 @@ impl LocalCacheManager {
             let t = s.trim();
             t.starts_with('[') && t.ends_with(']')
         };
-        let (mut fetched_meta, mut fetched_stratz, mut fetched_player, mut fetched_matches) =
-            (None, None, None, None);
+        let is_obj = |s: &str| {
+            let t = s.trim();
+            t.starts_with('{') && t.ends_with('}')
+        };
+        let (
+            mut fetched_meta,
+            mut fetched_stratz,
+            mut fetched_player,
+            mut fetched_matches,
+            mut fetched_profile,
+        ) = (None, None, None, None, None);
         let mut updated_parts = Vec::new();
 
         if need_meta {
@@ -607,6 +739,16 @@ impl LocalCacheManager {
                         fetched_matches = Some(mb);
                     }
                 }
+                if !self.is_cancelled() {
+                    if let Some(pb) = fetch_url(&format!(
+                        "https://api.opendota.com/api/players/{account_id}"
+                    ))
+                    .ok()
+                    .filter(|p| is_obj(p))
+                    {
+                        fetched_profile = Some(pb);
+                    }
+                }
             }
         }
 
@@ -615,6 +757,7 @@ impl LocalCacheManager {
             fetched_stratz.as_deref(),
             fetched_player.as_deref(),
             fetched_matches.as_deref(),
+            fetched_profile.as_deref(),
             now,
         )?;
         if updated_parts.is_empty() {
@@ -759,6 +902,68 @@ fn format_age(age_secs: u64) -> String {
 
 fn fetch_url(url: &str) -> Result<String, PortError> {
     run_curl(url, &[], &format!("HTTP fetch for {url}"))
+}
+
+/// Extracts `rank_tier` from an OpenDota `/api/players/{account_id}` JSON object and maps it
+/// to a `Bracket`, returning `None` when uncalibrated (`null` / `0`) or out of range.
+pub fn parse_player_rank_tier_json(json: &str) -> Option<Bracket> {
+    let trimmed = json.trim();
+    if !(trimmed.starts_with('{') && trimmed.ends_with('}')) {
+        return None;
+    }
+    let tier = extract_top_level_u64_field(trimmed, "rank_tier")?;
+    let tier_u8 = u8::try_from(tier).ok()?;
+    Bracket::from_rank_tier(tier_u8)
+}
+
+fn extract_top_level_u64_field(json: &str, target_key: &str) -> Option<u64> {
+    let bytes = json.as_bytes();
+    let mut i = 0;
+    let mut depth = 0_usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' => {
+                depth += 1;
+                i += 1;
+            }
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                i += 1;
+            }
+            b'"' => {
+                let start = i + 1;
+                i += 1;
+                let mut escaped = false;
+                while i < bytes.len() {
+                    let b = bytes[i];
+                    if escaped {
+                        escaped = false;
+                    } else if b == b'\\' {
+                        escaped = true;
+                    } else if b == b'"' {
+                        break;
+                    }
+                    i += 1;
+                }
+                let end = i;
+                i += 1;
+                if depth == 1 && json.get(start..end) == Some(target_key) {
+                    let mut rest = json[i..].trim_start();
+                    if let Some(after_colon) = rest.strip_prefix(':') {
+                        rest = after_colon.trim_start();
+                        let digits: String = rest
+                            .chars()
+                            .skip_while(|c| *c == '"')
+                            .take_while(|c| c.is_ascii_digit())
+                            .collect();
+                        return digits.parse::<u64>().ok();
+                    }
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    None
 }
 
 /// Lightweight parser for OpenDota `/api/players/{id}/heroes` JSON array.

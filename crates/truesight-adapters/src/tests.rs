@@ -3675,3 +3675,86 @@ fn windows_native_powershell_utf8_roundtrip_preserves_non_ascii_steampath() {
         Some(Path::new(expected_path))
     );
 }
+
+#[test]
+fn player_rank_tier_parser_and_app_config_preserve_bracket_and_account() {
+    use crate::sync::{
+        AccountLinkConfig, AppConfig, BracketConfig, LocalCacheManager, load_app_config_from,
+        parse_player_rank_tier_json, save_account_config_to, save_bracket_config_to,
+    };
+    use truesight_core::domain::Bracket;
+
+    // 1. OpenDota /api/players/{id} rank_tier parsing across all 8 medals + uncalibrated/edge inputs
+    for (tier, expected) in [
+        (11, Bracket::Herald),
+        (25, Bracket::Guardian),
+        (33, Bracket::Crusader),
+        (42, Bracket::Archon),
+        (55, Bracket::Legend),
+        (63, Bracket::Ancient),
+        (74, Bracket::Divine),
+        (80, Bracket::Immortal),
+    ] {
+        let json = format!(r#"{{"solo_competitive_rank":null,"rank_tier":{tier}}}"#);
+        assert_eq!(parse_player_rank_tier_json(&json), Some(expected));
+    }
+    assert_eq!(parse_player_rank_tier_json(r#"{"rank_tier":null}"#), None);
+    assert_eq!(parse_player_rank_tier_json(r#"{"rank_tier":0}"#), None);
+    assert_eq!(parse_player_rank_tier_json(r#"{"rank_tier":95}"#), None);
+    assert_eq!(parse_player_rank_tier_json(r#"{"profile":{"id":1}}"#), None);
+    assert_eq!(parse_player_rank_tier_json("not json"), None);
+
+    // 2. Unified config.toml persistence must never overwrite account_id or bracket when saving the other
+    let tmp_dir =
+        std::env::temp_dir().join(format!("truesight_cfg_bracket_test_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let cfg_path = tmp_dir.join("config.toml");
+
+    assert_eq!(
+        load_app_config_from(&cfg_path),
+        AppConfig {
+            account_link: AccountLinkConfig::Auto,
+            bracket: BracketConfig::Auto,
+        }
+    );
+
+    save_account_config_to(&cfg_path, AccountLinkConfig::Explicit(127_255_741)).unwrap();
+    save_bracket_config_to(&cfg_path, BracketConfig::Explicit(Bracket::Divine)).unwrap();
+    assert_eq!(
+        load_app_config_from(&cfg_path),
+        AppConfig {
+            account_link: AccountLinkConfig::Explicit(127_255_741),
+            bracket: BracketConfig::Explicit(Bracket::Divine),
+        }
+    );
+
+    save_account_config_to(&cfg_path, AccountLinkConfig::Unlinked).unwrap();
+    assert_eq!(
+        load_app_config_from(&cfg_path),
+        AppConfig {
+            account_link: AccountLinkConfig::Unlinked,
+            bracket: BracketConfig::Explicit(Bracket::Divine),
+        }
+    );
+
+    save_bracket_config_to(&cfg_path, BracketConfig::Auto).unwrap();
+    assert_eq!(
+        load_app_config_from(&cfg_path),
+        AppConfig {
+            account_link: AccountLinkConfig::Unlinked,
+            bracket: BracketConfig::Auto,
+        }
+    );
+
+    // 3. Cached player_profile.json lookup via LocalCacheManager
+    let mut mgr = LocalCacheManager::with_dir(tmp_dir.join("cache"), 127_255_741);
+    assert_eq!(mgr.read_cached_player_bracket(), None);
+    mgr.write_cached_profile_json(r#"{"rank_tier":64}"#)
+        .unwrap();
+    assert_eq!(mgr.read_cached_player_bracket(), Some(Bracket::Ancient));
+    mgr.set_account_id(None, true);
+    assert_eq!(mgr.read_cached_player_bracket(), None);
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}

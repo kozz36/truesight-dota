@@ -70,6 +70,7 @@ pub fn run_app() {
     }
 
     // Background non-blocking auto-sync when cache TTL (24h meta / 1h player) has expired
+    session.enable_default_config_persistence();
     {
         let now = LocalCacheManager::now_unix();
         if session.cache_mgr.is_meta_stale(now) || session.cache_mgr.is_player_stale(now) {
