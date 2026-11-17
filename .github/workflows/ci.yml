@@ -144,6 +144,7 @@ jobs:
           $pkgOut = Join-Path $env:RUNNER_TEMP "ts_pkg_out"
           .\packaging\windows\build-release-packages.ps1 `
             -ExePath ".\target\release\truesight-dota.exe" `
+            -GuiExePath ".\target\release\truesight-dota-gui.exe" `
             -Version "0.1.0" `
             -OutDir $pkgOut
           $msiV1 = Join-Path $pkgOut "truesight-dota-windows-x86_64.msi"
@@ -169,7 +170,7 @@ jobs:
           $installLog = Join-Path $env:RUNNER_TEMP "msi_install.log"
           Invoke-MsiExec -MsiArgs @("/i", "`"$msiV1`"", "/qn", "/norestart", "/l*v", "`"$installLog`"") -LogPath $installLog
 
-          foreach ($rel in @("truesight-dota.exe", "gamestate_integration_truesight.cfg", "install-gsi.ps1", "LICENSE", "README.md")) {
+          foreach ($rel in @("truesight-dota.exe", "truesight-dota-gui.exe", "gamestate_integration_truesight.cfg", "install-gsi.ps1", "LICENSE", "README.md")) {
             $p = Join-Path $installDir $rel
             if (-not (Test-Path -LiteralPath $p)) {
               throw "MSI install missing expected payload file: $p"
@@ -177,6 +178,25 @@ jobs:
           }
           if (-not (Test-Path -LiteralPath $shortcutPath)) {
             throw "MSI install missing Start Menu shortcut: $shortcutPath"
+          }
+          function Get-PeSubsystem {
+            param([string]$Path)
+            $bytes = [System.IO.File]::ReadAllBytes($Path)
+            $peOffset = [System.BitConverter]::ToInt32($bytes, 0x3C)
+            return [System.BitConverter]::ToUInt16($bytes, $peOffset + 24 + 68)
+          }
+          $cliSubsystem = Get-PeSubsystem (Join-Path $installDir "truesight-dota.exe")
+          $guiSubsystem = Get-PeSubsystem (Join-Path $installDir "truesight-dota-gui.exe")
+          if ($cliSubsystem -ne 3) {
+            throw "Expected truesight-dota.exe to use Windows CUI subsystem (3), got $cliSubsystem"
+          }
+          if ($guiSubsystem -ne 2) {
+            throw "Expected truesight-dota-gui.exe to use Windows GUI subsystem (2), got $guiSubsystem"
+          }
+          $shell = New-Object -ComObject WScript.Shell
+          $shortcutTarget = $shell.CreateShortcut($shortcutPath).TargetPath
+          if (-not $shortcutTarget.EndsWith("\truesight-dota-gui.exe", [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Expected Start Menu shortcut to target truesight-dota-gui.exe, got: $shortcutTarget"
           }
           $installedOut = & (Join-Path $installDir "truesight-dota.exe") --demo --no-color
           if ($LASTEXITCODE -ne 0 -or -not (($installedOut -join "`n") -match "WIN PROBABILITY")) {
@@ -186,6 +206,7 @@ jobs:
           $pkgUpgradeOut = Join-Path $env:RUNNER_TEMP "ts_pkg_upgrade"
           .\packaging\windows\build-release-packages.ps1 `
             -ExePath ".\target\release\truesight-dota.exe" `
+            -GuiExePath ".\target\release\truesight-dota-gui.exe" `
             -Version "0.1.1" `
             -OutDir $pkgUpgradeOut
           $msiV2 = Join-Path $pkgUpgradeOut "truesight-dota-windows-x86_64.msi"
