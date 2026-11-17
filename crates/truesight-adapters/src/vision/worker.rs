@@ -144,12 +144,12 @@ impl<S: ScreenFrameSource> VisionCaptureAdapter<S> {
         })
     }
 
-    fn evaluate_layout(
+    fn evaluate_layout_ranked(
         &self,
         frame: &RgbFrame,
         virtual_h: usize,
         layout: TopBarLayout,
-    ) -> (f32, usize, [SlotCandidate; 5], [SlotCandidate; 5]) {
+    ) -> RankedLayoutBatch {
         let (rad_rects, dire_rects) = match layout {
             TopBarLayout::SyntheticExact => compute_topbar_slot_rects(frame.width, virtual_h),
             TopBarLayout::PickPhase => compute_pickphase_topbar_slot_rects(frame.width, virtual_h),
@@ -158,27 +158,37 @@ impl<S: ScreenFrameSource> VisionCaptureAdapter<S> {
 
         let rad_ranked = self.evaluate_side_slots(frame, &rad_rects, layout);
         let dire_ranked = self.evaluate_side_slots(frame, &dire_rects, layout);
-        let (rad, dire) = dedup_layout_candidates(&rad_ranked, &dire_ranked);
-
-        let mut score = 0.0_f32;
-        let mut unique_count = 0_usize;
-        for (_, diff, _) in rad.iter().flatten().chain(dire.iter().flatten()) {
-            unique_count += 1;
-            score += 35.5 - diff;
-            if layout == TopBarLayout::SyntheticExact && *diff < 8.0 {
-                score += 16.0;
-            }
-        }
-        (score, unique_count, rad, dire)
+        (layout, rad_ranked, dire_ranked)
     }
 }
 
-/// Drops heroes matching >= 3 top-1 slots (uniform background flood) and resolves remaining
-/// cross-slot collisions by assigning the tightest slot first and falling back to next-best
-/// unallocated candidates within threshold.
-pub(crate) fn dedup_layout_candidates(
+pub(crate) type RankedLayoutBatch = (
+    TopBarLayout,
+    [Vec<(HeroId, f32, f32)>; 5],
+    [Vec<(HeroId, f32, f32)>; 5],
+);
+
+fn score_layout_slots(
+    layout: TopBarLayout,
+    rad: &[SlotCandidate; 5],
+    dire: &[SlotCandidate; 5],
+) -> (f32, usize) {
+    let mut score = 0.0_f32;
+    let mut unique_count = 0_usize;
+    for (_, diff, _) in rad.iter().flatten().chain(dire.iter().flatten()) {
+        unique_count += 1;
+        score += 35.5 - diff;
+        if layout == TopBarLayout::SyntheticExact && *diff < 8.0 {
+            score += 16.0;
+        }
+    }
+    (score, unique_count)
+}
+
+fn resolve_layout_candidates(
     rad_ranked: &[Vec<(HeroId, f32, f32)>; 5],
     dire_ranked: &[Vec<(HeroId, f32, f32)>; 5],
+    allow_fallbacks: bool,
 ) -> ([SlotCandidate; 5], [SlotCandidate; 5]) {
     let mut top1_counts: std::collections::HashMap<HeroId, usize> =
         std::collections::HashMap::new();
@@ -202,7 +212,8 @@ pub(crate) fn dedup_layout_candidates(
             flooded_slot[slot_idx] = true;
             continue;
         }
-        for (rank_idx, &(hid, diff, ms)) in cands.iter().enumerate() {
+        let max_ranks = if allow_fallbacks { cands.len() } else { 1 };
+        for (rank_idx, &(hid, diff, ms)) in cands.iter().take(max_ranks).enumerate() {
             if !flooded_heroes.contains(&hid) {
                 flat_candidates.push((diff, slot_idx, rank_idx, hid, ms));
             }
@@ -228,6 +239,39 @@ pub(crate) fn dedup_layout_candidates(
     (rad, dire)
 }
 
+/// Drops heroes matching >= 3 top-1 slots (uniform background flood) and resolves remaining
+/// cross-slot collisions by assigning the tightest slot first and falling back to next-best
+/// unallocated candidates within threshold.
+pub(crate) fn dedup_layout_candidates(
+    rad_ranked: &[Vec<(HeroId, f32, f32)>; 5],
+    dire_ranked: &[Vec<(HeroId, f32, f32)>; 5],
+) -> ([SlotCandidate; 5], [SlotCandidate; 5]) {
+    resolve_layout_candidates(rad_ranked, dire_ranked, true)
+}
+
+/// Selects the winning top-bar layout using unique top-1 evidence only, then applies collision
+/// fallback recovery exclusively to that selected layout.
+pub(crate) fn select_best_layout_candidates(
+    layouts: &[RankedLayoutBatch],
+) -> Option<(TopBarLayout, [SlotCandidate; 5], [SlotCandidate; 5])> {
+    let mut best_score = 0.0_f32;
+    let mut best_idx = None;
+
+    for (idx, (layout, rad_ranked, dire_ranked)) in layouts.iter().enumerate() {
+        let (top1_rad, top1_dire) = resolve_layout_candidates(rad_ranked, dire_ranked, false);
+        let (score, unique_count) = score_layout_slots(*layout, &top1_rad, &top1_dire);
+        if unique_count >= MIN_DETECTED_SLOTS_QUORUM && score > best_score {
+            best_score = score;
+            best_idx = Some(idx);
+        }
+    }
+
+    let idx = best_idx?;
+    let (layout, rad_ranked, dire_ranked) = &layouts[idx];
+    let (rad, dire) = dedup_layout_candidates(rad_ranked, dire_ranked);
+    Some((*layout, rad, dire))
+}
+
 impl<S: ScreenFrameSource> VisionCaptureAdapter<S> {
     /// Polls one frame cycle and reports both detected draft events and live runtime capture health.
     pub fn poll_events_with_health(
@@ -248,11 +292,7 @@ impl<S: ScreenFrameSource> VisionCaptureAdapter<S> {
             }
         });
 
-        let mut best_score = 0.0_f32;
-        let mut best_count = 0_usize;
-        let mut best_rad = [None; 5];
-        let mut best_dire = [None; 5];
-
+        let mut layout_batches = Vec::with_capacity(3);
         for layout in [
             TopBarLayout::SyntheticExact,
             TopBarLayout::PickPhase,
@@ -261,18 +301,12 @@ impl<S: ScreenFrameSource> VisionCaptureAdapter<S> {
             if self.capture_mode == VisionCaptureMode::DraftOnly && layout == TopBarLayout::InGame {
                 continue;
             }
-            let (score, unique_count, rad, dire) = self.evaluate_layout(&frame, virtual_h, layout);
-            if unique_count >= MIN_DETECTED_SLOTS_QUORUM && score > best_score {
-                best_score = score;
-                best_count = unique_count;
-                best_rad = rad;
-                best_dire = dire;
-            }
+            layout_batches.push(self.evaluate_layout_ranked(&frame, virtual_h, layout));
         }
 
-        if best_count < MIN_DETECTED_SLOTS_QUORUM {
+        let Some((_, best_rad, best_dire)) = select_best_layout_candidates(&layout_batches) else {
             return Ok((Vec::new(), CaptureRuntimeHealth::Capturing));
-        }
+        };
 
         let (rad_side, dire_side) = match self.ally_faction {
             Faction::Radiant => (Side::Allies, Side::Enemies),

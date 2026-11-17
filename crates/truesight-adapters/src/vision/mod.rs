@@ -13,9 +13,9 @@ pub use windows::{
     evaluate_pid_lookup_output, is_dota2_windows_window, parse_tasklist_exe_for_pid,
     resolve_windows_system32_exe, rgba_to_topbar_rgb_frame, verify_dota_candidate_with,
 };
-#[cfg(test)]
-pub(crate) use worker::dedup_layout_candidates;
 pub use worker::{BoundedVisionWorker, ScreenFrameSource, VisionCaptureAdapter};
+#[cfg(test)]
+pub(crate) use worker::{dedup_layout_candidates, select_best_layout_candidates};
 #[cfg(target_os = "linux")]
 pub use x11::X11TopBarFrameSource;
 pub use x11::{build_x11_import_args, is_dota2_xprop_output};
@@ -169,9 +169,9 @@ pub fn compute_pickphase_topbar_slot_rects(
 /// player-color strip, Dota Plus corner triangles, and spectator selection glow borders.
 pub(super) fn ingame_inner_core_rect(rect: TopBarSlotRect) -> TopBarSlotRect {
     let left = ((rect.width as f32) * (5.0 / 57.0)).round() as usize;
-    let right = ((rect.width as f32) * (10.0 / 57.0)).round() as usize;
-    let top = ((rect.height as f32) * (6.0 / 33.0)).round() as usize;
-    let bottom = ((rect.height as f32) * (10.0 / 33.0)).round() as usize;
+    let right = ((rect.width as f32) * (5.0 / 57.0)).round() as usize;
+    let top = ((rect.height as f32) * (5.0 / 33.0)).round() as usize;
+    let bottom = ((rect.height as f32) * (1.0 / 33.0)).round() as usize;
     let core_w = rect.width.saturating_sub(left + right);
     let core_h = rect.height.saturating_sub(top + bottom);
     if core_w >= DESC_COLS && core_h >= DESC_ROWS {
@@ -213,7 +213,7 @@ const DESC_LEN: usize = DESC_COLS * DESC_ROWS * 3;
 const DARK_INTENSITY_THRESHOLD: f32 = 12.0;
 const MATCH_L1_THRESHOLD: f32 = 14.5;
 const PICKPHASE_L1_THRESHOLD: f32 = 31.0;
-const INGAME_L1_THRESHOLD: f32 = 34.5;
+const INGAME_L1_THRESHOLD: f32 = 35.0;
 const MIN_DESCRIPTOR_SATURATION: f32 = 13.0;
 const MIN_OUTER_SATURATION: f32 = 9.0;
 
@@ -426,7 +426,12 @@ impl HeroVisionCatalog {
             width: atlas.hero_width.saturating_sub(8),
             height: 22.min(atlas.hero_height.saturating_sub(2)),
         };
-        let ingame_core_rect = ingame_inner_core_rect(full_rect);
+        let ingame_core_rect = TopBarSlotRect {
+            x: 5,
+            y: 2,
+            width: atlas.hero_width.saturating_sub(13),
+            height: atlas.hero_height.saturating_sub(8),
+        };
 
         let alt_atlas = crate::hero_alt_atlas::parse_hero_alt_atlas()?;
         if alt_atlas.width != atlas.hero_width || alt_atlas.height != atlas.hero_height {
@@ -550,7 +555,10 @@ impl HeroVisionCatalog {
                     INGAME_L1_THRESHOLD,
                     tv >= 13.5
                         && os >= 10.5
-                        && (ov >= 13.5 || saturated_dark_border || (ov >= 9.5 && os >= 35.0)),
+                        && (ov >= 13.5
+                            || (ov >= 12.5 && tv >= 18.0 && os >= 20.0)
+                            || saturated_dark_border
+                            || (ov >= 9.5 && os >= 35.0)),
                 ),
             };
         if !has_portrait_detail {
@@ -565,7 +573,7 @@ impl HeroVisionCatalog {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TopBarLayout {
+pub(super) enum TopBarLayout {
     SyntheticExact,
     PickPhase,
     InGame,

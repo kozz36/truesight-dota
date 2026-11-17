@@ -3344,12 +3344,12 @@ fn vision_ingame_excludes_player_color_strip_and_spectator_borders() {
                     }
                 }
             }
-            // Paint the actual portrait inside the clean inner core (x+5..w-10, y+6..h-10)
+            // Paint the actual portrait inside the clean inner core (x+5..w-5, y+5..h-1)
             let inner = TopBarSlotRect {
                 x: rect.x + 5,
-                y: rect.y + 6,
-                width: rect.width.saturating_sub(15),
-                height: rect.height.saturating_sub(16),
+                y: rect.y + 5,
+                width: rect.width.saturating_sub(10),
+                height: rect.height.saturating_sub(6),
             };
             let (sx0, sw0, sy0, sh0) = (
                 4_usize,
@@ -3481,4 +3481,47 @@ fn vision_dedup_resolves_two_slot_collision_via_next_best_and_drops_uniform_floo
     assert_eq!(f_rad[1], None);
     assert_eq!(f_rad[2], None);
     assert_eq!(f_rad[3].map(|c| c.0), Some(HeroId(48)));
+}
+
+#[test]
+fn vision_layout_selection_scores_unique_top1_before_applying_collision_fallbacks() {
+    use crate::vision::{TopBarLayout, select_best_layout_candidates};
+
+    // Layout A (noisy PickPhase): two duplicate top-1 pairs retain 20 and 24 (score 27.0),
+    // whereas recovery fallbacks at 23 and 25 would inflate it to 50.0.
+    let mut noisy_rad: [Vec<(HeroId, f32, f32)>; 5] = std::array::from_fn(|_| Vec::new());
+    let noisy_dire: [Vec<(HeroId, f32, f32)>; 5] = std::array::from_fn(|_| Vec::new());
+    noisy_rad[0] = vec![(HeroId(1), 20.0, 20.0), (HeroId(2), 23.0, 20.0)];
+    noisy_rad[1] = vec![(HeroId(1), 24.0, 20.0), (HeroId(2), 23.0, 20.0)];
+    noisy_rad[2] = vec![(HeroId(3), 24.0, 20.0), (HeroId(4), 25.0, 20.0)];
+    noisy_rad[3] = vec![(HeroId(3), 26.0, 20.0), (HeroId(4), 25.0, 20.0)];
+
+    // Layout B (clean InGame): two unique top-1 matches at diff 15.0 (score 41.0 > 27.0).
+    let mut clean_rad: [Vec<(HeroId, f32, f32)>; 5] = std::array::from_fn(|_| Vec::new());
+    let clean_dire: [Vec<(HeroId, f32, f32)>; 5] = std::array::from_fn(|_| Vec::new());
+    clean_rad[0] = vec![(HeroId(88), 15.0, 25.0)];
+    clean_rad[1] = vec![(HeroId(48), 15.0, 25.0)];
+
+    let (selected, sel_rad, _) = select_best_layout_candidates(&[
+        (
+            TopBarLayout::PickPhase,
+            noisy_rad.clone(),
+            noisy_dire.clone(),
+        ),
+        (TopBarLayout::InGame, clean_rad, clean_dire),
+    ])
+    .expect("clean layout must win on unique top-1 evidence");
+    assert_eq!(selected, TopBarLayout::InGame);
+    assert_eq!(sel_rad[0].map(|c| c.0), Some(HeroId(88)));
+    assert_eq!(sel_rad[1].map(|c| c.0), Some(HeroId(48)));
+
+    // When the colliding layout itself wins (no cleaner layout), collision recovery still runs on it.
+    let (selected_only, rec_rad, _) =
+        select_best_layout_candidates(&[(TopBarLayout::InGame, noisy_rad, noisy_dire)])
+            .expect("selected winning layout must apply collision recovery");
+    assert_eq!(selected_only, TopBarLayout::InGame);
+    assert_eq!(rec_rad[0].map(|c| c.0), Some(HeroId(1)));
+    assert_eq!(rec_rad[1].map(|c| c.0), Some(HeroId(2)));
+    assert_eq!(rec_rad[2].map(|c| c.0), Some(HeroId(3)));
+    assert_eq!(rec_rad[3].map(|c| c.0), Some(HeroId(4)));
 }
