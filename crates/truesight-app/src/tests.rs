@@ -1663,3 +1663,132 @@ fn player_account_link_auto_syncs_stale_player_cache_from_gsi_and_cli() {
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+#[test]
+fn reapplying_same_account_preserves_in_flight_sync_while_switching_cancels_it() {
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc,
+    };
+    use std::time::Duration;
+    use truesight_adapters::sync::LocalCacheManager;
+    use truesight_core::domain::HeroId;
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_reapply_same_acct_test_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    let now = LocalCacheManager::now_unix();
+    let fresh_meta = r#"[{"id": 1, "1_pick": 1000, "1_win": 610, "2_pick": 1000, "2_win": 610, "3_pick": 1000, "3_win": 610, "4_pick": 1000, "4_win": 610, "5_pick": 1000, "5_win": 610, "6_pick": 1000, "6_win": 610, "7_pick": 1000, "7_win": 610}]"#;
+
+    let mut mgr = LocalCacheManager::with_dir(tmp_dir.clone(), 0);
+    mgr.write_cached_files(Some(fresh_meta), None, now).unwrap();
+    mgr.set_account_id(None, false);
+
+    let mut session = AppSession::new().unwrap();
+    session.cache_mgr = mgr;
+    session.reload_repository();
+
+    let (started_tx, started_rx) = mpsc::sync_channel::<()>(2);
+    let (gate_tx, gate_rx) = mpsc::sync_channel::<()>(0);
+    let gate_rx = Arc::new(Mutex::new(Some(gate_rx)));
+    let sync_calls = Arc::new(AtomicUsize::new(0));
+    let first_was_cancelled = Arc::new(AtomicBool::new(false));
+
+    let sync_calls_bg = Arc::clone(&sync_calls);
+    let first_was_cancelled_bg = Arc::clone(&first_was_cancelled);
+    let bg_tmp_dir = tmp_dir.clone();
+    session.set_background_sync_runner(move |bg_mgr, force| {
+        assert!(!force);
+        let call_n = sync_calls_bg.fetch_add(1, Ordering::SeqCst) + 1;
+        let acct = bg_mgr.player_account_id.expect("linked account");
+        if call_n == 1 {
+            let _ = started_tx.send(());
+            if let Some(rx) = gate_rx.lock().unwrap().take() {
+                let _ = rx.recv();
+            }
+            if bg_mgr.is_cancelled() {
+                first_was_cancelled_bg.store(true, Ordering::SeqCst);
+                return Err("Sync cancelled".into());
+            }
+        }
+        let heroes_json =
+            format!(r#"[{{"hero_id": 1, "last_played": {now}, "games": 18, "win": 15}}]"#);
+        let matches_json = format!(
+            r#"[{{"hero_id": 1, "player_slot": 0, "radiant_win": true, "start_time": {now}}}]"#
+        );
+        bg_mgr
+            .write_cached_files(None, Some(&heroes_json), LocalCacheManager::now_unix())
+            .map_err(|e| e.0)?;
+        let matches_path = bg_tmp_dir
+            .join("players")
+            .join(acct.to_string())
+            .join("player_matches.json");
+        std::fs::write(matches_path, matches_json).map_err(|e| e.to_string())?;
+        Ok(format!("Synced #{acct} (call {call_n})"))
+    });
+
+    // 1. Start initial sync for Steam32 101_194_485 and hold it in flight.
+    assert!(execute_command(&mut session, "account 101194485").unwrap());
+    started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(session.sync_in_flight);
+    assert_eq!(sync_calls.load(Ordering::SeqCst), 1);
+
+    // 2. Reapply same account (via Steam64 and non-explicit mode): must keep first worker alive and not spawn a second.
+    assert!(execute_command(&mut session, "account 76561198061460213").unwrap());
+    session.set_account_id(Some(101_194_485), false);
+    let _ = session.sync_if_player_stale();
+    assert!(session.sync_in_flight);
+    assert_eq!(session.db_status, "DB [SYNCING...]");
+    assert_eq!(sync_calls.load(Ordering::SeqCst), 1);
+
+    // 3. Release the held first worker and confirm it completes without cancellation and populates Comfort v3.
+    gate_tx.send(()).unwrap();
+    for _ in 0..100 {
+        session.poll_live_sources(None, None);
+        if !session.sync_in_flight {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!session.sync_in_flight);
+    assert!(!first_was_cancelled.load(Ordering::SeqCst));
+    assert_eq!(sync_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(session.matrix.hero(HeroId(1)).unwrap().personal_matches, 18);
+
+    // 4. Switching to a different account while a sync is in flight must still cancel the prior generation.
+    let (started2_tx, started2_rx) = mpsc::sync_channel::<()>(1);
+    let (gate2_tx, gate2_rx) = mpsc::sync_channel::<()>(0);
+    let gate2_rx = Arc::new(Mutex::new(Some(gate2_rx)));
+    let second_cancelled = Arc::new(AtomicBool::new(false));
+    let second_cancelled_bg = Arc::clone(&second_cancelled);
+    let (done2_tx, done2_rx) = mpsc::sync_channel::<()>(1);
+    session.set_background_sync_runner(move |bg_mgr, _force| {
+        if bg_mgr.player_account_id == Some(222_333_444) {
+            let _ = started2_tx.send(());
+            if let Some(rx) = gate2_rx.lock().unwrap().take() {
+                let _ = rx.recv();
+            }
+            second_cancelled_bg.store(bg_mgr.is_cancelled(), Ordering::SeqCst);
+            let _ = done2_tx.send(());
+            return Err("Cancelled".into());
+        }
+        Ok("Switched ok".into())
+    });
+
+    assert!(execute_command(&mut session, "account 222333444").unwrap());
+    started2_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(execute_command(&mut session, "account none").unwrap());
+    assert!(!session.sync_in_flight);
+    gate2_tx.send(()).unwrap();
+    done2_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(
+        second_cancelled.load(Ordering::SeqCst),
+        "Unlinking or switching account must cancel the prior in-flight sync"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}

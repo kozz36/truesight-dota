@@ -114,7 +114,7 @@ impl TrueSightGuiApp {
         };
         self.session.set_account_id(Some(s32), true);
         let syncing = self.session.sync_if_player_stale();
-        self.status_banner = if syncing {
+        self.status_banner = if syncing || self.session.sync_in_flight {
             format!("Linked Steam32 account #{s32} (syncing player cache...).")
         } else {
             format!("Linked Steam32 account #{s32}.")

@@ -896,6 +896,13 @@ fn gui_account_link_apply_triggers_background_sync_and_updates_comfort() {
         app.session.sync_in_flight,
         "GUI APPLY must trigger non-blocking player sync when cache is stale"
     );
+    app.account_input = "101194485".into();
+    assert_eq!(
+        app.apply_account_input(),
+        Some(AccountLinkConfig::Explicit(101_194_485))
+    );
+    assert!(app.session.sync_in_flight);
+    assert!(app.status_banner.contains("syncing player cache"));
 
     let ctx = egui::Context::default();
     for _ in 0..100 {

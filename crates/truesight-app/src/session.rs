@@ -221,22 +221,28 @@ impl AppSession {
             .freshness_badge(LocalCacheManager::now_unix());
     }
 
+    fn apply_account_transition(&mut self, prev_account: Option<u64>) {
+        if self.cache_mgr.player_account_id != prev_account {
+            self.sync_generation = self.cache_mgr.cancel_in_flight();
+            self.sync_in_flight = false;
+            self.sync_rx = None;
+            self.reap_finished_sync_workers();
+            self.reload_repository();
+        } else if !self.sync_in_flight {
+            self.reload_repository();
+        }
+    }
+
     pub fn set_account_id(&mut self, account_id: Option<u64>, explicit: bool) {
-        self.sync_generation = self.cache_mgr.cancel_in_flight();
-        self.sync_in_flight = false;
-        self.sync_rx = None;
-        self.reap_finished_sync_workers();
+        let prev_account = self.cache_mgr.player_account_id;
         self.cache_mgr.set_account_id(account_id, explicit);
-        self.reload_repository();
+        self.apply_account_transition(prev_account);
     }
 
     pub fn set_account_auto(&mut self) {
-        self.sync_generation = self.cache_mgr.cancel_in_flight();
-        self.sync_in_flight = false;
-        self.sync_rx = None;
-        self.reap_finished_sync_workers();
+        let prev_account = self.cache_mgr.player_account_id;
         self.cache_mgr.set_auto_account();
-        self.reload_repository();
+        self.apply_account_transition(prev_account);
     }
 
     pub fn start_background_sync_with<F>(&mut self, force: bool, task: F) -> bool
