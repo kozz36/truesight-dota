@@ -258,24 +258,17 @@ pub fn execute_command(session: &mut AppSession, line: &str) -> Result<bool, Str
         "bracket" | "medal" => {
             let Some(&b_str) = parts.get(1) else {
                 return Err(
-                    "Usage: bracket <herald|guardian|crusader|archon|legend|ancient|divine|immortal>"
+                    "Usage: bracket <herald|guardian|crusader|archon|legend|ancient|divine|immortal|auto>"
                         .into(),
                 );
             };
-            let bracket = match b_str.to_ascii_lowercase().as_str() {
-                "1" | "herald" => Bracket::Herald,
-                "2" | "guardian" => Bracket::Guardian,
-                "3" | "crusader" => Bracket::Crusader,
-                "4" | "archon" => Bracket::Archon,
-                "5" | "legend" => Bracket::Legend,
-                "6" | "ancient" => Bracket::Ancient,
-                "7" | "divine" => Bracket::Divine,
-                "8" | "immortal" => Bracket::Immortal,
-                _ => {
-                    return Err("Bracket must be 1..8 or herald..immortal".into());
-                }
-            };
-            session.set_bracket(bracket);
+            if b_str.eq_ignore_ascii_case("auto") {
+                session.set_bracket_auto();
+            } else if let Some(bracket) = Bracket::parse_label(b_str) {
+                session.set_bracket(bracket);
+            } else {
+                return Err("Bracket must be 1..8, herald..immortal, or 'auto'".into());
+            }
         }
         "faction" => {
             let Some(&f_str) = parts.get(1) else {

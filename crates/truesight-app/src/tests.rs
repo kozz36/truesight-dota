@@ -1853,3 +1853,111 @@ fn windows_packaging_separates_console_cli_and_console_free_gui_entrypoints() {
         "MSI installer must ship truesight-dota-gui.exe and point the Start Menu shortcut to it"
     );
 }
+
+#[test]
+fn bracket_auto_selects_from_rank_tier_and_persists_manual_selection() {
+    use truesight_adapters::sync::{
+        AccountLinkConfig, BracketConfig, LocalCacheManager, load_app_config_from,
+        save_account_config_to,
+    };
+    use truesight_core::domain::Bracket;
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_app_bracket_persist_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    let cache_dir = tmp_dir.join("cache");
+    let cfg_path = tmp_dir.join("config.toml");
+
+    // 1. Auto mode with cached rank_tier=73 (Divine) boots directly on Divine instead of Legend.
+    let mgr = LocalCacheManager::with_dir(cache_dir.clone(), 127_255_741);
+    mgr.write_cached_profile_json(r#"{"rank_tier":73}"#)
+        .unwrap();
+    let s1 = AppSession::with_cache_and_config(mgr.clone(), Some(cfg_path.clone())).unwrap();
+    assert_eq!(s1.draft.bracket, Bracket::Divine);
+    assert_eq!(s1.bracket_config, BracketConfig::Auto);
+
+    // 2. Background sync completion with updated rank_tier=62 (Ancient) updates Auto bracket.
+    let mut s_sync = AppSession::with_cache_and_config(
+        LocalCacheManager::with_dir(cache_dir.clone(), 127_255_741),
+        Some(cfg_path.clone()),
+    )
+    .unwrap();
+    s_sync.set_background_sync_runner(|bg_mgr, _force| {
+        bg_mgr
+            .write_cached_profile_json(r#"{"rank_tier":62}"#)
+            .map_err(|e| e.0)?;
+        Ok("Synced player profile".to_string())
+    });
+    assert!(s_sync.start_background_sync(true));
+    for _ in 0..100 {
+        s_sync.poll_live_sources(None, None);
+        if !s_sync.sync_in_flight {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(s_sync.draft.bracket, Bracket::Ancient);
+    assert_eq!(s_sync.bracket_config, BracketConfig::Auto);
+
+    // 3. Manual bracket override persists in config.toml alongside account_id and survives restart,
+    // even when cached/synced OpenDota rank_tier reports a different medal or null.
+    save_account_config_to(&cfg_path, AccountLinkConfig::Explicit(127_255_741)).unwrap();
+    s_sync.set_bracket(Bracket::Immortal);
+    assert_eq!(
+        s_sync.bracket_config,
+        BracketConfig::Explicit(Bracket::Immortal)
+    );
+    let persisted = load_app_config_from(&cfg_path);
+    assert_eq!(
+        persisted.account_link,
+        AccountLinkConfig::Explicit(127_255_741)
+    );
+    assert_eq!(
+        persisted.bracket,
+        BracketConfig::Explicit(Bracket::Immortal)
+    );
+
+    let mut restarted = AppSession::with_cache_and_config(
+        LocalCacheManager::with_dir(cache_dir.clone(), 127_255_741),
+        Some(cfg_path.clone()),
+    )
+    .unwrap();
+    assert_eq!(restarted.draft.bracket, Bracket::Immortal);
+    assert_eq!(
+        restarted.bracket_config,
+        BracketConfig::Explicit(Bracket::Immortal)
+    );
+
+    // Explicit manual bracket must NOT be overwritten when sync reports rank_tier=33 or null.
+    restarted.set_background_sync_runner(|bg_mgr, _force| {
+        bg_mgr
+            .write_cached_profile_json(r#"{"rank_tier":33}"#)
+            .map_err(|e| e.0)?;
+        Ok("Synced lower tier".to_string())
+    });
+    assert!(restarted.start_background_sync(true));
+    for _ in 0..100 {
+        restarted.poll_live_sources(None, None);
+        if !restarted.sync_in_flight {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(restarted.draft.bracket, Bracket::Immortal);
+
+    // 4. `bracket auto` CLI command clears explicit override and switches back to cached rank_tier.
+    assert!(execute_command(&mut restarted, "bracket auto").unwrap());
+    assert_eq!(restarted.bracket_config, BracketConfig::Auto);
+    assert_eq!(restarted.draft.bracket, Bracket::Crusader);
+    assert_eq!(load_app_config_from(&cfg_path).bracket, BracketConfig::Auto);
+
+    // 5. Uncalibrated (rank_tier: null) falls back cleanly to Legend on startup.
+    mgr.write_cached_profile_json(r#"{"rank_tier":null}"#)
+        .unwrap();
+    let uncal = AppSession::with_cache_and_config(mgr, Some(cfg_path.clone())).unwrap();
+    assert_eq!(uncal.draft.bracket, Bracket::Legend);
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}

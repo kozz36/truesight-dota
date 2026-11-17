@@ -106,6 +106,39 @@ impl Bracket {
             Self::Immortal => "Immortal",
         }
     }
+
+    /// Maps an OpenDota `/api/players/{id}` `rank_tier` (`10..=89`) to the matching medal bracket.
+    ///
+    /// Returns `None` for uncalibrated (`0`) or out-of-range values.
+    #[inline]
+    pub const fn from_rank_tier(rank_tier: u8) -> Option<Self> {
+        match rank_tier / 10 {
+            1 => Some(Self::Herald),
+            2 => Some(Self::Guardian),
+            3 => Some(Self::Crusader),
+            4 => Some(Self::Archon),
+            5 => Some(Self::Legend),
+            6 => Some(Self::Ancient),
+            7 => Some(Self::Divine),
+            8 => Some(Self::Immortal),
+            _ => None,
+        }
+    }
+
+    /// Parses a persisted bracket label or numeric tier index (`"herald"`..`"immortal"`, `"1"`..`"8"`).
+    pub fn parse_label(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "1" | "herald" => Some(Self::Herald),
+            "2" | "guardian" => Some(Self::Guardian),
+            "3" | "crusader" => Some(Self::Crusader),
+            "4" | "archon" => Some(Self::Archon),
+            "5" | "legend" => Some(Self::Legend),
+            "6" | "ancient" => Some(Self::Ancient),
+            "7" | "divine" => Some(Self::Divine),
+            "8" | "immortal" => Some(Self::Immortal),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -459,7 +459,19 @@ fn domain_ban_toggle_capacity_clear_and_role_bracket_invariants() {
     for (idx, bracket) in Bracket::ALL.iter().enumerate() {
         assert_eq!(bracket.index(), idx);
         assert!(!bracket.label().is_empty());
+        assert_eq!(
+            Bracket::parse_label(&bracket.label().to_ascii_uppercase()),
+            Some(*bracket)
+        );
+        let tier_base = ((idx + 1) * 10) as u8;
+        assert_eq!(Bracket::from_rank_tier(tier_base), Some(*bracket));
+        assert_eq!(Bracket::from_rank_tier(tier_base + 5), Some(*bracket));
     }
+    assert_eq!(Bracket::from_rank_tier(0), None);
+    assert_eq!(Bracket::from_rank_tier(9), None);
+    assert_eq!(Bracket::from_rank_tier(90), None);
+    assert_eq!(Bracket::parse_label("auto"), None);
+    assert_eq!(Bracket::parse_label("unknown"), None);
     assert_eq!(Faction::Radiant.opposite(), Faction::Dire);
     assert_eq!(Faction::Dire.opposite(), Faction::Radiant);
 

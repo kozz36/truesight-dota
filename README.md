@@ -54,7 +54,7 @@ ally <1..5> <hero>      # Assign hero to Ally slot A1..A5 (or 'none' to clear)
 enemy <1..5> <hero>     # Assign hero to Enemy slot E1..E5 (or 'none' to clear)
 ban <hero>              # Toggle hero ban
 role <1..5>             # Set target recommendation role (Pos 1..5)
-bracket <medal>         # Switch medal: herald | guardian | crusader | archon | legend | ancient | divine | immortal
+bracket <medal|auto>    # Switch medal (herald..immortal, persisted in config.toml) or `auto` to follow OpenDota rank_tier
 faction <radiant|dire>  # Switch Allies team faction (draft math stays 50-50 neutral)
 account <id|auto|none>  # Link explicit Steam32/Steam64 ID, switch to auto detection, or unlink
 sync                    # Force live refresh from OpenDota API into ~/.local/share/truesight-dota/cache/

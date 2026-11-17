@@ -1,9 +1,13 @@
+use std::path::PathBuf;
 use std::sync::{
     Arc,
     mpsc::{self, Receiver, TryRecvError},
 };
 use truesight_adapters::gsi::BoundedGsiListener;
-use truesight_adapters::sync::LocalCacheManager;
+use truesight_adapters::sync::{
+    BracketConfig, LocalCacheManager, config_file_path, load_app_config, load_app_config_from,
+    save_bracket_config_to,
+};
 use truesight_adapters::vision::{BoundedVisionWorker, CaptureAvailability, VisionCaptureMode};
 use truesight_core::domain::{
     Bracket, DraftPick, DraftState, Faction, HeroId, Role, Side, TEAM_SIZE,
@@ -28,6 +32,9 @@ pub struct AppSession {
     pub matrix: MatchupMatrix,
     pub weights: ModelWeights,
     pub cache_mgr: LocalCacheManager,
+    /// Active bracket selection policy (`Auto` from OpenDota `rank_tier` or `Explicit` override).
+    pub bracket_config: BracketConfig,
+    config_path: Option<PathBuf>,
     pub db_status: String,
     pub last_gsi_state: String,
     pub vision_available: bool,
@@ -103,17 +110,47 @@ impl RoleAssignmentSearch<'_> {
 
 impl AppSession {
     pub fn new() -> Result<Self, String> {
-        let cache_mgr = LocalCacheManager::auto_detected();
+        Self::from_cache_and_config(LocalCacheManager::auto_detected(), None, None)
+    }
+
+    /// Creates a session backed by explicit cache/config paths (used by integration tests).
+    pub fn with_cache_and_config(
+        cache_mgr: LocalCacheManager,
+        config_path: Option<PathBuf>,
+    ) -> Result<Self, String> {
+        Self::from_cache_and_config(cache_mgr, config_path.clone(), config_path)
+    }
+
+    fn from_cache_and_config(
+        cache_mgr: LocalCacheManager,
+        read_config_path: Option<PathBuf>,
+        write_config_path: Option<PathBuf>,
+    ) -> Result<Self, String> {
+        let app_cfg = read_config_path
+            .as_deref()
+            .map(load_app_config_from)
+            .unwrap_or_else(load_app_config);
+        let initial_bracket = match app_cfg.bracket {
+            BracketConfig::Explicit(b) => b,
+            BracketConfig::Auto => cache_mgr
+                .read_cached_player_bracket()
+                .unwrap_or(Bracket::Legend),
+        };
         let repo = cache_mgr.build_repository();
         let matrix = repo
-            .load_matrix(Bracket::Legend)
+            .load_matrix(initial_bracket)
             .map_err(|e| e.to_string())?;
         let db_status = cache_mgr.freshness_badge(LocalCacheManager::now_unix());
         Ok(Self {
-            draft: DraftState::default(),
+            draft: DraftState {
+                bracket: initial_bracket,
+                ..DraftState::default()
+            },
             matrix,
             weights: ModelWeights::default(),
             cache_mgr,
+            bracket_config: app_cfg.bracket,
+            config_path: write_config_path,
             db_status,
             last_gsi_state: "IDLE (Waiting for Dota 2 GSI)".into(),
             vision_available: false,
@@ -139,6 +176,11 @@ impl AppSession {
         })
     }
 
+    /// Enables saving manual bracket changes to the OS `config.toml` path for interactive runs.
+    pub fn enable_default_config_persistence(&mut self) {
+        self.config_path = Some(config_file_path());
+    }
+
     #[cfg(test)]
     pub(crate) fn set_background_sync_runner<F>(&mut self, runner: F)
     where
@@ -160,10 +202,42 @@ impl AppSession {
     }
 
     pub fn set_bracket(&mut self, bracket: Bracket) {
+        self.bracket_config = BracketConfig::Explicit(bracket);
         self.draft.bracket = bracket;
         if let Ok(m) = self.cache_mgr.build_repository().load_matrix(bracket) {
             self.matrix = m;
         }
+        if let Some(path) = self.config_path.as_deref() {
+            let _ = save_bracket_config_to(path, BracketConfig::Explicit(bracket));
+        }
+    }
+
+    /// Restores automatic bracket selection from the linked account's OpenDota `rank_tier`.
+    pub fn set_bracket_auto(&mut self) {
+        self.bracket_config = BracketConfig::Auto;
+        let next = self
+            .cache_mgr
+            .read_cached_player_bracket()
+            .unwrap_or(Bracket::Legend);
+        self.draft.bracket = next;
+        if let Ok(m) = self.cache_mgr.build_repository().load_matrix(next) {
+            self.matrix = m;
+        }
+        if let Some(path) = self.config_path.as_deref() {
+            let _ = save_bracket_config_to(path, BracketConfig::Auto);
+        }
+    }
+
+    fn apply_auto_bracket_from_cache(&mut self) -> Option<Bracket> {
+        if self.bracket_config != BracketConfig::Auto {
+            return None;
+        }
+        let detected = self.cache_mgr.read_cached_player_bracket()?;
+        if detected != self.draft.bracket {
+            self.draft.bracket = detected;
+            return Some(detected);
+        }
+        None
     }
 
     /// Updates UI/CLI capture capability indicators from the platform capture factory.
@@ -227,8 +301,15 @@ impl AppSession {
             self.sync_in_flight = false;
             self.sync_rx = None;
             self.reap_finished_sync_workers();
+            if self.bracket_config == BracketConfig::Auto {
+                self.draft.bracket = self
+                    .cache_mgr
+                    .read_cached_player_bracket()
+                    .unwrap_or(Bracket::Legend);
+            }
             self.reload_repository();
         } else if !self.sync_in_flight {
+            let _ = self.apply_auto_bracket_from_cache();
             self.reload_repository();
         }
     }
@@ -326,6 +407,7 @@ impl AppSession {
 
         match done.result {
             Ok(msg) => {
+                let auto_bracket = self.apply_auto_bracket_from_cache();
                 let loaded = self
                     .cache_mgr
                     .build_repository()
@@ -336,7 +418,10 @@ impl AppSession {
                         self.db_status = self
                             .cache_mgr
                             .freshness_badge(LocalCacheManager::now_unix());
-                        self.last_sync_notice = Some(msg);
+                        self.last_sync_notice = Some(match auto_bracket {
+                            Some(b) => format!("{msg} · Bracket: {}", b.label()),
+                            None => msg,
+                        });
                     }
                     _ => {
                         self.db_status = format!(
@@ -370,6 +455,7 @@ impl AppSession {
             .cache_mgr
             .sync_from_opendota(force)
             .map_err(|e| e.to_string())?;
+        let auto_bracket = self.apply_auto_bracket_from_cache();
         if let Ok(m) = self
             .cache_mgr
             .build_repository()
@@ -380,7 +466,10 @@ impl AppSession {
         self.db_status = self
             .cache_mgr
             .freshness_badge(LocalCacheManager::now_unix());
-        Ok(msg)
+        Ok(match auto_bracket {
+            Some(b) => format!("{msg} · Bracket: {}", b.label()),
+            None => msg,
+        })
     }
 
     /// Returns available heroes for `(side, slot)` matching `query`, ordered with prefix
