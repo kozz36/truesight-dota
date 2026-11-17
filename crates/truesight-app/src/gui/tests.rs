@@ -808,9 +808,11 @@ fn dpi_scaled_low_resolution_viewport_uses_scrollable_fallback_without_overlap()
     let r_full = render_at_viewport(&mut app, &ctx_1x, vec2(960.0, 680.0));
     assert!(!r_full.scrollable_fallback);
 
-    // Simulate 720p @ 125% (1024x576 logical), 768p @ 150% (910x512 logical), and min_inner_size (640x440).
+    // Simulate 720p @ 125% (1024x576 logical), 720p @ 150% (853x480 logical),
+    // 768p @ 150% (910x512 logical), and min_inner_size (640x440).
     for (ppp, logical_vp) in [
         (1.25_f32, vec2(1024.0, 576.0)),
+        (1.5_f32, vec2(853.0, 480.0)),
         (1.5_f32, vec2(910.0, 512.0)),
         (1.5_f32, vec2(640.0, 440.0)),
     ] {
@@ -827,6 +829,19 @@ fn dpi_scaled_low_resolution_viewport_uses_scrollable_fallback_without_overlap()
                 && r.suggested.max.x < r.matrix.min.x,
             "ppp={ppp} logical={logical_vp:?} cards overlapped under fallback"
         );
+        if logical_vp.x >= 853.0 {
+            assert!(
+                r.top_bar.max.x <= logical_vp.x
+                    && r.top_bar.contains_rect(r.options_button)
+                    && r.top_bar.contains_rect(r.reset_button)
+                    && r.enemies.max.x <= logical_vp.x
+                    && r.matrix.max.x <= logical_vp.x,
+                "ppp={ppp} logical={logical_vp:?} must fit horizontally without clipping: top={:?} enemies={:?} matrix={:?}",
+                r.top_bar,
+                r.enemies,
+                r.matrix
+            );
+        }
         assert!(
             !r.suggested_row_rects.is_empty()
                 && (r.suggested_pick_rects[0].center().y - r.suggested_row_rects[0].center().y)
@@ -920,4 +935,87 @@ fn gui_account_link_apply_triggers_background_sync_and_updates_comfort() {
     );
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn responsive_900px_topbar_slot_headroom_and_non_overlapping_modals() {
+    let mut app = TrueSightGuiApp::new(make_5v5_gui_session(), None, None);
+    let ctx = egui::Context::default();
+
+    // 1. Live Windows 915x579 (125% DPI resize) and 900x660 minimum desktop viewport:
+    //    top_bar must fit reset_button + options_button + bracket_bar without horizontal overflow.
+    for vp in [vec2(900.0, 660.0), vec2(915.0, 579.0), vec2(960.0, 680.0)] {
+        let r = render_at_viewport(&mut app, &ctx, vp);
+        assert!(
+            r.top_bar.max.x <= vp.x
+                && r.top_bar.contains_rect(r.options_button)
+                && r.top_bar.contains_rect(r.reset_button)
+                && r.top_bar.contains_rect(r.bracket_bar),
+            "vp={vp:?} top_bar clipped controls: top_bar={:?} opts={:?} reset={:?} brackets={:?}",
+            r.top_bar,
+            r.options_button,
+            r.reset_button,
+            r.bracket_bar
+        );
+        assert!(
+            r.enemies.max.x <= vp.x && r.matrix.max.x <= vp.x,
+            "vp={vp:?} workspace clipped horizontally: enemies={:?} matrix={:?}",
+            r.enemies,
+            r.matrix
+        );
+        // Slot mid_rect must have >= 46px height in compact mode and hold all 3 lines unclipped.
+        for (i, s) in r.ally_slots.iter().chain(r.enemy_slots.iter()).enumerate() {
+            assert!(
+                s.mid.height() >= 46.0 && s.mid_content_bottom <= s.mid.max.y,
+                "vp={vp:?} slot {i} mid_rect clipped 3-line telemetry: mid={:?} content_bottom={}",
+                s.mid,
+                s.mid_content_bottom
+            );
+        }
+    }
+
+    // 2. Normal-height viewport (1468x960) slot mid_rect headroom >= 52px and unclipped.
+    let r_norm = render_at_viewport(&mut app, &ctx, vec2(1468.0, 960.0));
+    for (i, s) in r_norm
+        .ally_slots
+        .iter()
+        .chain(r_norm.enemy_slots.iter())
+        .enumerate()
+    {
+        assert!(
+            s.mid.height() >= 52.0 && s.mid_content_bottom <= s.mid.max.y,
+            "1468x960 slot {i} mid_rect clipped 3-line telemetry: mid={:?} content_bottom={}",
+            s.mid,
+            s.mid_content_bottom
+        );
+    }
+
+    // 3. Open OPTIONS + STEAM ACCOUNT LINK modals: neither covers ALLIES/ORACLE/ENEMIES or overlaps the other.
+    app.options_open = true;
+    app.account_editor_open = true;
+    let r_modals = render_at_viewport(&mut app, &ctx, vec2(960.0, 680.0));
+    let opts_win = r_modals.options_window.expect("OPTIONS window open");
+    let acct_win = r_modals
+        .account_window
+        .expect("STEAM ACCOUNT LINK window open");
+    assert!(
+        !opts_win.intersects(r_modals.oracle)
+            && !opts_win.intersects(r_modals.enemies)
+            && !opts_win.intersects(r_modals.allies),
+        "OPTIONS window {:?} must not cover top-row cards",
+        opts_win
+    );
+    assert!(
+        !acct_win.intersects(r_modals.oracle)
+            && !acct_win.intersects(r_modals.enemies)
+            && !acct_win.intersects(r_modals.allies),
+        "STEAM ACCOUNT LINK window {:?} must not cover top-row cards",
+        acct_win
+    );
+    assert!(
+        !opts_win.intersects(acct_win),
+        "OPTIONS {:?} and STEAM ACCOUNT LINK {:?} must not overlap",
+        opts_win,
+        acct_win
+    );
 }
