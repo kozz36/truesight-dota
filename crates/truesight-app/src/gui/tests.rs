@@ -125,16 +125,25 @@ fn render_at_viewport(
     render_at_viewport_with_output(app, ctx, viewport).0
 }
 
-fn collect_painted_rects(shape: &egui::epaint::Shape, out: &mut Vec<(Rect, egui::Color32)>) {
+fn collect_painted_rect_shapes(
+    shape: &egui::epaint::Shape,
+    out: &mut Vec<egui::epaint::RectShape>,
+) {
     match shape {
-        egui::epaint::Shape::Rect(rect_shape) => out.push((rect_shape.rect, rect_shape.fill)),
+        egui::epaint::Shape::Rect(rect_shape) => out.push(rect_shape.clone()),
         egui::epaint::Shape::Vec(shapes) => {
             for inner in shapes {
-                collect_painted_rects(inner, out);
+                collect_painted_rect_shapes(inner, out);
             }
         }
         _ => {}
     }
+}
+
+fn collect_painted_rects(shape: &egui::epaint::Shape, out: &mut Vec<(Rect, egui::Color32)>) {
+    let mut shapes = Vec::new();
+    collect_painted_rect_shapes(shape, &mut shapes);
+    out.extend(shapes.into_iter().map(|s| (s.rect, s.fill)));
 }
 
 #[test]
@@ -1015,19 +1024,38 @@ fn responsive_900px_topbar_slot_headroom_and_non_overlapping_modals() {
         );
     }
 
-    // 3. Open OPTIONS + STEAM ACCOUNT LINK modals: neither covers ALLIES/ORACLE/ENEMIES or overlaps the other.
+    // 3. Open OPTIONS (top-right drawer with square HUD frame) + STEAM ACCOUNT LINK (bottom-left):
+    // OPTIONS opens directly under the top bar on the right, uses square corners (CornerRadius::ZERO)
+    // and app palette (P_INDIGO_1 fill, P_LINE stroke), and does not overlap STEAM ACCOUNT LINK.
     app.options_open = true;
     app.account_editor_open = true;
-    let r_modals = render_at_viewport(&mut app, &ctx, vec2(960.0, 680.0));
+    let (r_modals, modals_out) = render_at_viewport_with_output(&mut app, &ctx, vec2(960.0, 680.0));
     let opts_win = r_modals.options_window.expect("OPTIONS window open");
     let acct_win = r_modals
         .account_window
         .expect("STEAM ACCOUNT LINK window open");
     assert!(
-        !opts_win.intersects(r_modals.oracle)
-            && !opts_win.intersects(r_modals.enemies)
-            && !opts_win.intersects(r_modals.allies),
-        "OPTIONS window {:?} must not cover top-row cards",
+        opts_win.min.y >= r_modals.top_bar.max.y
+            && opts_win.min.y <= r_modals.top_bar.max.y + 18.0
+            && opts_win.max.x >= 960.0 - 24.0
+            && opts_win.max.x <= 960.0,
+        "OPTIONS window {:?} must anchor top-right below top_bar {:?}",
+        opts_win,
+        r_modals.top_bar
+    );
+    let mut modal_rect_shapes = Vec::new();
+    for clipped in &modals_out.shapes {
+        collect_painted_rect_shapes(&clipped.shape, &mut modal_rect_shapes);
+    }
+    assert!(
+        modal_rect_shapes.iter().any(|s| {
+            (s.rect.min - opts_win.min).length() <= 1.5
+                && (s.rect.max - opts_win.max).length() <= 1.5
+                && s.corner_radius == egui::CornerRadius::ZERO
+                && s.fill == P_INDIGO_1
+                && s.stroke == Stroke::new(1.0_f32, P_LINE)
+        }),
+        "OPTIONS window {:?} must render a square (CornerRadius::ZERO) frame with P_INDIGO_1 fill and P_LINE stroke",
         opts_win
     );
     assert!(

@@ -300,8 +300,17 @@ impl TrueSightGuiApp {
         let resp = egui::Window::new("OPTIONS · DEV & TELEMETRY")
             .collapsible(false)
             .resizable(false)
-            .anchor(Align2::RIGHT_BOTTOM, vec2(-12.0, -12.0))
+            .fade_in(false)
+            .anchor(Align2::RIGHT_TOP, vec2(-12.0, 56.0))
             .constrain_to(ctx.screen_rect())
+            .frame(
+                egui::Frame::window(&ctx.style())
+                    .fill(P_INDIGO_1)
+                    .stroke(Stroke::new(1.0_f32, P_LINE))
+                    .corner_radius(CornerRadius::ZERO)
+                    .shadow(egui::Shadow::NONE)
+                    .inner_margin(Margin::same(10)),
+            )
             .default_width(max_opt_w)
             .max_width(max_opt_w)
             .show(ctx, |ui| {
@@ -442,6 +451,11 @@ impl TrueSightGuiApp {
         if close_window {
             self.options_open = false;
         }
-        (resp.map(|r| r.response.rect), demo_btn_rect)
+        let win_rect = resp.as_ref().map(|r| r.response.rect);
+        if let Some(r) = &resp {
+            let painter = ctx.layer_painter(r.response.layer_id);
+            paint_hud_corner_ticks(&painter, r.response.rect, P_GEM);
+        }
+        (win_rect, demo_btn_rect)
     }
 }
