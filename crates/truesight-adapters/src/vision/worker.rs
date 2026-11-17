@@ -131,18 +131,17 @@ impl<S: ScreenFrameSource> VisionCaptureAdapter<S> {
         frame: &RgbFrame,
         rects: &[TopBarSlotRect; 5],
         layout: TopBarLayout,
-    ) -> [SlotCandidate; 5] {
-        let mut candidates = [None; 5];
-        for (slot, rect) in rects.iter().enumerate() {
-            candidates[slot] = self.catalog.match_slot_with_layout(
+    ) -> [Vec<(HeroId, f32, f32)>; 5] {
+        std::array::from_fn(|slot| {
+            self.catalog.match_slot_candidates_with_layout(
                 &frame.rgb,
                 frame.width,
                 frame.height,
-                *rect,
+                rects[slot],
                 layout,
-            );
-        }
-        candidates
+                10,
+            )
+        })
     }
 
     fn evaluate_layout(
@@ -157,9 +156,9 @@ impl<S: ScreenFrameSource> VisionCaptureAdapter<S> {
             TopBarLayout::InGame => compute_ingame_topbar_slot_rects(frame.width, virtual_h),
         };
 
-        let mut rad = self.evaluate_side_slots(frame, &rad_rects, layout);
-        let mut dire = self.evaluate_side_slots(frame, &dire_rects, layout);
-        dedup_layout_candidates(&mut rad, &mut dire);
+        let rad_ranked = self.evaluate_side_slots(frame, &rad_rects, layout);
+        let dire_ranked = self.evaluate_side_slots(frame, &dire_rects, layout);
+        let (rad, dire) = dedup_layout_candidates(&rad_ranked, &dire_ranked);
 
         let mut score = 0.0_f32;
         let mut unique_count = 0_usize;
@@ -174,35 +173,59 @@ impl<S: ScreenFrameSource> VisionCaptureAdapter<S> {
     }
 }
 
-/// Drops heroes matching >= 3 slots (uniform background) and keeps only the best slot per hero.
-fn dedup_layout_candidates(rad: &mut [SlotCandidate; 5], dire: &mut [SlotCandidate; 5]) {
-    let all = rad.iter().chain(dire.iter()).copied().collect::<Vec<_>>();
-    for idx in 0..10_usize {
-        let Some((hid, diff, _)) = all[idx] else {
-            continue;
-        };
-        let mut count = 0_usize;
-        let mut best_diff = diff;
-        let mut best_idx = idx;
-        for (j, cand) in all.iter().enumerate() {
-            if let Some((other_id, other_diff, _)) = cand
-                && *other_id == hid
-            {
-                count += 1;
-                if *other_diff < best_diff {
-                    best_diff = *other_diff;
-                    best_idx = j;
-                }
-            }
+/// Drops heroes matching >= 3 top-1 slots (uniform background flood) and resolves remaining
+/// cross-slot collisions by assigning the tightest slot first and falling back to next-best
+/// unallocated candidates within threshold.
+pub(crate) fn dedup_layout_candidates(
+    rad_ranked: &[Vec<(HeroId, f32, f32)>; 5],
+    dire_ranked: &[Vec<(HeroId, f32, f32)>; 5],
+) -> ([SlotCandidate; 5], [SlotCandidate; 5]) {
+    let mut top1_counts: std::collections::HashMap<HeroId, usize> =
+        std::collections::HashMap::new();
+    for cands in rad_ranked.iter().chain(dire_ranked.iter()) {
+        if let Some((hid, _, _)) = cands.first() {
+            *top1_counts.entry(*hid).or_insert(0) += 1;
         }
-        if count >= 3 || idx != best_idx {
-            if idx < 5 {
-                rad[idx] = None;
-            } else {
-                dire[idx - 5] = None;
+    }
+
+    let flooded_heroes: std::collections::HashSet<HeroId> = top1_counts
+        .into_iter()
+        .filter_map(|(hid, count)| (count >= 3).then_some(hid))
+        .collect();
+
+    let mut flooded_slot = [false; 10];
+    let mut flat_candidates: Vec<(f32, usize, usize, HeroId, f32)> = Vec::new();
+    for (slot_idx, cands) in rad_ranked.iter().chain(dire_ranked.iter()).enumerate() {
+        if let Some((top1_id, _, _)) = cands.first()
+            && flooded_heroes.contains(top1_id)
+        {
+            flooded_slot[slot_idx] = true;
+            continue;
+        }
+        for (rank_idx, &(hid, diff, ms)) in cands.iter().enumerate() {
+            if !flooded_heroes.contains(&hid) {
+                flat_candidates.push((diff, slot_idx, rank_idx, hid, ms));
             }
         }
     }
+
+    flat_candidates.sort_by(|a, b| {
+        a.0.total_cmp(&b.0)
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| a.2.cmp(&b.2))
+    });
+
+    let mut assigned: [SlotCandidate; 10] = [None; 10];
+    let mut used_heroes: std::collections::HashSet<HeroId> = std::collections::HashSet::new();
+    for (diff, slot_idx, _, hid, ms) in flat_candidates {
+        if !flooded_slot[slot_idx] && assigned[slot_idx].is_none() && used_heroes.insert(hid) {
+            assigned[slot_idx] = Some((hid, diff, ms));
+        }
+    }
+
+    let rad = std::array::from_fn(|i| assigned[i]);
+    let dire = std::array::from_fn(|i| assigned[5 + i]);
+    (rad, dire)
 }
 
 impl<S: ScreenFrameSource> VisionCaptureAdapter<S> {
