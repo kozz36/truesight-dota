@@ -510,7 +510,7 @@ fn viewport_sets_low_res_bounds_wayland_app_id_and_gem_icon() {
     );
 
     let vb = build_viewport_builder();
-    assert_eq!(vb.min_inner_size, Some(vec2(900.0, 500.0)));
+    assert_eq!(vb.min_inner_size, Some(vec2(640.0, 440.0)));
     assert_eq!(vb.inner_size, Some(vec2(1180.0, 700.0)));
     assert_eq!(vb.app_id.as_deref(), Some("truesight-dota"));
     assert!(vb.icon.is_some(), "viewport must carry the Gem window icon");
@@ -808,9 +808,11 @@ fn dpi_scaled_low_resolution_viewport_uses_scrollable_fallback_without_overlap()
     let r_full = render_at_viewport(&mut app, &ctx_1x, vec2(960.0, 680.0));
     assert!(!r_full.scrollable_fallback);
 
-    // Simulate 720p @ 125% (1024x576 logical), 768p @ 150% (910x512 logical), and min_inner_size (640x440).
+    // Simulate 720p @ 125% (1024x576 logical), 720p @ 150% (853x480 logical),
+    // 768p @ 150% (910x512 logical), and min_inner_size (640x440).
     for (ppp, logical_vp) in [
         (1.25_f32, vec2(1024.0, 576.0)),
+        (1.5_f32, vec2(853.0, 480.0)),
         (1.5_f32, vec2(910.0, 512.0)),
         (1.5_f32, vec2(640.0, 440.0)),
     ] {
@@ -827,6 +829,19 @@ fn dpi_scaled_low_resolution_viewport_uses_scrollable_fallback_without_overlap()
                 && r.suggested.max.x < r.matrix.min.x,
             "ppp={ppp} logical={logical_vp:?} cards overlapped under fallback"
         );
+        if logical_vp.x >= 853.0 {
+            assert!(
+                r.top_bar.max.x <= logical_vp.x
+                    && r.top_bar.contains_rect(r.options_button)
+                    && r.top_bar.contains_rect(r.reset_button)
+                    && r.enemies.max.x <= logical_vp.x
+                    && r.matrix.max.x <= logical_vp.x,
+                "ppp={ppp} logical={logical_vp:?} must fit horizontally without clipping: top={:?} enemies={:?} matrix={:?}",
+                r.top_bar,
+                r.enemies,
+                r.matrix
+            );
+        }
         assert!(
             !r.suggested_row_rects.is_empty()
                 && (r.suggested_pick_rects[0].center().y - r.suggested_row_rects[0].center().y)

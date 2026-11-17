@@ -27,7 +27,7 @@ use truesight_adapters::vision::BoundedVisionWorker;
 use truesight_core::domain::{Role, Side, TEAM_SIZE};
 use truesight_core::math::DraftAnalysis5v5;
 
-const MIN_UNSCROLLED_W: f32 = 880.0;
+const MIN_UNSCROLLED_W: f32 = 832.0;
 const MIN_UNSCROLLED_H: f32 = 640.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -508,10 +508,12 @@ impl eframe::App for TrueSightGuiApp {
 }
 
 /// Builds the desktop viewport configuration with low-resolution bounds, Wayland `app_id`, and the Gem icon.
+/// Keeps the native minimum independent of `MIN_UNSCROLLED_*` so 150% DPI scaling on 1280x720 displays
+/// (`640*1.5 = 960`, `440*1.5 = 660`) fits comfortably within the physical screen work area.
 pub(super) fn build_viewport_builder() -> egui::ViewportBuilder {
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1180.0, 700.0])
-        .with_min_inner_size([MIN_UNSCROLLED_W + 20.0, 500.0])
+        .with_min_inner_size([640.0, 440.0])
         .with_app_id("truesight-dota")
         .with_title("TrueSight Dota — 5v5 Live Draft Oracle");
     if let Some(icon) = theme::build_gem_window_icon() {
