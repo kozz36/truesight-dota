@@ -149,12 +149,16 @@ pub(crate) fn decode_windows_steam_path_utf8(stdout: &[u8]) -> Option<PathBuf> {
 }
 
 #[cfg(any(target_os = "windows", test))]
-pub(crate) fn build_windows_steam_path_powershell_args() -> [&'static str; 4] {
+pub(crate) fn build_windows_steam_path_powershell_args(reg_key: &str) -> [String; 4] {
+    let escaped = reg_key.replace('\'', "''");
+    let script = format!(
+        "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $p = (Get-ItemProperty -LiteralPath 'Registry::{escaped}' -Name 'SteamPath' -ErrorAction SilentlyContinue).SteamPath; if ($p) {{ [Console]::Out.Write($p) }}"
+    );
     [
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $p = (Get-ItemProperty -LiteralPath 'Registry::HKEY_CURRENT_USER\\Software\\Valve\\Steam' -Name 'SteamPath' -ErrorAction SilentlyContinue).SteamPath; if ($p) { [Console]::Out.Write($p) }",
+        "-NoProfile".to_string(),
+        "-NonInteractive".to_string(),
+        "-Command".to_string(),
+        script,
     ]
 }
 
@@ -218,18 +222,29 @@ pub(crate) fn detect_steam_vdf_in_candidates(candidates: &[PathBuf]) -> Option<u
 }
 
 /// Fallback Steam install discovery via `HKCU\Software\Valve\Steam\SteamPath`.
-///
-/// Queries PowerShell with `[Console]::OutputEncoding = UTF8Encoding` so non-ASCII install
-/// paths are emitted losslessly regardless of the console OEM code page, and falls back to
-/// strict UTF-8 `reg query` parsing (never `from_utf8_lossy`).
 #[cfg(target_os = "windows")]
 pub(crate) fn query_windows_steam_path() -> Option<PathBuf> {
-    let mut ps_cmd = Command::new("powershell");
+    query_windows_steam_path_at(r"HKEY_CURRENT_USER\Software\Valve\Steam")
+}
+
+/// Queries a Windows registry key for a `SteamPath` value using trusted System32 absolute paths.
+///
+/// Uses `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe` with UTF-8 output encoding
+/// so non-ASCII paths are preserved losslessly, falling back to `%SystemRoot%\System32\reg.exe`
+/// with strict UTF-8 validation (never `from_utf8_lossy`).
+#[cfg(target_os = "windows")]
+pub(crate) fn query_windows_steam_path_at(reg_key: &str) -> Option<PathBuf> {
+    let sys_root = std::env::var("SystemRoot").ok();
+    let windir = std::env::var("WINDIR").ok();
+    let ps_exe = crate::vision::resolve_windows_system32_exe(
+        sys_root.as_deref(),
+        windir.as_deref(),
+        r"WindowsPowerShell\v1.0\powershell.exe",
+    );
+    let mut ps_cmd = Command::new(&ps_exe);
     configure_background_command(&mut ps_cmd);
-    if let Ok(out) = ps_cmd
-        .args(build_windows_steam_path_powershell_args())
-        .output()
-    {
+    let ps_args = build_windows_steam_path_powershell_args(reg_key);
+    if let Ok(out) = ps_cmd.args(&ps_args).output() {
         if out.status.success() {
             if let Some(path) = decode_windows_steam_path_utf8(&out.stdout) {
                 return Some(path);
@@ -237,10 +252,15 @@ pub(crate) fn query_windows_steam_path() -> Option<PathBuf> {
         }
     }
 
-    let mut reg_cmd = Command::new("reg");
+    let reg_exe = crate::vision::resolve_windows_system32_exe(
+        sys_root.as_deref(),
+        windir.as_deref(),
+        "reg.exe",
+    );
+    let mut reg_cmd = Command::new(&reg_exe);
     configure_background_command(&mut reg_cmd);
     let out = reg_cmd
-        .args(["query", r"HKCU\Software\Valve\Steam", "/v", "SteamPath"])
+        .args(["query", reg_key, "/v", "SteamPath"])
         .output()
         .ok()?;
     if !out.status.success() {

@@ -3532,9 +3532,29 @@ fn windows_steam_path_decoder_rejects_oem_lossy_bytes_and_preserves_utf8_unicode
         build_windows_steam_path_powershell_args, decode_windows_steam_path_utf8,
         parse_windows_reg_steam_path_bytes,
     };
-    use std::path::Path;
+    use crate::vision::resolve_windows_system32_exe;
+    use std::path::{Path, PathBuf};
 
-    let args = build_windows_steam_path_powershell_args();
+    assert_eq!(
+        resolve_windows_system32_exe(
+            Some(r"D:\WinOS"),
+            None,
+            r"WindowsPowerShell\v1.0\powershell.exe"
+        ),
+        PathBuf::from(r"D:\WinOS")
+            .join("System32")
+            .join("WindowsPowerShell")
+            .join("v1.0")
+            .join("powershell.exe")
+    );
+    assert_eq!(
+        resolve_windows_system32_exe(None, Some(r"E:\Windows"), "reg.exe"),
+        PathBuf::from(r"E:\Windows")
+            .join("System32")
+            .join("reg.exe")
+    );
+
+    let args = build_windows_steam_path_powershell_args(r"HKEY_CURRENT_USER\Software\Valve\Steam");
     assert_eq!(args[0], "-NoProfile");
     assert_eq!(args[1], "-NonInteractive");
     assert_eq!(args[2], "-Command");
@@ -3545,6 +3565,14 @@ fn windows_steam_path_decoder_rejects_oem_lossy_bytes_and_preserves_utf8_unicode
             && args[3].contains("SteamPath"),
         "PowerShell SteamPath query must enforce UTF-8 output encoding: {}",
         args[3]
+    );
+
+    let custom_args =
+        build_windows_steam_path_powershell_args(r"HKEY_CURRENT_USER\Software\TrueSight'sTest");
+    assert!(
+        custom_args[3].contains(r"Registry::HKEY_CURRENT_USER\Software\TrueSight''sTest"),
+        "Parameterized registry key must single-quote escape safely: {}",
+        custom_args[3]
     );
 
     // Valid UTF-8 non-ASCII Steam paths (Latin accents, CJK, quotes/newlines) decode losslessly.
@@ -3583,24 +3611,67 @@ fn windows_steam_path_decoder_rejects_oem_lossy_bytes_and_preserves_utf8_unicode
 #[cfg(target_os = "windows")]
 #[test]
 fn windows_native_powershell_utf8_roundtrip_preserves_non_ascii_steampath() {
-    use crate::platform::{configure_background_command, decode_windows_steam_path_utf8};
+    use crate::platform::{configure_background_command, query_windows_steam_path_at};
+    use crate::vision::resolve_windows_system32_exe;
     use std::path::Path;
     use std::process::Command;
 
-    let mut cmd = Command::new("powershell");
-    configure_background_command(&mut cmd);
-    let out = cmd
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); [Console]::Out.Write('C:\\Juegos\\Estación\\Steam_日本語')",
-        ])
+    struct RegCleanup {
+        ps_exe: std::path::PathBuf,
+        registry_path: String,
+    }
+    impl Drop for RegCleanup {
+        fn drop(&mut self) {
+            let escaped = self.registry_path.replace('\'', "''");
+            let script = format!(
+                "Remove-Item -LiteralPath '{escaped}' -Recurse -Force -ErrorAction SilentlyContinue"
+            );
+            let mut cmd = Command::new(&self.ps_exe);
+            configure_background_command(&mut cmd);
+            let _ = cmd
+                .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+                .output();
+        }
+    }
+
+    let sys_root = std::env::var("SystemRoot").ok();
+    let windir = std::env::var("WINDIR").ok();
+    let ps_exe = resolve_windows_system32_exe(
+        sys_root.as_deref(),
+        windir.as_deref(),
+        r"WindowsPowerShell\v1.0\powershell.exe",
+    );
+
+    let full_key = format!(
+        r"HKEY_CURRENT_USER\Software\TrueSightDotaTest_{}",
+        std::process::id()
+    );
+    let registry_path = format!(r"Registry::{full_key}");
+    let _guard = RegCleanup {
+        ps_exe: ps_exe.clone(),
+        registry_path: registry_path.clone(),
+    };
+
+    let expected_path = "C:\\Juegos\\Estación\\Steam_日本語";
+    let setup_script = format!(
+        "New-Item -Path '{rp}' -Force | Out-Null; Set-ItemProperty -LiteralPath '{rp}' -Name 'SteamPath' -Value '{val}'",
+        rp = registry_path.replace('\'', "''"),
+        val = expected_path.replace('\'', "''"),
+    );
+    let mut setup_cmd = Command::new(&ps_exe);
+    configure_background_command(&mut setup_cmd);
+    let setup_out = setup_cmd
+        .args(["-NoProfile", "-NonInteractive", "-Command", &setup_script])
         .output()
-        .expect("powershell.exe must execute on Windows");
-    assert!(out.status.success());
+        .expect("system PowerShell must create disposable HKCU test key");
+    assert!(
+        setup_out.status.success(),
+        "failed creating disposable test registry key: {:?}",
+        setup_out
+    );
+
     assert_eq!(
-        decode_windows_steam_path_utf8(&out.stdout).as_deref(),
-        Some(Path::new(r"C:\Juegos\Estación\Steam_日本語"))
+        query_windows_steam_path_at(&full_key).as_deref(),
+        Some(Path::new(expected_path))
     );
 }

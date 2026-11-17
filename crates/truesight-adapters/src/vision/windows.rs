@@ -33,7 +33,11 @@ pub fn resolve_windows_system32_exe(
         .map(str::trim)
         .find(|cand| !cand.is_empty() && is_windows_abs_root(cand))
         .unwrap_or(r"C:\Windows");
-    PathBuf::from(root).join("System32").join(exe_name)
+    let mut path = PathBuf::from(root).join("System32");
+    for segment in exe_name.split(['\\', '/']).filter(|s| !s.is_empty()) {
+        path.push(segment);
+    }
+    path
 }
 
 /// Validates Windows window metadata and verified PID executable identity so minimized windows,
