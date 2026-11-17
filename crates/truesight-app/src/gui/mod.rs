@@ -103,6 +103,32 @@ impl TrueSightGuiApp {
         }
     }
 
+    pub(super) fn apply_account_input(&mut self) -> Option<AccountLinkConfig> {
+        let Ok(raw) = self.account_input.trim().parse::<u64>() else {
+            self.status_banner = "Enter a numeric Steam32 or Steam64 ID.".into();
+            return None;
+        };
+        let Some(s32) = normalize_steam32_id(raw) else {
+            self.status_banner = "Invalid Steam32/Steam64 account ID.".into();
+            return None;
+        };
+        self.session.set_account_id(Some(s32), true);
+        let syncing = self.session.sync_if_player_stale();
+        self.status_banner = if syncing || self.session.sync_in_flight {
+            format!("Linked Steam32 account #{s32} (syncing player cache...).")
+        } else {
+            format!("Linked Steam32 account #{s32}.")
+        };
+        Some(AccountLinkConfig::Explicit(s32))
+    }
+
+    pub(super) fn apply_auto_account(&mut self) -> AccountLinkConfig {
+        self.session.set_account_auto();
+        let _ = self.session.sync_if_player_stale();
+        self.status_banner = format!("Auto account mode: {}.", self.session.db_status);
+        AccountLinkConfig::Auto
+    }
+
     pub(super) fn active_enemy_scout_role(&self) -> Role {
         if let Some(role) = self.enemy_scout_role {
             return role;
@@ -309,26 +335,14 @@ impl TrueSightGuiApp {
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
                         if ui.button("APPLY").clicked() || enter_pressed {
-                            if let Ok(raw) = self.account_input.trim().parse::<u64>() {
-                                if let Some(s32) = normalize_steam32_id(raw) {
-                                    self.session.set_account_id(Some(s32), true);
-                                    let _ = save_account_config(AccountLinkConfig::Explicit(s32));
-                                    self.status_banner = format!("Linked Steam32 account #{s32}.");
-                                    close_modal = true;
-                                } else {
-                                    self.status_banner =
-                                        "Invalid Steam32/Steam64 account ID.".into();
-                                }
-                            } else {
-                                self.status_banner =
-                                    "Enter a numeric Steam32 or Steam64 ID.".into();
+                            if let Some(cfg) = self.apply_account_input() {
+                                let _ = save_account_config(cfg);
+                                close_modal = true;
                             }
                         }
                         if ui.button("AUTO (VDF)").clicked() {
-                            self.session.set_account_auto();
-                            let _ = save_account_config(AccountLinkConfig::Auto);
-                            self.status_banner =
-                                format!("Auto account mode: {}.", self.session.db_status);
+                            let cfg = self.apply_auto_account();
+                            let _ = save_account_config(cfg);
                             close_modal = true;
                         }
                         if ui.button("UNLINK").clicked() {

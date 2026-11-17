@@ -1,4 +1,7 @@
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::{
+    Arc,
+    mpsc::{self, Receiver, TryRecvError},
+};
 use truesight_adapters::gsi::BoundedGsiListener;
 use truesight_adapters::sync::LocalCacheManager;
 use truesight_adapters::vision::{BoundedVisionWorker, CaptureAvailability, VisionCaptureMode};
@@ -16,6 +19,9 @@ pub(crate) struct SyncCompletion {
     account_id: Option<u64>,
     result: Result<String, String>,
 }
+
+type BackgroundSyncRunner =
+    Arc<dyn Fn(LocalCacheManager, bool) -> Result<String, String> + Send + Sync>;
 
 pub struct AppSession {
     pub draft: DraftState,
@@ -39,6 +45,7 @@ pub struct AppSession {
     sync_generation: u64,
     sync_rx: Option<Receiver<SyncCompletion>>,
     sync_workers: Vec<std::thread::JoinHandle<()>>,
+    sync_runner: BackgroundSyncRunner,
     last_rules_state: Option<String>,
     vision_reset_pending: bool,
 }
@@ -124,9 +131,20 @@ impl AppSession {
             sync_generation: 0,
             sync_rx: None,
             sync_workers: Vec::new(),
+            sync_runner: Arc::new(|mgr, force| {
+                mgr.sync_from_opendota(force).map_err(|e| e.to_string())
+            }),
             last_rules_state: None,
             vision_reset_pending: false,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_background_sync_runner<F>(&mut self, runner: F)
+    where
+        F: Fn(LocalCacheManager, bool) -> Result<String, String> + Send + Sync + 'static,
+    {
+        self.sync_runner = Arc::new(runner);
     }
 
     fn reap_finished_sync_workers(&mut self) {
@@ -203,22 +221,28 @@ impl AppSession {
             .freshness_badge(LocalCacheManager::now_unix());
     }
 
+    fn apply_account_transition(&mut self, prev_account: Option<u64>) {
+        if self.cache_mgr.player_account_id != prev_account {
+            self.sync_generation = self.cache_mgr.cancel_in_flight();
+            self.sync_in_flight = false;
+            self.sync_rx = None;
+            self.reap_finished_sync_workers();
+            self.reload_repository();
+        } else if !self.sync_in_flight {
+            self.reload_repository();
+        }
+    }
+
     pub fn set_account_id(&mut self, account_id: Option<u64>, explicit: bool) {
-        self.sync_generation = self.cache_mgr.cancel_in_flight();
-        self.sync_in_flight = false;
-        self.sync_rx = None;
-        self.reap_finished_sync_workers();
+        let prev_account = self.cache_mgr.player_account_id;
         self.cache_mgr.set_account_id(account_id, explicit);
-        self.reload_repository();
+        self.apply_account_transition(prev_account);
     }
 
     pub fn set_account_auto(&mut self) {
-        self.sync_generation = self.cache_mgr.cancel_in_flight();
-        self.sync_in_flight = false;
-        self.sync_rx = None;
-        self.reap_finished_sync_workers();
+        let prev_account = self.cache_mgr.player_account_id;
         self.cache_mgr.set_auto_account();
-        self.reload_repository();
+        self.apply_account_transition(prev_account);
     }
 
     pub fn start_background_sync_with<F>(&mut self, force: bool, task: F) -> bool
@@ -256,9 +280,19 @@ impl AppSession {
     }
 
     pub fn start_background_sync(&mut self, force: bool) -> bool {
-        self.start_background_sync_with(force, |mgr, force| {
-            mgr.sync_from_opendota(force).map_err(|e| e.to_string())
-        })
+        let runner = Arc::clone(&self.sync_runner);
+        self.start_background_sync_with(force, move |mgr, force| runner(mgr, force))
+    }
+
+    /// Starts a non-blocking background sync (`force = false`) when a linked player's cache is
+    /// missing or past the 1h TTL, preserving any fresh Meta cache.
+    pub fn sync_if_player_stale(&mut self) -> bool {
+        let now = LocalCacheManager::now_unix();
+        if self.cache_mgr.is_player_stale(now) {
+            self.start_background_sync(false)
+        } else {
+            false
+        }
     }
 
     pub fn poll_sync_completion(&mut self) -> bool {
@@ -648,6 +682,7 @@ impl AppSession {
                     && self.cache_mgr.player_account_id != Some(steam32)
                 {
                     self.set_account_id(Some(steam32), false);
+                    let _ = self.sync_if_player_stale();
                 }
             }
             DraftEvent::LocalPlayerHeroDetected { hero_slug } => {
