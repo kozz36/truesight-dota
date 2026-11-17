@@ -864,6 +864,9 @@ impl AppSession {
     // physical portrait in the same batch, including when all role slots are full.
     // Missing events are not removals (death/occlusion grace belongs to the adapter).
     pub(crate) fn apply_vision_events(&mut self, events: Vec<DraftEvent>) {
+        // Cached observations support retirement only; replaying them as additions
+        // would undo manual replacements and subsequent GSI side corrections.
+        let mut fresh_slots = [[None; TEAM_SIZE]; 2];
         for event in events {
             if let DraftEvent::PickDetected {
                 side,
@@ -875,6 +878,7 @@ impl AppSession {
                 if slot < TEAM_SIZE {
                     let index = usize::from(side == Side::Enemies);
                     self.vision_slots[index][slot] = Some(hero_id);
+                    fresh_slots[index][slot] = Some(hero_id);
                 }
             }
         }
@@ -899,7 +903,7 @@ impl AppSession {
                 .retain(|&(owner_side, id)| owner_side != side || observed.contains(&Some(id)));
         }
         for (index, side) in [Side::Allies, Side::Enemies].into_iter().enumerate() {
-            for hero_id in self.vision_slots[index].into_iter().flatten() {
+            for hero_id in fresh_slots[index].into_iter().flatten() {
                 if self
                     .side_picks(side)
                     .iter()

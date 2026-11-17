@@ -355,7 +355,7 @@ const DROP_JOIN_TIMEOUT: Duration = Duration::from_millis(350);
 /// Bounded background worker polling Dota 2 top-bar frames at ~1 Hz.
 pub struct BoundedVisionWorker {
     queue: Arc<BoundedDraftQueue>,
-    ally_faction_code: Arc<AtomicU8>,
+    ally_faction: Arc<Mutex<Faction>>,
     capture_mode_code: Arc<AtomicU8>,
     runtime_health: Arc<Mutex<CaptureRuntimeHealth>>,
     shutdown: Arc<AtomicBool>,
@@ -381,12 +381,12 @@ impl BoundedVisionWorker {
         let catalog = HeroVisionCatalog::from_embedded()?;
         let queue = Arc::new(BoundedDraftQueue::new(capacity));
         let queue_ref = Arc::clone(&queue);
-        let ally_faction_code = Arc::new(AtomicU8::new(0));
+        let ally_faction = Arc::new(Mutex::new(Faction::Radiant));
         let capture_mode_code = Arc::new(AtomicU8::new(VisionCaptureMode::Any as u8));
         let runtime_health = Arc::new(Mutex::new(CaptureRuntimeHealth::WaitingForGame));
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_sync = Arc::new((Mutex::new(false), Condvar::new()));
-        let faction_ref = Arc::clone(&ally_faction_code);
+        let faction_ref = Arc::clone(&ally_faction);
         let mode_ref = Arc::clone(&capture_mode_code);
         let health_ref = Arc::clone(&runtime_health);
         let shutdown_ref = Arc::clone(&shutdown);
@@ -410,7 +410,7 @@ impl BoundedVisionWorker {
 
         Some(Self {
             queue,
-            ally_faction_code,
+            ally_faction,
             capture_mode_code,
             runtime_health,
             shutdown,
@@ -427,9 +427,13 @@ impl BoundedVisionWorker {
             .clone()
     }
 
+    /// Invalidates queued and in-flight relative-side picks when the user's faction changes.
     pub fn set_ally_faction(&self, faction: Faction) {
-        let code = if faction == Faction::Dire { 1 } else { 0 };
-        self.ally_faction_code.store(code, Ordering::Relaxed);
+        let mut current = self.ally_faction.lock().unwrap_or_else(|e| e.into_inner());
+        if *current != faction {
+            *current = faction;
+            self.queue.request_reset();
+        }
     }
 
     pub fn set_capture_mode(&self, mode: VisionCaptureMode) {
@@ -507,7 +511,7 @@ fn run_vision_loop<S: ScreenFrameSource>(
     source: S,
     catalog: HeroVisionCatalog,
     queue: Arc<BoundedDraftQueue>,
-    ally_faction_code: Arc<AtomicU8>,
+    ally_faction: Arc<Mutex<Faction>>,
     capture_mode_code: Arc<AtomicU8>,
     runtime_health: Arc<Mutex<CaptureRuntimeHealth>>,
     shutdown: Arc<AtomicBool>,
@@ -516,16 +520,18 @@ fn run_vision_loop<S: ScreenFrameSource>(
     let _completion = LoopCompletionSignal(shutdown_sync);
     let mut adapter = VisionCaptureAdapter::new(source, catalog);
     while !shutdown.load(Ordering::Acquire) {
-        let (poll_seq, should_reset) = queue.begin_poll_cycle();
+        // Use the same lock/order as set_ally_faction: no poll may pair an old
+        // faction with a new epoch. Capture runs unlocked; a later faction change
+        // invalidates its results through the queue's existing epoch admission.
+        let (poll_seq, should_reset, faction) = {
+            let faction = ally_faction.lock().unwrap_or_else(|e| e.into_inner());
+            let (epoch, reset) = queue.begin_poll_cycle();
+            (epoch, reset, *faction)
+        };
         if should_reset {
             adapter.reset_state();
         }
-        let dire = ally_faction_code.load(Ordering::Relaxed) == 1;
-        adapter.set_ally_faction(if dire {
-            Faction::Dire
-        } else {
-            Faction::Radiant
-        });
+        adapter.set_ally_faction(faction);
         let mode = VisionCaptureMode::from_code(capture_mode_code.load(Ordering::Acquire));
         adapter.set_capture_mode(mode);
 

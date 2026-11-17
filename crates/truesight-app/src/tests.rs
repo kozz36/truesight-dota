@@ -574,6 +574,247 @@ fn vision_replaces_hero_in_same_portrait_slot() {
     assert_eq!(session.draft.allies.iter().flatten().count(), 0);
 }
 
+#[test]
+fn vision_cached_observations_do_not_undo_manual_replacement() {
+    use truesight_core::domain::{HeroId, Side};
+    let mut session = AppSession::new().unwrap();
+    session.apply_vision_events(vec![visual_pick(Side::Allies, 0, 48)]);
+    let slot = session
+        .draft
+        .allies
+        .iter()
+        .position(|p| p.is_some())
+        .unwrap();
+    session.set_slot_manual(Side::Allies, slot, HeroId(88));
+    session.apply_vision_events(vec![]);
+    assert!(
+        !session
+            .draft
+            .allies
+            .iter()
+            .flatten()
+            .any(|p| p.hero_id == HeroId(48)),
+        "Empty batch resurrected manually replaced Luna"
+    );
+    session.apply_vision_events(vec![visual_pick(Side::Enemies, 0, 2)]);
+    assert!(
+        !session
+            .draft
+            .allies
+            .iter()
+            .flatten()
+            .any(|p| p.hero_id == HeroId(48)),
+        "Unrelated batch resurrected manually replaced Luna"
+    );
+    assert_eq!(session.draft.allies[slot].unwrap().hero_id, HeroId(88));
+}
+
+#[test]
+fn vision_cached_observations_do_not_undo_gsi_side_correction() {
+    use truesight_core::domain::{HeroId, Side};
+    let mut session = AppSession::new().unwrap();
+    session.apply_vision_events(vec![visual_pick(Side::Allies, 0, 48)]);
+    session.apply_event(visual_pick(Side::Enemies, 0, 48));
+    session.apply_vision_events(vec![]);
+    assert!(
+        session
+            .draft
+            .enemies
+            .iter()
+            .flatten()
+            .any(|p| p.hero_id == HeroId(48)),
+        "Empty batch undid GSI side correction"
+    );
+    session.apply_vision_events(vec![visual_pick(Side::Allies, 1, 2)]);
+    assert!(
+        session
+            .draft
+            .enemies
+            .iter()
+            .flatten()
+            .any(|p| p.hero_id == HeroId(48)),
+        "Unrelated batch undid GSI side correction"
+    );
+    assert!(
+        !session
+            .draft
+            .allies
+            .iter()
+            .flatten()
+            .any(|p| p.hero_id == HeroId(48))
+    );
+}
+
+// Each capture is gated so faction changes occur at a known worker batch boundary.
+struct VisionGatedSource {
+    entered: std::sync::mpsc::Sender<()>,
+    frames: std::sync::mpsc::Receiver<truesight_adapters::vision::RgbFrame>,
+}
+
+impl truesight_adapters::vision::ScreenFrameSource for VisionGatedSource {
+    fn capture_frame(
+        &mut self,
+    ) -> Result<Option<truesight_adapters::vision::RgbFrame>, truesight_core::ports::PortError>
+    {
+        let _ = self.entered.send(());
+        Ok(self
+            .frames
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .ok())
+    }
+}
+
+fn vision_faction_frame(hero: u16) -> truesight_adapters::vision::RgbFrame {
+    use truesight_adapters::vision::{RgbFrame, compute_topbar_slot_rects, parse_hero_atlas};
+    use truesight_core::domain::HeroId;
+    let atlas = parse_hero_atlas().unwrap();
+    let (w, h) = (1920, 1080);
+    let mut rgb = vec![0; w * h * 3];
+    let (rad, dire) = compute_topbar_slot_rects(w, h);
+    for (rect, id) in [(rad[0], hero), (dire[0], 2)] {
+        let portrait = &atlas.heroes[&HeroId(id)];
+        for y in 0..rect.height {
+            for x in 0..rect.width {
+                let src = ((y * atlas.hero_height / rect.height) * atlas.hero_width
+                    + x * atlas.hero_width / rect.width)
+                    * 3;
+                let dst = ((rect.y + y) * w + rect.x + x) * 3;
+                rgb[dst..dst + 3].copy_from_slice(&portrait[src..src + 3]);
+            }
+        }
+    }
+    RgbFrame::new(w, h, rgb)
+}
+
+#[test]
+fn vision_worker_faction_flip_invalidates_queued_relative_picks() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    use truesight_adapters::vision::BoundedVisionWorker;
+    use truesight_core::domain::{Faction, HeroId};
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (frame_tx, frame_rx) = mpsc::channel();
+    let mut worker = BoundedVisionWorker::spawn_with_source(VisionGatedSource {
+        entered: entered_tx,
+        frames: frame_rx,
+    })
+    .unwrap();
+    let mut session = AppSession::new().unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    frame_tx.send(vision_faction_frame(48)).unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    session.poll_live_sources(None, Some(&mut worker));
+    assert!(
+        session
+            .draft
+            .allies
+            .iter()
+            .flatten()
+            .any(|p| p.hero_id == HeroId(48))
+    );
+    // Two confirmed Nyx frames, still mapped against Radiant, remain queued.
+    frame_tx.send(vision_faction_frame(88)).unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    frame_tx.send(vision_faction_frame(88)).unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    assert_eq!(worker.queue_stats().enqueued, 3);
+    session.set_ally_faction(Faction::Dire);
+    session.poll_live_sources(None, Some(&mut worker));
+    assert!(
+        session
+            .draft
+            .allies
+            .iter()
+            .flatten()
+            .any(|p| p.hero_id == HeroId(2)),
+        "Queued pre-flip Nyx retired unrelated Axe"
+    );
+    assert!(
+        session
+            .draft
+            .enemies
+            .iter()
+            .flatten()
+            .any(|p| p.hero_id == HeroId(48))
+    );
+    // Finish the old in-flight capture; the next epoch re-emits stationary portraits.
+    frame_tx.send(vision_faction_frame(88)).unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    frame_tx.send(vision_faction_frame(88)).unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    session.poll_live_sources(None, Some(&mut worker));
+    assert!(
+        session
+            .draft
+            .allies
+            .iter()
+            .flatten()
+            .any(|p| p.hero_id == HeroId(2))
+    );
+    assert!(
+        session
+            .draft
+            .enemies
+            .iter()
+            .flatten()
+            .any(|p| p.hero_id == HeroId(88))
+    );
+    assert!(
+        !session
+            .draft
+            .enemies
+            .iter()
+            .flatten()
+            .any(|p| p.hero_id == HeroId(48))
+    );
+    drop(frame_tx);
+}
+
+#[test]
+fn vision_worker_faction_flip_rejects_in_flight_old_epoch() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    use truesight_adapters::vision::BoundedVisionWorker;
+    use truesight_core::domain::{Faction, HeroId, Side};
+    use truesight_core::ports::DraftEventSource;
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (frame_tx, frame_rx) = mpsc::channel();
+    let mut worker = BoundedVisionWorker::spawn_with_source(VisionGatedSource {
+        entered: entered_tx,
+        frames: frame_rx,
+    })
+    .unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    worker.set_ally_faction(Faction::Dire);
+    frame_tx.send(vision_faction_frame(48)).unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    assert!(
+        worker.poll_events().unwrap().is_empty(),
+        "Old in-flight faction results accepted after flip"
+    );
+    frame_tx.send(vision_faction_frame(48)).unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    let events = worker.poll_events().unwrap();
+    assert!(events.iter().any(|ev| matches!(
+        ev,
+        truesight_core::ports::DraftEvent::PickDetected {
+            side: Side::Enemies,
+            hero_id: HeroId(48),
+            ..
+        }
+    )));
+    assert!(events.iter().any(|ev| matches!(
+        ev,
+        truesight_core::ports::DraftEvent::PickDetected {
+            side: Side::Allies,
+            hero_id: HeroId(2),
+            ..
+        }
+    )));
+    assert_eq!(events.len(), 2);
+    drop(frame_tx);
+}
+
 fn visual_pick(
     side: truesight_core::domain::Side,
     slot: usize,
