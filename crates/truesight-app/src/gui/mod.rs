@@ -147,10 +147,15 @@ impl TrueSightGuiApp {
         let mut visuals = egui::Visuals::dark();
         visuals.panel_fill = P_VOID;
         visuals.window_fill = P_INDIGO_1;
+        visuals.window_corner_radius = CornerRadius::ZERO;
+        visuals.window_stroke = Stroke::new(1.0_f32, P_LINE);
+        visuals.window_shadow = egui::Shadow::NONE;
         visuals.extreme_bg_color = P_INDIGO_2;
         visuals.faint_bg_color = P_INDIGO_2;
         visuals.override_text_color = Some(P_SILVER);
         visuals.widgets.noninteractive.bg_fill = P_INDIGO_2;
+        visuals.widgets.noninteractive.weak_bg_fill = P_INDIGO_1;
+        visuals.widgets.open.weak_bg_fill = P_INDIGO_2;
         visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, P_LINE);
         visuals.widgets.noninteractive.corner_radius = CornerRadius::same(2);
         visuals.widgets.inactive.bg_fill = P_INDIGO_2;
@@ -308,7 +313,7 @@ impl TrueSightGuiApp {
                 }
             });
 
-        let (opts_win, opts_demo) = self.render_options_window(ctx);
+        let (opts_win, opts_demo) = self.render_options_window(ctx, rects.top_bar.max.y);
         rects.options_window = opts_win;
         rects.options_demo_button = opts_demo;
 

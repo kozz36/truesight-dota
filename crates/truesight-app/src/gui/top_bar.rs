@@ -284,9 +284,14 @@ impl TrueSightGuiApp {
     }
 
     /// Renders the floating `OPTIONS` drawer holding dev/telemetry indicators and actions.
+    ///
+    /// Anchors top-right below the measured `top_bar` bottom (`top_bar_bottom_y`) so single- and
+    /// two-row headers remain unobstructed; overlapping the upper draft row underneath while
+    /// reviewing telemetry is intentional.
     pub(super) fn render_options_window(
         &mut self,
         ctx: &egui::Context,
+        top_bar_bottom_y: f32,
     ) -> (Option<Rect>, Option<Rect>) {
         if !self.options_open {
             return (None, None);
@@ -297,11 +302,22 @@ impl TrueSightGuiApp {
         let mut demo_btn_rect = None;
 
         let max_opt_w = (ctx.screen_rect().width() - 24.0).clamp(260.0, 370.0);
+        let anchor_y =
+            (top_bar_bottom_y + 4.0).clamp(14.0, (ctx.screen_rect().height() - 120.0).max(14.0));
         let resp = egui::Window::new("OPTIONS · DEV & TELEMETRY")
             .collapsible(false)
             .resizable(false)
-            .anchor(Align2::RIGHT_BOTTOM, vec2(-12.0, -12.0))
+            .fade_in(false)
+            .anchor(Align2::RIGHT_TOP, vec2(-12.0, anchor_y))
             .constrain_to(ctx.screen_rect())
+            .frame(
+                egui::Frame::window(&ctx.style())
+                    .fill(P_INDIGO_1)
+                    .stroke(Stroke::new(1.0_f32, P_LINE))
+                    .corner_radius(CornerRadius::ZERO)
+                    .shadow(egui::Shadow::NONE)
+                    .inner_margin(Margin::same(10)),
+            )
             .default_width(max_opt_w)
             .max_width(max_opt_w)
             .show(ctx, |ui| {
@@ -442,6 +458,11 @@ impl TrueSightGuiApp {
         if close_window {
             self.options_open = false;
         }
-        (resp.map(|r| r.response.rect), demo_btn_rect)
+        let win_rect = resp.as_ref().map(|r| r.response.rect);
+        if let Some(r) = &resp {
+            let painter = ctx.layer_painter(r.response.layer_id);
+            paint_hud_corner_ticks(&painter, r.response.rect, P_GEM);
+        }
+        (win_rect, demo_btn_rect)
     }
 }
