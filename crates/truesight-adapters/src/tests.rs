@@ -3525,3 +3525,82 @@ fn vision_layout_selection_scores_unique_top1_before_applying_collision_fallback
     assert_eq!(rec_rad[2].map(|c| c.0), Some(HeroId(3)));
     assert_eq!(rec_rad[3].map(|c| c.0), Some(HeroId(4)));
 }
+
+#[test]
+fn windows_steam_path_decoder_rejects_oem_lossy_bytes_and_preserves_utf8_unicode() {
+    use crate::platform::{
+        build_windows_steam_path_powershell_args, decode_windows_steam_path_utf8,
+        parse_windows_reg_steam_path_bytes,
+    };
+    use std::path::Path;
+
+    let args = build_windows_steam_path_powershell_args();
+    assert_eq!(args[0], "-NoProfile");
+    assert_eq!(args[1], "-NonInteractive");
+    assert_eq!(args[2], "-Command");
+    assert!(
+        args[3].contains("UTF8Encoding")
+            && args[3].contains("OutputEncoding")
+            && args[3].contains(r"HKEY_CURRENT_USER\Software\Valve\Steam")
+            && args[3].contains("SteamPath"),
+        "PowerShell SteamPath query must enforce UTF-8 output encoding: {}",
+        args[3]
+    );
+
+    // Valid UTF-8 non-ASCII Steam paths (Latin accents, CJK, quotes/newlines) decode losslessly.
+    assert_eq!(
+        decode_windows_steam_path_utf8(" \"C:\\Juegos\\Estación\\Steam\" \r\n".as_bytes())
+            .as_deref(),
+        Some(Path::new(r"C:\Juegos\Estación\Steam"))
+    );
+    assert_eq!(
+        decode_windows_steam_path_utf8("D:\\ゲーム\\Steam".as_bytes()).as_deref(),
+        Some(Path::new(r"D:\ゲーム\Steam"))
+    );
+    assert_eq!(decode_windows_steam_path_utf8(b"  \r\n "), None);
+
+    // Raw OEM/CP1252 byte 0xF3 ('ó' in Estación) must NEVER be lossily turned into U+FFFD.
+    let oem_raw_bytes = b"C:\\Juegos\\Estaci\xf3n\\Steam";
+    assert_eq!(decode_windows_steam_path_utf8(oem_raw_bytes), None);
+    assert_eq!(
+        decode_windows_steam_path_utf8("C:\\Juegos\\Estaci\u{FFFD}n\\Steam".as_bytes()),
+        None
+    );
+
+    let oem_reg_bytes =
+        b"\r\nHKEY_CURRENT_USER\\Software\\Valve\\Steam\r\n    SteamPath    REG_SZ    C:\\Juegos\\Estaci\xf3n\\Steam\r\n";
+    assert_eq!(parse_windows_reg_steam_path_bytes(oem_reg_bytes), None);
+
+    let utf8_reg_bytes =
+        "\r\nHKEY_CURRENT_USER\\Software\\Valve\\Steam\r\n    SteamPath    REG_SZ    C:\\Juegos\\Estación\\Steam\r\n"
+            .as_bytes();
+    assert_eq!(
+        parse_windows_reg_steam_path_bytes(utf8_reg_bytes).as_deref(),
+        Some(Path::new(r"C:\Juegos\Estación\Steam"))
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_native_powershell_utf8_roundtrip_preserves_non_ascii_steampath() {
+    use crate::platform::{configure_background_command, decode_windows_steam_path_utf8};
+    use std::path::Path;
+    use std::process::Command;
+
+    let mut cmd = Command::new("powershell");
+    configure_background_command(&mut cmd);
+    let out = cmd
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); [Console]::Out.Write('C:\\Juegos\\Estación\\Steam_日本語')",
+        ])
+        .output()
+        .expect("powershell.exe must execute on Windows");
+    assert!(out.status.success());
+    assert_eq!(
+        decode_windows_steam_path_utf8(&out.stdout).as_deref(),
+        Some(Path::new(r"C:\Juegos\Estación\Steam_日本語"))
+    );
+}
