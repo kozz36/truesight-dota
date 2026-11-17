@@ -5,7 +5,20 @@ use super::{
 
 #[test]
 fn interactive_commands_update_5v5_table_and_recommendations() {
+    use truesight_adapters::sync::LocalCacheManager;
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_interactive_cmds_test_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
     let mut session = AppSession::new().unwrap();
+    session.cache_mgr = LocalCacheManager::with_dir(tmp_dir.clone(), 0);
+    session.cache_mgr.set_account_id(None, false);
+    session.reload_repository();
+    session.set_background_sync_runner(|_, _| Ok("Mock sync ok".into()));
+
     assert!(execute_command(&mut session, "ally 3 magnus").unwrap());
     assert!(execute_command(&mut session, "enemy 1 medusa").unwrap());
     assert!(execute_command(&mut session, "enemy 2 storm").unwrap());
@@ -37,6 +50,13 @@ fn interactive_commands_update_5v5_table_and_recommendations() {
 
     assert!(execute_command(&mut session, "account 76561198061460213").unwrap());
     assert_eq!(session.cache_mgr.player_account_id, Some(101_194_485));
+    for _ in 0..100 {
+        session.poll_live_sources(None, None);
+        if !session.sync_in_flight {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
     assert!(session.db_status.contains("Player #101194485"));
 
     // Explicit account override must not be overwritten by GSI SteamID
@@ -51,6 +71,14 @@ fn interactive_commands_update_5v5_table_and_recommendations() {
         steam32: 222_333_444,
     });
     assert_eq!(session.cache_mgr.player_account_id, Some(222_333_444));
+    for _ in 0..100 {
+        session.poll_live_sources(None, None);
+        if !session.sync_in_flight {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let _ = std::fs::remove_dir_all(&tmp_dir);
 }
 
 #[test]
@@ -718,7 +746,14 @@ fn gsi_http_listener_reconciles_full_session_state_after_overflow_when_peer_stop
 
     let mut listener = BoundedGsiListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr();
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_gsi_reconcile_test_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
     let mut session = AppSession::new().unwrap();
+    session.cache_mgr = truesight_adapters::sync::LocalCacheManager::with_dir(tmp_dir.clone(), 0);
+    session.set_background_sync_runner(|_, _| Ok("Mock sync ok".into()));
     session.set_account_auto();
 
     let post_json = |body: &str| {
@@ -797,9 +832,19 @@ fn gsi_http_listener_reconciles_full_session_state_after_overflow_when_peer_stop
         "Pre-reset hero 67 must not leak into reconciled new match"
     );
 
+    // Drain any auto-triggered player sync completion before verifying idle poll stability.
+    for _ in 0..100 {
+        if !session.sync_in_flight {
+            break;
+        }
+        let _ = session.poll_live_sources(None, None);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
     // 5. Polling again with no traffic must not falsely increment recovered_resyncs
     assert!(!session.poll_live_sources(Some(&mut listener), None));
     assert_eq!(listener.queue_stats().recovered_resyncs, 1);
+    let _ = std::fs::remove_dir_all(&tmp_dir);
 }
 
 #[test]
@@ -1493,4 +1538,128 @@ fn linux_install_desktop_prefers_sibling_binary_and_escapes_ampersand_and_spaces
     }
 
     let _ = std::fs::remove_dir_all(&base_tmp);
+}
+
+#[test]
+fn player_account_link_auto_syncs_stale_player_cache_from_gsi_and_cli() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use std::time::Duration;
+    use truesight_adapters::sync::LocalCacheManager;
+    use truesight_core::domain::HeroId;
+    use truesight_core::ports::DraftEvent;
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_auto_sync_player_test_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    let now = LocalCacheManager::now_unix();
+    let fresh_meta = r#"[{"id": 1, "1_pick": 1000, "1_win": 610, "2_pick": 1000, "2_win": 610, "3_pick": 1000, "3_win": 610, "4_pick": 1000, "4_win": 610, "5_pick": 1000, "5_win": 610, "6_pick": 1000, "6_win": 610, "7_pick": 1000, "7_win": 610}]"#;
+
+    let mut mgr = LocalCacheManager::with_dir(tmp_dir.clone(), 111_222_333);
+    mgr.write_cached_files(Some(fresh_meta), None, now).unwrap();
+    mgr.set_account_id(None, false);
+
+    let mut session = AppSession::new().unwrap();
+    session.cache_mgr = mgr;
+    session.reload_repository();
+
+    let sync_calls = Arc::new(AtomicUsize::new(0));
+    let sync_calls_bg = Arc::clone(&sync_calls);
+    let bg_tmp_dir = tmp_dir.clone();
+    session.set_background_sync_runner(move |bg_mgr, force| {
+        assert!(!force, "auto-sync on account link must pass force=false");
+        let call_n = sync_calls_bg.fetch_add(1, Ordering::SeqCst) + 1;
+        let acct = bg_mgr
+            .player_account_id
+            .expect("auto-sync only runs when an account is linked");
+        let matches_json = format!(
+            r#"[{{"hero_id": 1, "player_slot": 0, "radiant_win": true, "start_time": {now}}}]"#
+        );
+        let heroes_json =
+            format!(r#"[{{"hero_id": 1, "last_played": {now}, "games": 25, "win": 20}}]"#);
+        bg_mgr
+            .write_cached_files(None, Some(&heroes_json), LocalCacheManager::now_unix())
+            .map_err(|e| e.0)?;
+        let matches_path = bg_tmp_dir
+            .join("players")
+            .join(acct.to_string())
+            .join("player_matches.json");
+        std::fs::write(matches_path, matches_json).map_err(|e| e.to_string())?;
+        Ok(format!("Synced player #{acct} (call {call_n})"))
+    });
+
+    // 1. GSI PlayerSteamIdDetected transitions from None -> Some(steam32) and auto-syncs stale player cache.
+    session.apply_event(DraftEvent::PlayerSteamIdDetected {
+        steam32: 123_456_789,
+    });
+    assert_eq!(session.cache_mgr.player_account_id, Some(123_456_789));
+    assert!(
+        session.sync_in_flight,
+        "PlayerSteamIdDetected must start background sync when new account cache is stale"
+    );
+
+    for _ in 0..100 {
+        session.poll_live_sources(None, None);
+        if !session.sync_in_flight {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!session.sync_in_flight);
+    assert_eq!(sync_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        session.matrix.hero(HeroId(1)).unwrap().personal_matches,
+        25,
+        "Comfort v3 personal matches must reload after GSI auto-sync"
+    );
+    assert!(
+        session.matrix.hero(HeroId(1)).unwrap().role_winrates[0] > 0.59,
+        "Existing fresh Meta cache must stay intact"
+    );
+
+    // 2. Repeated GSI packet for the same already-fresh account must NOT re-trigger sync.
+    session.apply_event(DraftEvent::PlayerSteamIdDetected {
+        steam32: 123_456_789,
+    });
+    assert!(!session.sync_in_flight);
+    assert_eq!(sync_calls.load(Ordering::SeqCst), 1);
+
+    // 3. CLI `account none` unlinks without starting a sync.
+    assert!(execute_command(&mut session, "account none").unwrap());
+    assert_eq!(session.cache_mgr.player_account_id, None);
+    assert!(!session.sync_in_flight);
+    assert_eq!(sync_calls.load(Ordering::SeqCst), 1);
+
+    // 4. CLI `account <id>` links explicit account and auto-syncs its stale cache.
+    assert!(execute_command(&mut session, "account 76561198061460213").unwrap());
+    assert_eq!(session.cache_mgr.player_account_id, Some(101_194_485));
+    assert!(
+        session.sync_in_flight,
+        "CLI account command must start background sync when player cache is stale"
+    );
+    for _ in 0..100 {
+        session.poll_live_sources(None, None);
+        if !session.sync_in_flight {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!session.sync_in_flight);
+    assert_eq!(sync_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(session.matrix.hero(HeroId(1)).unwrap().personal_matches, 25);
+
+    // 5. Explicit override still blocks GSI SteamID overwrites and does not trigger sync.
+    session.apply_event(DraftEvent::PlayerSteamIdDetected {
+        steam32: 555_666_777,
+    });
+    assert_eq!(session.cache_mgr.player_account_id, Some(101_194_485));
+    assert!(!session.sync_in_flight);
+    assert_eq!(sync_calls.load(Ordering::SeqCst), 2);
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
 }

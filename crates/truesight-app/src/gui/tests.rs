@@ -835,3 +835,82 @@ fn dpi_scaled_low_resolution_viewport_uses_scrollable_fallback_without_overlap()
         );
     }
 }
+
+#[test]
+fn gui_account_link_apply_triggers_background_sync_and_updates_comfort() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use truesight_adapters::sync::{AccountLinkConfig, LocalCacheManager};
+    use truesight_core::domain::HeroId;
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_gui_account_sync_test_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    let now = LocalCacheManager::now_unix();
+    let fresh_meta = r#"[{"id": 1, "1_pick": 1000, "1_win": 610, "2_pick": 1000, "2_win": 610, "3_pick": 1000, "3_win": 610, "4_pick": 1000, "4_win": 610, "5_pick": 1000, "5_win": 610, "6_pick": 1000, "6_win": 610, "7_pick": 1000, "7_win": 610}]"#;
+
+    let mut mgr = LocalCacheManager::with_dir(tmp_dir.clone(), 111_222_333);
+    mgr.write_cached_files(Some(fresh_meta), None, now).unwrap();
+    mgr.set_account_id(None, false);
+
+    let mut session = AppSession::new().unwrap();
+    session.cache_mgr = mgr;
+    session.reload_repository();
+
+    let sync_calls = Arc::new(AtomicUsize::new(0));
+    let sync_calls_bg = Arc::clone(&sync_calls);
+    let bg_tmp_dir = tmp_dir.clone();
+    session.set_background_sync_runner(move |bg_mgr, force| {
+        assert!(!force, "GUI APPLY auto-sync must pass force=false");
+        sync_calls_bg.fetch_add(1, Ordering::SeqCst);
+        let acct = bg_mgr.player_account_id.expect("linked player account");
+        let heroes_json =
+            format!(r#"[{{"hero_id": 1, "last_played": {now}, "games": 30, "win": 24}}]"#);
+        let matches_json = format!(
+            r#"[{{"hero_id": 1, "player_slot": 0, "radiant_win": true, "start_time": {now}}}]"#
+        );
+        bg_mgr
+            .write_cached_files(None, Some(&heroes_json), LocalCacheManager::now_unix())
+            .map_err(|e| e.0)?;
+        let matches_path = bg_tmp_dir
+            .join("players")
+            .join(acct.to_string())
+            .join("player_matches.json");
+        std::fs::write(matches_path, matches_json).map_err(|e| e.to_string())?;
+        Ok(format!("Synced GUI account #{acct}"))
+    });
+
+    let mut app = TrueSightGuiApp::new(session, None, None);
+    app.account_input = "76561198061460213".into();
+    assert_eq!(
+        app.apply_account_input(),
+        Some(AccountLinkConfig::Explicit(101_194_485))
+    );
+    assert_eq!(app.session.cache_mgr.player_account_id, Some(101_194_485));
+    assert!(
+        app.session.sync_in_flight,
+        "GUI APPLY must trigger non-blocking player sync when cache is stale"
+    );
+
+    let ctx = egui::Context::default();
+    for _ in 0..100 {
+        let _ = render_at_viewport(&mut app, &ctx, vec2(1280.0, 800.0));
+        if !app.session.sync_in_flight {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(!app.session.sync_in_flight);
+    assert_eq!(sync_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        app.session.matrix.hero(HeroId(1)).unwrap().personal_matches,
+        30
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}

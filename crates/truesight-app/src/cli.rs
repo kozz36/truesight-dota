@@ -295,6 +295,7 @@ pub fn execute_command(session: &mut AppSession, line: &str) -> Result<bool, Str
             let lower = a_str.to_ascii_lowercase();
             if lower == "auto" {
                 session.set_account_auto();
+                let _ = session.sync_if_player_stale();
             } else if lower == "none" || lower == "unlink" || lower == "unlinked" {
                 session.set_account_id(None, true);
             } else {
@@ -304,6 +305,7 @@ pub fn execute_command(session: &mut AppSession, line: &str) -> Result<bool, Str
                 let s32 = normalize_steam32_id(raw)
                     .ok_or_else(|| "Invalid Steam32/Steam64 account ID".to_string())?;
                 session.set_account_id(Some(s32), true);
+                let _ = session.sync_if_player_stale();
             }
         }
         "ally" | "a" => execute_side_pick_command(session, Side::Allies, &parts)?,
