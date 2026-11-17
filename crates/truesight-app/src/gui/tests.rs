@@ -94,22 +94,47 @@ fn make_5v5_gui_session() -> AppSession {
     session
 }
 
-fn render_at_viewport(
+fn render_at_viewport_with_output(
     app: &mut TrueSightGuiApp,
     ctx: &egui::Context,
     viewport: Vec2,
-) -> LayoutRects {
+) -> (LayoutRects, egui::FullOutput) {
     let raw_input = egui::RawInput {
         screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), viewport)),
         ..Default::default()
     };
     let mut layout = None;
+    let mut last_output = None;
     for _ in 0..2 {
-        let _ = ctx.run(raw_input.clone(), |ctx| {
+        let output = ctx.run(raw_input.clone(), |ctx| {
             layout = Some(app.render_frame(ctx));
         });
+        last_output = Some(output);
     }
-    layout.expect("layout rects captured")
+    (
+        layout.expect("layout rects captured"),
+        last_output.expect("full output captured"),
+    )
+}
+
+fn render_at_viewport(
+    app: &mut TrueSightGuiApp,
+    ctx: &egui::Context,
+    viewport: Vec2,
+) -> LayoutRects {
+    render_at_viewport_with_output(app, ctx, viewport).0
+}
+
+fn collect_painted_rects(shape: &egui::epaint::Shape, out: &mut Vec<(Rect, egui::Color32)>) {
+    match shape {
+        egui::epaint::Shape::Rect(rect_shape) => out.push((rect_shape.rect, rect_shape.fill)),
+        egui::epaint::Shape::Vec(shapes) => {
+            for inner in shapes {
+                collect_painted_rects(inner, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[test]
@@ -1032,7 +1057,7 @@ fn suggested_vs_enemies_cells_align_and_pick_column_follows_row_stripes() {
             vec2(1468.0, 960.0),
             vec2(1920.0, 1080.0),
         ] {
-            let r = render_at_viewport(&mut app, &ctx, viewport);
+            let (r, full_output) = render_at_viewport_with_output(&mut app, &ctx, viewport);
             assert!(
                 !r.suggested_row_rects.is_empty()
                     && r.suggested_row_rects.len() == r.suggested_vs_row_rects.len()
@@ -1041,12 +1066,28 @@ fn suggested_vs_enemies_cells_align_and_pick_column_follows_row_stripes() {
                 "viewport={viewport:?} suggested telemetry vector lengths mismatched"
             );
 
-            for (idx, (row_r, vs_r)) in r
+            let mut painted_rects = Vec::new();
+            for clipped in &full_output.shapes {
+                collect_painted_rects(&clipped.shape, &mut painted_rects);
+            }
+            let same_rect = |a: Rect, b: Rect, tol: f32| {
+                (a.min - b.min).length() <= tol && (a.max - b.max).length() <= tol
+            };
+
+            let mut checked_visible_buttons = 0usize;
+            for (idx, (((row_r, vs_r), pick_r), stripe_r)) in r
                 .suggested_row_rects
                 .iter()
                 .zip(r.suggested_vs_row_rects.iter())
+                .zip(r.suggested_pick_rects.iter())
+                .zip(r.suggested_pick_stripe_rects.iter())
                 .enumerate()
             {
+                let pick_visible =
+                    pick_r.min.y >= r.suggested.min.y && pick_r.max.y <= r.suggested.max.y;
+                if pick_visible {
+                    checked_visible_buttons += 1;
+                }
                 assert!(
                     (vs_r.center().y - row_r.center().y).abs() <= 1.0
                         && vs_r.min.y >= row_r.min.y - 0.5
@@ -1055,21 +1096,6 @@ fn suggested_vs_enemies_cells_align_and_pick_column_follows_row_stripes() {
                     vs_r,
                     row_r
                 );
-            }
-        }
-        for viewport in [
-            vec2(960.0, 680.0),
-            vec2(1468.0, 960.0),
-            vec2(1920.0, 1080.0),
-        ] {
-            let r = render_at_viewport(&mut app, &ctx, viewport);
-            for (idx, ((row_r, pick_r), stripe_r)) in r
-                .suggested_row_rects
-                .iter()
-                .zip(r.suggested_pick_rects.iter())
-                .zip(r.suggested_pick_stripe_rects.iter())
-                .enumerate()
-            {
                 if idx % 2 == 0 {
                     let s = stripe_r.unwrap_or_else(|| {
                         panic!(
@@ -1085,14 +1111,54 @@ fn suggested_vs_enemies_cells_align_and_pick_column_follows_row_stripes() {
                         pick_r,
                         row_r
                     );
+                    assert!(
+                        painted_rects
+                            .iter()
+                            .any(|&(rect, fill)| same_rect(rect, s, 0.5) && fill == P_INDIGO_2),
+                        "viewport={viewport:?} row {idx} PICK stripe rect {:?} was not painted with P_INDIGO_2",
+                        s
+                    );
+                    if pick_visible {
+                        assert!(
+                            painted_rects.iter().any(|&(rect, fill)| {
+                                same_rect(rect, *pick_r, 1.5) && fill == P_INDIGO_2
+                            }),
+                            "viewport={viewport:?} row {idx} PICK button {:?} was not painted with P_INDIGO_2",
+                            pick_r
+                        );
+                    }
                 } else {
                     assert!(
                         stripe_r.is_none(),
                         "viewport={viewport:?} row {idx} PICK cell should stay unstriped: {:?}",
                         stripe_r
                     );
+                    assert!(
+                        !painted_rects.iter().any(|&(rect, fill)| {
+                            fill == P_INDIGO_2
+                                && rect.contains_rect(*pick_r)
+                                && (rect.center().y - pick_r.center().y).abs() <= 2.0
+                                && rect.height() <= row_r.height() + 12.0
+                        }),
+                        "viewport={viewport:?} row {idx} unstriped PICK row {:?} must not paint a P_INDIGO_2 stripe",
+                        pick_r
+                    );
+                    if pick_visible {
+                        assert!(
+                            painted_rects.iter().any(|&(rect, fill)| {
+                                same_rect(rect, *pick_r, 1.5) && fill == P_INDIGO_1
+                            }),
+                            "viewport={viewport:?} row {idx} PICK button {:?} was not painted with P_INDIGO_1",
+                            pick_r
+                        );
+                    }
                 }
             }
+            assert!(
+                checked_visible_buttons >= 4,
+                "viewport={viewport:?} expected at least 4 visible PICK buttons inside {:?}",
+                r.suggested
+            );
         }
     }
 }
