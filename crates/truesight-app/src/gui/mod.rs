@@ -313,7 +313,7 @@ impl TrueSightGuiApp {
                 }
             });
 
-        let (opts_win, opts_demo) = self.render_options_window(ctx);
+        let (opts_win, opts_demo) = self.render_options_window(ctx, rects.top_bar.max.y);
         rects.options_window = opts_win;
         rects.options_demo_button = opts_demo;
 

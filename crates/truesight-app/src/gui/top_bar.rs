@@ -284,9 +284,14 @@ impl TrueSightGuiApp {
     }
 
     /// Renders the floating `OPTIONS` drawer holding dev/telemetry indicators and actions.
+    ///
+    /// Anchors top-right below the measured `top_bar` bottom (`top_bar_bottom_y`) so single- and
+    /// two-row headers remain unobstructed; overlapping the upper draft row underneath while
+    /// reviewing telemetry is intentional.
     pub(super) fn render_options_window(
         &mut self,
         ctx: &egui::Context,
+        top_bar_bottom_y: f32,
     ) -> (Option<Rect>, Option<Rect>) {
         if !self.options_open {
             return (None, None);
@@ -297,11 +302,13 @@ impl TrueSightGuiApp {
         let mut demo_btn_rect = None;
 
         let max_opt_w = (ctx.screen_rect().width() - 24.0).clamp(260.0, 370.0);
+        let anchor_y =
+            (top_bar_bottom_y + 4.0).clamp(14.0, (ctx.screen_rect().height() - 120.0).max(14.0));
         let resp = egui::Window::new("OPTIONS · DEV & TELEMETRY")
             .collapsible(false)
             .resizable(false)
             .fade_in(false)
-            .anchor(Align2::RIGHT_TOP, vec2(-12.0, 56.0))
+            .anchor(Align2::RIGHT_TOP, vec2(-12.0, anchor_y))
             .constrain_to(ctx.screen_rect())
             .frame(
                 egui::Frame::window(&ctx.style())

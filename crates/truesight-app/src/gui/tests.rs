@@ -1024,52 +1024,76 @@ fn responsive_900px_topbar_slot_headroom_and_non_overlapping_modals() {
         );
     }
 
-    // 3. Open OPTIONS (top-right drawer with square HUD frame) + STEAM ACCOUNT LINK (bottom-left):
-    // OPTIONS opens directly under the top bar on the right, uses square corners (CornerRadius::ZERO)
-    // and app palette (P_INDIGO_1 fill, P_LINE stroke), and does not overlap STEAM ACCOUNT LINK.
+    // 3. Open OPTIONS (intentional top-right overlay with square HUD frame) + STEAM ACCOUNT LINK (bottom-left):
+    // Verify both single-row (960x680) and two-row (860x680) top-bar layouts so OPTIONS sits cleanly below
+    // top_bar without covering header controls, keeps square corners + palette, keeps DEMO 5V5 accessible,
+    // and never collides with STEAM ACCOUNT LINK.
     app.options_open = true;
     app.account_editor_open = true;
-    let (r_modals, modals_out) = render_at_viewport_with_output(&mut app, &ctx, vec2(960.0, 680.0));
-    let opts_win = r_modals.options_window.expect("OPTIONS window open");
-    let acct_win = r_modals
-        .account_window
-        .expect("STEAM ACCOUNT LINK window open");
-    assert!(
-        opts_win.min.y >= r_modals.top_bar.max.y
-            && opts_win.min.y <= r_modals.top_bar.max.y + 18.0
-            && opts_win.max.x >= 960.0 - 24.0
-            && opts_win.max.x <= 960.0,
-        "OPTIONS window {:?} must anchor top-right below top_bar {:?}",
-        opts_win,
-        r_modals.top_bar
-    );
-    let mut modal_rect_shapes = Vec::new();
-    for clipped in &modals_out.shapes {
-        collect_painted_rect_shapes(&clipped.shape, &mut modal_rect_shapes);
+    let mut one_row_bar_h = 0.0_f32;
+    let mut two_row_bar_h = 0.0_f32;
+    for (vp, is_two_row) in [(vec2(960.0, 680.0), false), (vec2(860.0, 680.0), true)] {
+        let (r_modals, modals_out) = render_at_viewport_with_output(&mut app, &ctx, vp);
+        if is_two_row {
+            two_row_bar_h = r_modals.top_bar.height();
+        } else {
+            one_row_bar_h = r_modals.top_bar.height();
+        }
+        let opts_win = r_modals.options_window.expect("OPTIONS window open");
+        let demo_btn = r_modals
+            .options_demo_button
+            .expect("DEMO 5V5 button must stay accessible inside OPTIONS");
+        let acct_win = r_modals
+            .account_window
+            .expect("STEAM ACCOUNT LINK window open");
+        assert!(
+            opts_win.min.y >= r_modals.top_bar.max.y
+                && opts_win.min.y <= r_modals.top_bar.max.y + 12.0
+                && !opts_win.intersects(r_modals.top_bar)
+                && opts_win.max.x >= vp.x - 24.0
+                && opts_win.max.x <= vp.x,
+            "vp={vp:?} OPTIONS window {:?} must anchor top-right below top_bar {:?}",
+            opts_win,
+            r_modals.top_bar
+        );
+        assert!(
+            opts_win.contains_rect(demo_btn) && demo_btn.max.y <= vp.y,
+            "vp={vp:?} DEMO 5V5 {:?} must remain accessible inside OPTIONS {:?} and viewport",
+            demo_btn,
+            opts_win
+        );
+        let mut modal_rect_shapes = Vec::new();
+        for clipped in &modals_out.shapes {
+            collect_painted_rect_shapes(&clipped.shape, &mut modal_rect_shapes);
+        }
+        assert!(
+            modal_rect_shapes.iter().any(|s| {
+                (s.rect.min - opts_win.min).length() <= 1.5
+                    && (s.rect.max - opts_win.max).length() <= 1.5
+                    && s.corner_radius == egui::CornerRadius::ZERO
+                    && s.fill == P_INDIGO_1
+                    && s.stroke == Stroke::new(1.0_f32, P_LINE)
+            }),
+            "vp={vp:?} OPTIONS window {:?} must render a square (CornerRadius::ZERO) frame with P_INDIGO_1 fill and P_LINE stroke",
+            opts_win
+        );
+        assert!(
+            !acct_win.intersects(r_modals.oracle)
+                && !acct_win.intersects(r_modals.enemies)
+                && !acct_win.intersects(r_modals.allies),
+            "vp={vp:?} STEAM ACCOUNT LINK window {:?} must not cover top-row cards",
+            acct_win
+        );
+        assert!(
+            !opts_win.intersects(acct_win),
+            "vp={vp:?} OPTIONS {:?} and STEAM ACCOUNT LINK {:?} must not overlap",
+            opts_win,
+            acct_win
+        );
     }
     assert!(
-        modal_rect_shapes.iter().any(|s| {
-            (s.rect.min - opts_win.min).length() <= 1.5
-                && (s.rect.max - opts_win.max).length() <= 1.5
-                && s.corner_radius == egui::CornerRadius::ZERO
-                && s.fill == P_INDIGO_1
-                && s.stroke == Stroke::new(1.0_f32, P_LINE)
-        }),
-        "OPTIONS window {:?} must render a square (CornerRadius::ZERO) frame with P_INDIGO_1 fill and P_LINE stroke",
-        opts_win
-    );
-    assert!(
-        !acct_win.intersects(r_modals.oracle)
-            && !acct_win.intersects(r_modals.enemies)
-            && !acct_win.intersects(r_modals.allies),
-        "STEAM ACCOUNT LINK window {:?} must not cover top-row cards",
-        acct_win
-    );
-    assert!(
-        !opts_win.intersects(acct_win),
-        "OPTIONS {:?} and STEAM ACCOUNT LINK {:?} must not overlap",
-        opts_win,
-        acct_win
+        two_row_bar_h > one_row_bar_h + 10.0,
+        "860x680 must exercise wrapped two-row top_bar ({two_row_bar_h} vs {one_row_bar_h})"
     );
 }
 
