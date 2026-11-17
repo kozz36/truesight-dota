@@ -214,6 +214,15 @@ pub(super) fn hud_card_fill(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut eg
     prepared.response.rect
 }
 
+pub(super) fn hud_modal_frame(ctx: &egui::Context) -> egui::Frame {
+    egui::Frame::window(&ctx.style())
+        .fill(P_INDIGO_1)
+        .stroke(Stroke::new(1.0_f32, P_LINE))
+        .corner_radius(CornerRadius::ZERO)
+        .shadow(egui::Shadow::NONE)
+        .inner_margin(Margin::same(10))
+}
+
 pub(super) fn paint_hud_corner_ticks(painter: &egui::Painter, rect: Rect, color: Color32) {
     let tick = 9.0;
     let stroke = Stroke::new(2.0_f32, color);
