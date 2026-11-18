@@ -565,7 +565,18 @@ impl HeroVisionCatalog {
             return Vec::new();
         }
 
-        rank_descriptor_sets(entry_sets, &query_desc, threshold, max_candidates)
+        let ranked = rank_descriptor_sets(entry_sets, &query_desc, threshold, max_candidates);
+        // A weak near-tie is not identity evidence: interior overlays can shift the
+        // nearest RGB template to an unrelated hero. Abstain before collision recovery
+        // can promote any of these indistinguishable alternatives. Keep strong matches.
+        if layout == TopBarLayout::InGame
+            && ranked.len() >= 2
+            && ranked[0].1 > 26.0
+            && ranked[1].1 - ranked[0].1 < 2.0
+        {
+            return Vec::new();
+        }
+        ranked
             .into_iter()
             .map(|(hero_id, diff)| (hero_id, diff, ms))
             .collect()
