@@ -679,13 +679,21 @@ impl truesight_adapters::vision::ScreenFrameSource for VisionGatedSource {
 }
 
 fn vision_faction_frame(hero: u16) -> truesight_adapters::vision::RgbFrame {
+    vision_remap_frame(Some(hero), None)
+}
+
+fn vision_remap_frame(
+    first: Option<u16>,
+    second: Option<u16>,
+) -> truesight_adapters::vision::RgbFrame {
     use truesight_adapters::vision::{RgbFrame, compute_topbar_slot_rects, parse_hero_atlas};
     use truesight_core::domain::HeroId;
     let atlas = parse_hero_atlas().unwrap();
     let (w, h) = (1920, 1080);
     let mut rgb = vec![0; w * h * 3];
     let (rad, dire) = compute_topbar_slot_rects(w, h);
-    for (rect, id) in [(rad[0], hero), (dire[0], 2)] {
+    for (rect, id) in [(rad[0], first), (rad[1], second), (dire[0], Some(2))] {
+        let Some(id) = id else { continue };
         let portrait = &atlas.heroes[&HeroId(id)];
         for y in 0..rect.height {
             for x in 0..rect.width {
@@ -698,6 +706,114 @@ fn vision_faction_frame(hero: u16) -> truesight_adapters::vision::RgbFrame {
         }
     }
     RgbFrame::new(w, h, rgb)
+}
+
+fn vision_unreadable_remap_scenario(
+    prepare: impl FnOnce(&mut AppSession),
+    check: impl FnOnce(
+        &mut AppSession,
+        &mut truesight_adapters::vision::BoundedVisionWorker,
+        &dyn Fn(Option<u16>, Option<u16>),
+    ),
+) {
+    use std::{sync::mpsc, time::Duration};
+    use truesight_adapters::vision::BoundedVisionWorker;
+    use truesight_core::domain::Faction;
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (frame_tx, frame_rx) = mpsc::channel();
+    let mut worker = BoundedVisionWorker::spawn_with_capacity(
+        VisionGatedSource {
+            entered: entered_tx,
+            frames: frame_rx,
+        },
+        2,
+    )
+    .unwrap();
+    let mut session = AppSession::new().unwrap();
+    let next_capture = || entered_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    let frame = |first, second| {
+        frame_tx.send(vision_remap_frame(first, second)).unwrap();
+        next_capture();
+    };
+    next_capture();
+    frame(Some(48), None);
+    session.poll_live_sources(None, Some(&mut worker));
+    frame(Some(48), Some(60));
+    session.poll_live_sources(None, Some(&mut worker));
+    assert_eq!(worker.queue_stats().enqueued, 3);
+    prepare(&mut session);
+    session.set_ally_faction(Faction::Dire);
+    // Propagate the flip before releasing the old in-flight capture.
+    session.poll_live_sources(None, Some(&mut worker));
+    frame(None, Some(60));
+    check(&mut session, &mut worker, &frame);
+    drop(frame_tx);
+}
+
+#[test]
+fn vision_faction_remap_does_not_resurrect_unreadable_manual_replacement() {
+    use truesight_core::domain::{HeroId, Side};
+    let replace_luna = |session: &mut AppSession| {
+        let slot = session
+            .draft
+            .allies
+            .iter()
+            .position(|p| p.is_some_and(|p| p.hero_id == HeroId(48)))
+            .unwrap();
+        session.set_slot_manual(Side::Allies, slot, HeroId(88));
+    };
+    vision_unreadable_remap_scenario(replace_luna, |session, worker, frame| {
+        let before = session.draft.enemies;
+        assert!(before.iter().flatten().any(|p| p.hero_id == HeroId(88)));
+        frame(None, Some(60));
+        session.poll_live_sources(None, Some(worker));
+        assert!(
+            !session
+                .draft
+                .enemies
+                .iter()
+                .flatten()
+                .any(|p| p.hero_id == HeroId(48)),
+            "Unreadable portrait resurrected manually replaced Luna"
+        );
+        assert_eq!(session.draft.enemies, before);
+    });
+}
+
+#[test]
+fn vision_faction_remap_skips_unreadable_slot_without_overflow_or_latch_loss() {
+    use truesight_core::{domain::Side, ports::DraftEventSource};
+    vision_unreadable_remap_scenario(
+        |_| {},
+        |_, worker, frame| {
+            frame(None, Some(60));
+            assert_eq!(
+                worker.queue_stats().dropped,
+                0,
+                "Unreadable portrait overflowed the queue"
+            );
+            let second = truesight_core::ports::DraftEvent::PickDetected {
+                side: Side::Enemies,
+                slot: 1,
+                hero_id: truesight_core::domain::HeroId(60),
+                role: Some(truesight_core::domain::Role::ALL[1]),
+            };
+            assert_eq!(
+                worker.poll_events().unwrap(),
+                vec![visual_pick_with_role(Side::Allies, 2), second]
+            );
+            frame(Some(88), Some(60));
+            assert!(
+                worker.poll_events().unwrap().is_empty(),
+                "One contradictory frame bypassed confirmation"
+            );
+            frame(Some(88), Some(60));
+            assert_eq!(
+                worker.poll_events().unwrap(),
+                vec![visual_pick_with_role(Side::Enemies, 88)]
+            );
+        },
+    );
 }
 
 #[test]
@@ -730,10 +846,8 @@ fn vision_worker_faction_flip_preserves_confirmed_portraits() {
     let events = worker.poll_events().unwrap();
     assert_eq!(
         events,
-        vec![
-            visual_pick_with_role(Side::Enemies, 48),
-            visual_pick_with_role(Side::Allies, 2)
-        ]
+        vec![visual_pick_with_role(Side::Allies, 2)],
+        "Contradictory evidence must neither replay Luna nor replace her with Nyx"
     );
 
     frame_tx.send(vision_faction_frame(88)).unwrap();

@@ -33,7 +33,7 @@ fn push_pick_event(events: &mut Vec<DraftEvent>, side: Side, slot: usize, hero_i
 fn resolve_slot_transition(
     side: Side,
     slot: usize,
-    faction_changed: bool,
+    needs_replay: &mut bool,
     candidate: SlotCandidate,
     last_slot: &mut Option<HeroId>,
     pending_slot: &mut Option<(HeroId, u8)>,
@@ -44,6 +44,7 @@ fn resolve_slot_transition(
             *pending_slot = None;
             if let Some((hero_id, _, _)) = candidate {
                 *last_slot = Some(hero_id);
+                *needs_replay = false;
                 push_pick_event(events, side, slot, hero_id);
             }
         }
@@ -52,9 +53,6 @@ fn resolve_slot_transition(
                 // Ignore desaturated dead/respawn overlays or weak matches on already-locked slots.
                 if sat < MIN_OVERWRITE_SATURATION || diff > MAX_OVERWRITE_L1_DIFF {
                     *pending_slot = None;
-                    if faction_changed {
-                        push_pick_event(events, side, slot, prev_id);
-                    }
                     return;
                 }
                 let next_count = match *pending_slot {
@@ -64,17 +62,16 @@ fn resolve_slot_transition(
                 if next_count >= OVERWRITE_CONFIRM_FRAMES {
                     *last_slot = Some(cand_id);
                     *pending_slot = None;
+                    *needs_replay = false;
                     push_pick_event(events, side, slot, cand_id);
                 } else {
                     *pending_slot = Some((cand_id, next_count));
-                    if faction_changed {
-                        push_pick_event(events, side, slot, prev_id);
-                    }
                 }
             }
             _ => {
                 *pending_slot = None;
-                if faction_changed {
+                // Replay only when this frame corroborates the cached identity.
+                if candidate.is_some() && std::mem::take(needs_replay) {
                     push_pick_event(events, side, slot, prev_id);
                 }
             }
@@ -88,7 +85,8 @@ pub struct VisionCaptureAdapter<S: ScreenFrameSource> {
     catalog: HeroVisionCatalog,
     ally_faction: Faction,
     capture_mode: VisionCaptureMode,
-    last_ally_faction: Option<Faction>,
+    replay_radiant: [bool; 5],
+    replay_dire: [bool; 5],
     last_radiant: [Option<HeroId>; 5],
     last_dire: [Option<HeroId>; 5],
     pending_radiant: [Option<(HeroId, u8)>; 5],
@@ -102,7 +100,8 @@ impl<S: ScreenFrameSource> VisionCaptureAdapter<S> {
             catalog,
             ally_faction: Faction::Radiant,
             capture_mode: VisionCaptureMode::Any,
-            last_ally_faction: None,
+            replay_radiant: [false; 5],
+            replay_dire: [false; 5],
             last_radiant: [None; 5],
             last_dire: [None; 5],
             pending_radiant: [None; 5],
@@ -111,7 +110,17 @@ impl<S: ScreenFrameSource> VisionCaptureAdapter<S> {
     }
 
     pub fn set_ally_faction(&mut self, faction: Faction) {
-        self.ally_faction = faction;
+        if self.ally_faction != faction {
+            self.ally_faction = faction;
+            self.remap_state();
+        }
+    }
+
+    fn remap_state(&mut self) {
+        self.replay_radiant = [true; 5];
+        self.replay_dire = [true; 5];
+        self.pending_radiant = [None; 5];
+        self.pending_dire = [None; 5];
     }
 
     pub fn set_capture_mode(&mut self, mode: VisionCaptureMode) {
@@ -120,7 +129,8 @@ impl<S: ScreenFrameSource> VisionCaptureAdapter<S> {
 
     /// Clears cached per-slot state so stationary portraits re-emit on the next poll.
     pub fn reset_state(&mut self) {
-        self.last_ally_faction = None;
+        self.replay_radiant = [false; 5];
+        self.replay_dire = [false; 5];
         self.last_radiant = [None; 5];
         self.last_dire = [None; 5];
         self.pending_radiant = [None; 5];
@@ -323,14 +333,12 @@ impl<S: ScreenFrameSource> VisionCaptureAdapter<S> {
             Faction::Radiant => (Side::Allies, Side::Enemies),
             Faction::Dire => (Side::Enemies, Side::Allies),
         };
-        let faction_changed = self.last_ally_faction != Some(self.ally_faction);
-
         let mut events = Vec::new();
         for slot in 0..5 {
             resolve_slot_transition(
                 rad_side,
                 slot,
-                faction_changed,
+                &mut self.replay_radiant[slot],
                 best_rad[slot],
                 &mut self.last_radiant[slot],
                 &mut self.pending_radiant[slot],
@@ -339,7 +347,7 @@ impl<S: ScreenFrameSource> VisionCaptureAdapter<S> {
             resolve_slot_transition(
                 dire_side,
                 slot,
-                faction_changed,
+                &mut self.replay_dire[slot],
                 best_dire[slot],
                 &mut self.last_dire[slot],
                 &mut self.pending_dire[slot],
@@ -347,7 +355,6 @@ impl<S: ScreenFrameSource> VisionCaptureAdapter<S> {
             );
         }
 
-        self.last_ally_faction = Some(self.ally_faction);
         events
     }
 }
@@ -554,9 +561,7 @@ fn run_vision_loop<S: ScreenFrameSource>(
             match control.pending_reset.take() {
                 Some(VisionReset::Remap) => {
                     // Force replay even if several flips return to the same faction.
-                    adapter.last_ally_faction = None;
-                    adapter.pending_radiant = [None; 5];
-                    adapter.pending_dire = [None; 5];
+                    adapter.remap_state();
                 }
                 Some(VisionReset::Clear) => adapter.reset_state(),
                 None if should_reset => adapter.reset_state(), // Queue overflow resync.
