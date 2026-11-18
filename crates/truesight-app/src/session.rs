@@ -55,6 +55,8 @@ pub struct AppSession {
     sync_runner: BackgroundSyncRunner,
     last_rules_state: Option<String>,
     vision_reset_pending: bool,
+    vision_slots: [[Option<HeroId>; TEAM_SIZE]; 2],
+    vision_owned: Vec<(Side, HeroId)>,
 }
 
 impl Drop for AppSession {
@@ -173,6 +175,8 @@ impl AppSession {
             }),
             last_rules_state: None,
             vision_reset_pending: false,
+            vision_slots: [[None; TEAM_SIZE]; 2],
+            vision_owned: Vec::new(),
         })
     }
 
@@ -562,6 +566,8 @@ impl AppSession {
         self.manually_dismissed.clear();
         self.local_player_hero = None;
         self.vision_reset_pending = true;
+        self.vision_slots = [[None; TEAM_SIZE]; 2];
+        self.vision_owned.clear();
     }
 
     fn side_picks(&self, side: Side) -> &[Option<DraftPick>; TEAM_SIZE] {
@@ -800,6 +806,7 @@ impl AppSession {
                 hero_id,
                 role,
             } => {
+                self.vision_owned.retain(|&(_, id)| id != hero_id);
                 self.apply_side_pick(side, slot, hero_id, role);
             }
             DraftEvent::BanDetected { hero_id } => {
@@ -853,6 +860,105 @@ impl AppSession {
         }
     }
 
+    // Reconcile a whole poll before removing identities: a hero can move to another
+    // physical portrait in the same batch, including when all role slots are full.
+    // Missing events are not removals (death/occlusion grace belongs to the adapter).
+    pub(crate) fn apply_vision_events(&mut self, events: Vec<DraftEvent>) {
+        // Cached observations support retirement only; replaying them as additions
+        // would undo manual replacements and subsequent GSI side corrections.
+        let mut fresh_slots = [[None; TEAM_SIZE]; 2];
+        for event in events {
+            if let DraftEvent::PickDetected {
+                side,
+                slot,
+                hero_id,
+                ..
+            } = event
+            {
+                if slot < TEAM_SIZE {
+                    let index = usize::from(side == Side::Enemies);
+                    self.vision_slots[index][slot] = Some(hero_id);
+                    fresh_slots[index][slot] = Some(hero_id);
+                }
+            }
+        }
+        let previous_picks = [self.draft.allies, self.draft.enemies];
+        for (index, side) in [Side::Allies, Side::Enemies].into_iter().enumerate() {
+            let observed = self.vision_slots[index];
+            let locked = match side {
+                Side::Allies => self.ally_locked_slots,
+                Side::Enemies => self.enemy_locked_slots,
+            };
+            for (slot, &is_locked) in locked.iter().enumerate() {
+                if let Some(pick) = self.side_picks(side)[slot] {
+                    if self.vision_owned.contains(&(side, pick.hero_id))
+                        && !observed.contains(&Some(pick.hero_id))
+                        && !is_locked
+                        && self.local_player_hero != Some(pick.hero_id)
+                    {
+                        self.side_picks_mut(side)[slot] = None;
+                    }
+                }
+            }
+            self.vision_owned
+                .retain(|&(owner_side, id)| owner_side != side || observed.contains(&Some(id)));
+        }
+        for (index, side) in [Side::Allies, Side::Enemies].into_iter().enumerate() {
+            for hero_id in fresh_slots[index].into_iter().flatten() {
+                if self
+                    .side_picks(side)
+                    .iter()
+                    .flatten()
+                    .any(|p| p.hero_id == hero_id)
+                {
+                    continue;
+                }
+                // Vision cannot move a user-locked hero or the authoritative local hero
+                // from the opposite team. Ordinary automatic placement remains shared.
+                let opposite = if side == Side::Allies {
+                    Side::Enemies
+                } else {
+                    Side::Allies
+                };
+                let locked = match opposite {
+                    Side::Allies => self.ally_locked_slots,
+                    Side::Enemies => self.enemy_locked_slots,
+                };
+                if self
+                    .side_picks(opposite)
+                    .iter()
+                    .enumerate()
+                    .any(|(slot, pick)| {
+                        pick.is_some_and(|p| p.hero_id == hero_id)
+                            && (locked[slot] || self.local_player_hero == Some(hero_id))
+                    })
+                {
+                    continue;
+                }
+                self.apply_side_pick(side, 0, hero_id, None);
+                if self
+                    .side_picks(side)
+                    .iter()
+                    .flatten()
+                    .any(|p| p.hero_id == hero_id)
+                    && !self.vision_owned.contains(&(side, hero_id))
+                {
+                    self.vision_owned.push((side, hero_id));
+                }
+            }
+        }
+        // Compare after both sides are processed: a pick can also remove a hero
+        // from the opposite side, even if the destination has no free slot.
+        for (side, previous) in [Side::Allies, Side::Enemies]
+            .into_iter()
+            .zip(previous_picks)
+        {
+            if self.side_picks(side) != &previous {
+                self.rebalance_unlocked_side_roles(side);
+            }
+        }
+    }
+
     pub fn poll_live_sources(
         &mut self,
         gsi_listener: Option<&mut BoundedGsiListener>,
@@ -892,10 +998,8 @@ impl AppSession {
             worker.set_ally_faction(self.draft.ally_faction);
             if let Ok(events) = worker.poll_events() {
                 if capture_mode != VisionCaptureMode::Suppressed {
-                    for ev in events {
-                        self.apply_event(ev);
-                        changed = true;
-                    }
+                    changed |= !events.is_empty();
+                    self.apply_vision_events(events);
                 }
             }
             if self.apply_runtime_health(worker.runtime_health()) {
@@ -913,6 +1017,14 @@ impl AppSession {
         self.draft.ally_faction = faction;
         std::mem::swap(&mut self.draft.allies, &mut self.draft.enemies);
         std::mem::swap(&mut self.ally_locked_slots, &mut self.enemy_locked_slots);
+        self.vision_slots.swap(0, 1);
+        for (side, _) in &mut self.vision_owned {
+            *side = if *side == Side::Allies {
+                Side::Enemies
+            } else {
+                Side::Allies
+            };
+        }
         self.sync_local_player_target_role();
     }
 
