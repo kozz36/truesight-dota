@@ -4157,7 +4157,7 @@ fn vision_capture_error_clears_pending_confirmations_while_preserving_confirmed_
 fn vision_x11_checks_topbar_geometry_occlusion_on_first_and_cached_captures() {
     use crate::vision::{
         X11WindowGeometry, evaluate_x11_window_visibility_with, is_dota2_xprop_output,
-        select_visible_dota_window_with, top_bar_intersects_window,
+        resolve_window_geometry_with, select_visible_dota_window_with, top_bar_intersects_window,
     };
 
     let win = |x, y, width, height| X11WindowGeometry {
@@ -4383,37 +4383,165 @@ fn vision_x11_checks_topbar_geometry_occlusion_on_first_and_cached_captures() {
             "Non-occluding case {label} must keep capture visible"
         );
     }
+
+    // 8. Per-query geometry fallback + fail-closed policy when occlusion is unverifiable:
+    let mut fallback_hits = 0_usize;
+    let resolved_primary = resolve_window_geometry_with(
+        "0x660013d",
+        |_| Some(dota_windowed_geom),
+        |_| {
+            fallback_hits += 1;
+            Some(win(0, 0, 100, 100))
+        },
+    );
+    assert_eq!(resolved_primary, Some(dota_windowed_geom));
+    assert_eq!(
+        fallback_hits, 0,
+        "Fallback must not run when primary succeeds"
+    );
+
+    // Primary returns None -> fallback rescues non-overlapping window on monitor 1 (capture allowed).
+    assert!(evaluate_x11_window_visibility_with(
+        "0x660013d",
+        root_multi,
+        dota_visible,
+        |wid| (wid == "0x7200010").then(|| firefox_visible.to_string()),
+        |wid| {
+            resolve_window_geometry_with(
+                wid,
+                |id| (id == "0x0660013d" || id == "0x660013d").then_some(dota_mon2),
+                |id| (id == "0x7200010").then_some(firefox_mon1),
+            )
+        },
+    ));
+    // Primary returns None -> fallback detects top-bar overlap (capture blocked).
+    assert!(!evaluate_x11_window_visibility_with(
+        "0x660013d",
+        root_windowed_with_geom,
+        dota_visible,
+        |wid| (wid == "0x7200010").then(|| firefox_visible.to_string()),
+        |wid| {
+            resolve_window_geometry_with(
+                wid,
+                |id| (id == "0x0660013d" || id == "0x660013d").then_some(dota_windowed_geom),
+                |id| (id == "0x7200010").then_some(win(150, 80, 500, 400)),
+            )
+        },
+    ));
+
+    // When visible non-truesight same-desktop window is stacked above Dota 2 and geometry fails:
+    // fail closed (both dota_geom = None and other_geom = None).
+    assert!(!evaluate_x11_window_visibility_with(
+        "0x660013d",
+        root_windowed_with_geom,
+        dota_visible,
+        |wid| (wid == "0x7200010").then(|| firefox_visible.to_string()),
+        |_| None,
+    ));
+    assert_eq!(
+        select_visible_dota_window_with(
+            root_windowed_with_geom,
+            &candidates,
+            |wid| match wid {
+                "0x0660013d" => Some(dota_visible.to_string()),
+                "0x7200010" => Some(firefox_visible.to_string()),
+                _ => None,
+            },
+            |_| None,
+        ),
+        None
+    );
+    assert!(!evaluate_x11_window_visibility_with(
+        "0x660013d",
+        root_windowed_with_geom,
+        dota_visible,
+        |wid| (wid == "0x7200010").then(|| firefox_visible.to_string()),
+        |wid| (wid == "0x0660013d" || wid == "0x660013d").then_some(dota_windowed_geom),
+    ));
+    assert_eq!(
+        select_visible_dota_window_with(
+            root_windowed_with_geom,
+            &candidates,
+            |wid| match wid {
+                "0x0660013d" => Some(dota_visible.to_string()),
+                "0x7200010" => Some(firefox_visible.to_string()),
+                _ => None,
+            },
+            |wid| (wid == "0x0660013d" || wid == "0x660013d").then_some(dota_windowed_geom),
+        ),
+        None
+    );
+
+    // Without any visible non-truesight same-desktop window stacked above Dota 2, missing geometry stays open.
+    assert!(evaluate_x11_window_visibility_with(
+        "0x660013d",
+        root_clean_stack,
+        dota_visible,
+        |_| None,
+        |_| None,
+    ));
+    assert_eq!(
+        select_visible_dota_window_with(
+            root_clean_stack,
+            &["0x0660013d".to_string()],
+            |wid| (wid == "0x0660013d").then(|| dota_visible.to_string()),
+            |_| None,
+        ),
+        Some("0x0660013d".to_string())
+    );
+    for (label, above_props) in [
+        ("truesight-above", truesight_win),
+        ("hidden-above", firefox_hidden),
+        ("other-desktop-above", firefox_other_desk),
+    ] {
+        assert!(
+            evaluate_x11_window_visibility_with(
+                "0x660013d",
+                root_windowed_with_geom,
+                dota_visible,
+                |wid| (wid == "0x7200010").then(|| above_props.to_string()),
+                |_| None,
+            ),
+            "No visible non-truesight occluder above ({label}) must remain visible when geometry is None"
+        );
+    }
 }
 
 #[test]
 fn vision_x11_wire_geometry_and_parsers() {
     use crate::vision::{
-        X11DisplayTarget, X11WindowGeometry, parse_x11_display, parse_xauth_cookie,
+        X11LocalDisplay, X11WindowGeometry, parse_x11_local_display, parse_xauth_cookie_for_local,
         parse_xprop_frame_extents, parse_xwininfo_geometry,
     };
 
     assert_eq!(
-        parse_x11_display(":0"),
-        Some(X11DisplayTarget::Unix {
+        parse_x11_local_display(":0"),
+        Some(X11LocalDisplay {
             path: "/tmp/.X11-unix/X0".to_string(),
             display_num: "0".to_string(),
         })
     );
     assert_eq!(
-        parse_x11_display("unix:1.0"),
-        Some(X11DisplayTarget::Unix {
+        parse_x11_local_display(":0.0"),
+        Some(X11LocalDisplay {
+            path: "/tmp/.X11-unix/X0".to_string(),
+            display_num: "0".to_string(),
+        })
+    );
+    assert_eq!(
+        parse_x11_local_display("unix:1.0"),
+        Some(X11LocalDisplay {
             path: "/tmp/.X11-unix/X1".to_string(),
             display_num: "1".to_string(),
         })
     );
-    assert_eq!(
-        parse_x11_display("127.0.0.1:10.2"),
-        Some(X11DisplayTarget::Tcp {
-            host: "127.0.0.1".to_string(),
-            port: 6010,
-            display_num: "10".to_string(),
-        })
-    );
+    for remote in ["127.0.0.1:10.2", "localhost:0", "192.168.1.10:0", "[::1]:0"] {
+        assert_eq!(
+            parse_x11_local_display(remote),
+            None,
+            "TCP display {remote} must be rejected by local X11 wire client"
+        );
+    }
 
     assert_eq!(
         parse_xprop_frame_extents("_NET_FRAME_EXTENTS(CARDINAL) = 4, 4, 32, 4\n"),
@@ -4437,8 +4565,8 @@ fn vision_x11_wire_geometry_and_parsers() {
         })
     );
 
-    // Big-endian Xauthority encoding: two entries + bounds safety on truncated tail.
-    let mut xauth = Vec::new();
+    // Big-endian Xauthority endpoint binding tests:
+    // Reject TCP FamilyInternet (0), FamilyInternet6 (6), wrong local host, wrong display, or missing local hostname.
     let push_entry =
         |buf: &mut Vec<u8>, fam: u16, addr: &[u8], num: &[u8], name: &[u8], data: &[u8]| {
             buf.extend_from_slice(&fam.to_be_bytes());
@@ -4447,16 +4575,54 @@ fn vision_x11_wire_geometry_and_parsers() {
                 buf.extend_from_slice(slice);
             }
         };
+
+    let mut unrelated = Vec::new();
     push_entry(
-        &mut xauth,
-        256,
+        &mut unrelated,
+        0, // FamilyInternet
+        &[127, 0, 0, 1],
+        b"0",
+        b"MIT-MAGIC-COOKIE-1",
+        &[9; 16],
+    );
+    push_entry(
+        &mut unrelated,
+        6, // FamilyInternet6
+        &[0; 16],
+        b"0",
+        b"MIT-MAGIC-COOKIE-1",
+        &[8; 16],
+    );
+    push_entry(
+        &mut unrelated,
+        256, // FamilyLocal other host
         b"otherhost",
         b"0",
         b"MIT-MAGIC-COOKIE-1",
         &[1; 16],
     );
     push_entry(
-        &mut xauth,
+        &mut unrelated,
+        256, // FamilyLocal right host, wrong display
+        b"master",
+        b"1",
+        b"MIT-MAGIC-COOKIE-1",
+        &[2; 16],
+    );
+    assert_eq!(
+        parse_xauth_cookie_for_local(&unrelated, "0", Some("master")),
+        None,
+        "Unrelated FamilyInternet/otherhost/wrong-display entries must not fall back"
+    );
+    assert_eq!(
+        parse_xauth_cookie_for_local(&unrelated, "1", None),
+        None,
+        "FamilyLocal entry must not match when local hostname is unknown"
+    );
+
+    let mut matched_local = unrelated.clone();
+    push_entry(
+        &mut matched_local,
         256,
         b"master",
         b"0",
@@ -4464,10 +4630,27 @@ fn vision_x11_wire_geometry_and_parsers() {
         &[7; 16],
     );
     assert_eq!(
-        parse_xauth_cookie(&xauth, "0", Some("master")),
+        parse_xauth_cookie_for_local(&matched_local, "0", Some("master")),
         Some((b"MIT-MAGIC-COOKIE-1".to_vec(), vec![7; 16]))
     );
-    assert_eq!(parse_xauth_cookie(&[0, 1, 0, 5], "0", None), None);
+
+    let mut wild_only = unrelated;
+    push_entry(
+        &mut wild_only,
+        65535, // FamilyWild
+        b"",
+        b"0",
+        b"MIT-MAGIC-COOKIE-1",
+        &[5; 16],
+    );
+    assert_eq!(
+        parse_xauth_cookie_for_local(&wild_only, "0", None),
+        Some((b"MIT-MAGIC-COOKIE-1".to_vec(), vec![5; 16]))
+    );
+    assert_eq!(
+        parse_xauth_cookie_for_local(&[0, 1, 0, 5], "0", Some("master")),
+        None
+    );
 
     #[cfg(target_os = "linux")]
     {

@@ -21,12 +21,15 @@ pub(crate) use worker::{dedup_layout_candidates, select_best_layout_candidates};
 pub use x11::X11TopBarFrameSource;
 pub use x11::{build_x11_import_args, is_dota2_xprop_output};
 #[cfg(test)]
-pub(crate) use x11::{evaluate_x11_window_visibility_with, select_visible_dota_window_with};
+pub(crate) use x11::{
+    evaluate_x11_window_visibility_with, resolve_window_geometry_with,
+    select_visible_dota_window_with,
+};
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) use x11_geom::X11GeometryClient;
 #[cfg(test)]
 pub(crate) use x11_geom::{
-    X11DisplayTarget, X11WindowGeometry, parse_x11_display, parse_xauth_cookie,
+    X11LocalDisplay, X11WindowGeometry, parse_x11_local_display, parse_xauth_cookie_for_local,
     parse_xprop_frame_extents, parse_xwininfo_geometry, top_bar_intersects_window,
 };
 

@@ -1,5 +1,5 @@
 #[cfg(target_os = "linux")]
-use super::x11_geom::{X11GeometryClient, query_xwininfo_geometry};
+use super::x11_geom::{X11GeometryClient, XwininfoLookup, query_xwininfo_geometry};
 #[cfg(any(target_os = "linux", test))]
 use super::x11_geom::{X11WindowGeometry, parse_xprop_frame_extents, top_bar_intersects_window};
 #[cfg(target_os = "linux")]
@@ -92,6 +92,20 @@ fn parse_xprop_cardinal(props_str: &str, atom: &str) -> Option<u32> {
     None
 }
 
+/// Resolves window geometry via primary source first and falls back per query on `None`.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn resolve_window_geometry_with<Fp, Ff>(
+    wid: &str,
+    mut primary: Fp,
+    mut fallback: Ff,
+) -> Option<X11WindowGeometry>
+where
+    Fp: FnMut(&str) -> Option<X11WindowGeometry>,
+    Ff: FnMut(&str) -> Option<X11WindowGeometry>,
+{
+    primary(wid).or_else(|| fallback(wid))
+}
+
 /// Evaluates whether a Dota 2 X11 window remains visible, on the active virtual desktop, and
 /// unobstructed over its top bar (`100%x8%+0+0`) by higher-stacked windows.
 #[cfg(any(target_os = "linux", test))]
@@ -126,11 +140,8 @@ where
         return false;
     }
 
-    let Some(dota_geom) = dota_geom else {
-        return true;
-    };
     let Some(dota_id) = parse_xprop_window_id_u64(wid) else {
-        return true;
+        return false;
     };
 
     let stack = parse_xprop_stacking_ids(root_props);
@@ -150,8 +161,13 @@ where
             {
                 continue;
             }
+            // A visible non-truesight same-desktop window sits above Dota 2 in stacking order:
+            // fail closed if either window's geometry cannot be verified.
+            let Some(dota_geom) = dota_geom else {
+                return false;
+            };
             let Some(other_geom) = fetch_window_geometry(other_wid) else {
-                continue;
+                return false;
             };
             if !other_geom.viewable || other_geom.width == 0 || other_geom.height == 0 {
                 continue;
@@ -303,16 +319,33 @@ impl X11TopBarFrameSource {
 #[cfg(target_os = "linux")]
 impl ScreenFrameSource for X11TopBarFrameSource {
     fn capture_frame(&mut self) -> Result<Option<RgbFrame>, PortError> {
-        let root_props = Self::query_root_visibility_props()?;
+        let mut root_props = Self::query_root_visibility_props()?;
         let mut geom_client = None;
+        let mut xwininfo_available = true;
         let mut query_geom = |wid_str: &str| -> Option<X11WindowGeometry> {
-            let client_opt = geom_client.get_or_insert_with(X11GeometryClient::connect);
-            if let Some(client) = client_opt.as_mut() {
-                let wid_num =
-                    parse_xprop_window_id_u64(wid_str).and_then(|v| u32::try_from(v).ok())?;
-                return client.query_window_geometry(wid_num);
-            }
-            query_xwininfo_geometry(wid_str)
+            resolve_window_geometry_with(
+                wid_str,
+                |id| {
+                    let client_opt = geom_client.get_or_insert_with(X11GeometryClient::connect);
+                    let client = client_opt.as_mut()?;
+                    let wid_num =
+                        parse_xprop_window_id_u64(id).and_then(|v| u32::try_from(v).ok())?;
+                    client.query_window_geometry(wid_num)
+                },
+                |id| {
+                    if !xwininfo_available {
+                        return None;
+                    }
+                    match query_xwininfo_geometry(id) {
+                        XwininfoLookup::Geometry(geom) => Some(geom),
+                        XwininfoLookup::NotInstalled => {
+                            xwininfo_available = false;
+                            None
+                        }
+                        XwininfoLookup::Failed => None,
+                    }
+                },
+            )
         };
 
         if let Some(ref wid) = self.cached_window {
@@ -348,8 +381,8 @@ impl ScreenFrameSource for X11TopBarFrameSource {
 
         if !output.status.success() {
             self.cached_window = None;
-            // If Dota 2 window closed/minimized between lookup and import, wait cleanly;
-            // if a Dota 2 window is still open and import failed, surface the error.
+            // Refresh root stacking state before checking if Dota 2 is still visible.
+            root_props = Self::query_root_visibility_props()?;
             if Self::find_dota_window(&root_props, &mut query_geom)?.is_none() {
                 return Ok(None);
             }

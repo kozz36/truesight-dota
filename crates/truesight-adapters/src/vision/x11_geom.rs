@@ -1,7 +1,5 @@
 #[cfg(target_os = "linux")]
-use std::io::{Read, Write};
-#[cfg(target_os = "linux")]
-use std::net::{TcpStream, ToSocketAddrs};
+use std::io::{ErrorKind, Read, Write};
 #[cfg(target_os = "linux")]
 use std::os::linux::net::SocketAddrExt;
 #[cfg(target_os = "linux")]
@@ -22,51 +20,29 @@ pub(crate) struct X11WindowGeometry {
     pub viewable: bool,
 }
 
-/// Parsed X11 `DISPLAY` connection target.
+/// Parsed local Unix X11 `DISPLAY` target. Remote/TCP displays are rejected so TCP stays on system tools.
 #[cfg(any(target_os = "linux", test))]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum X11DisplayTarget {
-    Unix {
-        path: String,
-        display_num: String,
-    },
-    Tcp {
-        host: String,
-        port: u16,
-        display_num: String,
-    },
+pub(crate) struct X11LocalDisplay {
+    pub path: String,
+    pub display_num: String,
 }
 
 #[cfg(any(target_os = "linux", test))]
-pub(crate) fn parse_x11_display(display: &str) -> Option<X11DisplayTarget> {
+pub(crate) fn parse_x11_local_display(display: &str) -> Option<X11LocalDisplay> {
     let trimmed = display.trim();
     if trimmed.is_empty() {
         return None;
     }
     let (host_part, screen_part) = trimmed.rsplit_once(':')?;
-    let disp_num_str = screen_part.split('.').next().filter(|s| !s.is_empty())?;
-    let disp_num = disp_num_str.parse::<u16>().ok()?;
-    let display_num = disp_num.to_string();
-
-    if host_part.is_empty() || host_part == "unix" {
-        return Some(X11DisplayTarget::Unix {
-            path: format!("/tmp/.X11-unix/X{disp_num}"),
-            display_num,
-        });
-    }
-
-    let clean_host = host_part
-        .strip_prefix('[')
-        .and_then(|s| s.strip_suffix(']'))
-        .unwrap_or(host_part);
-    if clean_host.is_empty() {
+    if !host_part.is_empty() && host_part != "unix" {
         return None;
     }
-    let port = 6000_u16.checked_add(disp_num)?;
-    Some(X11DisplayTarget::Tcp {
-        host: clean_host.to_string(),
-        port,
-        display_num,
+    let disp_num_str = screen_part.split('.').next().filter(|s| !s.is_empty())?;
+    let disp_num = disp_num_str.parse::<u16>().ok()?;
+    Some(X11LocalDisplay {
+        path: format!("/tmp/.X11-unix/X{disp_num}"),
+        display_num: disp_num.to_string(),
     })
 }
 
@@ -81,9 +57,9 @@ fn read_xauth_be_slice<'a>(raw: &'a [u8], pos: &mut usize) -> Option<&'a [u8]> {
     Some(slice)
 }
 
-/// Parses an `.Xauthority` binary file for `MIT-MAGIC-COOKIE-1` matching `display_num`.
+/// Parses an `.Xauthority` file for `MIT-MAGIC-COOKIE-1` strictly bound to local Unix display `display_num`.
 #[cfg(any(target_os = "linux", test))]
-pub(crate) fn parse_xauth_cookie(
+pub(crate) fn parse_xauth_cookie_for_local(
     raw: &[u8],
     display_num: &str,
     local_hostname: Option<&str>,
@@ -94,7 +70,6 @@ pub(crate) fn parse_xauth_cookie(
 
     let mut pos = 0_usize;
     let mut wild_fallback: Option<(Vec<u8>, Vec<u8>)> = None;
-    let mut any_fallback: Option<(Vec<u8>, Vec<u8>)> = None;
 
     while pos.checked_add(2).is_some_and(|end| end <= raw.len()) {
         let fam = u16::from_be_bytes([raw[pos], raw[pos + 1]]);
@@ -104,21 +79,25 @@ pub(crate) fn parse_xauth_cookie(
         let name = read_xauth_be_slice(raw, &mut pos)?;
         let data = read_xauth_be_slice(raw, &mut pos)?;
 
-        if name != COOKIE_NAME || (!num.is_empty() && num != display_num.as_bytes()) {
+        if name != COOKIE_NAME {
             continue;
         }
-        let pair = (name.to_vec(), data.to_vec());
-        if fam == FAMILY_LOCAL && local_hostname.is_some_and(|host| addr == host.as_bytes()) {
-            return Some(pair);
-        }
-        if fam == FAMILY_WILD && wild_fallback.is_none() {
-            wild_fallback = Some(pair);
-        } else if any_fallback.is_none() {
-            any_fallback = Some(pair);
+        let matches_display = num == display_num.as_bytes();
+        if fam == FAMILY_LOCAL {
+            if matches_display
+                && local_hostname.is_some_and(|host| !host.is_empty() && addr == host.as_bytes())
+            {
+                return Some((name.to_vec(), data.to_vec()));
+            }
+        } else if fam == FAMILY_WILD
+            && (matches_display || num.is_empty())
+            && wild_fallback.is_none()
+        {
+            wild_fallback = Some((name.to_vec(), data.to_vec()));
         }
     }
 
-    wild_fallback.or(any_fallback)
+    wild_fallback
 }
 
 /// Parses `_NET_FRAME_EXTENTS(CARDINAL) = left, right, top, bottom`, defaulting to `[0, 0, 0, 0]`.
@@ -221,40 +200,7 @@ fn discard_exact<R: Read>(reader: &mut R, mut remaining: usize) -> std::io::Resu
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
-pub(crate) enum X11Transport {
-    Unix(UnixStream),
-    Tcp(TcpStream),
-}
-
-#[cfg(target_os = "linux")]
-impl Read for X11Transport {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        match self {
-            Self::Unix(stream) => stream.read(buf),
-            Self::Tcp(stream) => stream.read(buf),
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-impl Write for X11Transport {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        match self {
-            Self::Unix(stream) => stream.write(buf),
-            Self::Tcp(stream) => stream.write(buf),
-        }
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        match self {
-            Self::Unix(stream) => stream.flush(),
-            Self::Tcp(stream) => stream.flush(),
-        }
-    }
-}
-
-/// Minimal pure-Rust X11 wire client (`GetGeometry`, `TranslateCoordinates`, `GetWindowAttributes`).
+/// Minimal pure-Rust local Unix-socket X11 wire client (`GetGeometry`, `TranslateCoordinates`, `GetWindowAttributes`).
 #[cfg(target_os = "linux")]
 pub(crate) struct X11GeometryClient<S: Read + Write> {
     stream: S,
@@ -263,39 +209,22 @@ pub(crate) struct X11GeometryClient<S: Read + Write> {
 }
 
 #[cfg(target_os = "linux")]
-impl X11GeometryClient<X11Transport> {
+impl X11GeometryClient<UnixStream> {
     pub(crate) fn connect() -> Option<Self> {
         let display = std::env::var("DISPLAY").ok()?;
-        let target = parse_x11_display(&display)?;
+        let target = parse_x11_local_display(&display)?;
         let timeout = Duration::from_millis(250);
 
-        let (transport, display_num) = match target {
-            X11DisplayTarget::Unix { path, display_num } => {
-                let stream = UnixStream::connect(&path).or_else(|_| {
-                    let addr = SocketAddr::from_abstract_name(path.as_bytes())?;
-                    UnixStream::connect_addr(&addr)
-                });
-                let stream = stream.ok()?;
-                let _ = stream.set_read_timeout(Some(timeout));
-                let _ = stream.set_write_timeout(Some(timeout));
-                (X11Transport::Unix(stream), display_num)
-            }
-            X11DisplayTarget::Tcp {
-                host,
-                port,
-                display_num,
-            } => {
-                let mut addrs = (host.as_str(), port).to_socket_addrs().ok()?;
-                let sock_addr = addrs.next()?;
-                let stream = TcpStream::connect_timeout(&sock_addr, timeout).ok()?;
-                let _ = stream.set_read_timeout(Some(timeout));
-                let _ = stream.set_write_timeout(Some(timeout));
-                (X11Transport::Tcp(stream), display_num)
-            }
-        };
+        let stream = UnixStream::connect(&target.path).or_else(|_| {
+            let addr = SocketAddr::from_abstract_name(target.path.as_bytes())?;
+            UnixStream::connect_addr(&addr)
+        });
+        let stream = stream.ok()?;
+        let _ = stream.set_read_timeout(Some(timeout));
+        let _ = stream.set_write_timeout(Some(timeout));
 
-        let (auth_name, auth_data) = load_xauth_cookie(&display_num).unwrap_or_default();
-        Self::connect_stream(transport, &auth_name, &auth_data)
+        let (auth_name, auth_data) = load_xauth_cookie(&target.display_num).unwrap_or_default();
+        Self::connect_stream(stream, &auth_name, &auth_data)
     }
 }
 
@@ -352,6 +281,22 @@ impl<S: Read + Write> X11GeometryClient<S> {
         seq
     }
 
+    fn discard_extra_words(&mut self, pkt: &[u8; 32]) -> bool {
+        let extra_words = u32::from_le_bytes([pkt[4], pkt[5], pkt[6], pkt[7]]);
+        let Some(extra_bytes) = usize::try_from(extra_words)
+            .ok()
+            .and_then(|n| n.checked_mul(4))
+        else {
+            self.closed = true;
+            return false;
+        };
+        if extra_bytes > 64 * 1024 || discard_exact(&mut self.stream, extra_bytes).is_err() {
+            self.closed = true;
+            return false;
+        }
+        true
+    }
+
     fn send_and_read_reply(&mut self, req: &[u8]) -> Option<[u8; 32]> {
         if self.closed {
             return None;
@@ -376,28 +321,14 @@ impl<S: Read + Write> X11GeometryClient<S> {
                     }
                 }
                 1 => {
-                    let extra_words = u32::from_le_bytes([pkt[4], pkt[5], pkt[6], pkt[7]]);
-                    let extra_bytes = usize::try_from(extra_words).ok()?.saturating_mul(4);
-                    if extra_bytes > 64 * 1024
-                        || discard_exact(&mut self.stream, extra_bytes).is_err()
-                    {
-                        self.closed = true;
+                    if !self.discard_extra_words(&pkt) {
                         return None;
                     }
                     if pkt_seq == seq {
                         return Some(pkt);
                     }
                 }
-                35 => {
-                    let extra_words = u32::from_le_bytes([pkt[4], pkt[5], pkt[6], pkt[7]]);
-                    let extra_bytes = usize::try_from(extra_words).ok()?.saturating_mul(4);
-                    if extra_bytes > 64 * 1024
-                        || discard_exact(&mut self.stream, extra_bytes).is_err()
-                    {
-                        self.closed = true;
-                        return None;
-                    }
-                }
+                35 if !self.discard_extra_words(&pkt) => return None,
                 _ => {}
             }
         }
@@ -459,15 +390,29 @@ fn load_xauth_cookie(display_num: &str) -> Option<(Vec<u8>, Vec<u8>)> {
     let hostname = std::fs::read_to_string("/proc/sys/kernel/hostname")
         .ok()
         .map(|s| s.trim().to_string());
-    parse_xauth_cookie(&raw, display_num, hostname.as_deref())
+    parse_xauth_cookie_for_local(&raw, display_num, hostname.as_deref())
 }
 
-/// Optional CLI fallback if raw X11 socket connection is unavailable.
 #[cfg(target_os = "linux")]
-pub(crate) fn query_xwininfo_geometry(wid: &str) -> Option<X11WindowGeometry> {
-    let out = Command::new("xwininfo").args(["-id", wid]).output().ok()?;
-    out.status
-        .success()
-        .then(|| parse_xwininfo_geometry(&String::from_utf8_lossy(&out.stdout)))
-        .flatten()
+pub(crate) enum XwininfoLookup {
+    Geometry(X11WindowGeometry),
+    NotInstalled,
+    Failed,
+}
+
+/// Optional CLI fallback if local X11 wire client lookup is unavailable or fails.
+#[cfg(target_os = "linux")]
+pub(crate) fn query_xwininfo_geometry(wid: &str) -> XwininfoLookup {
+    let out = match Command::new("xwininfo").args(["-id", wid]).output() {
+        Ok(out) => out,
+        Err(err) if err.kind() == ErrorKind::NotFound => return XwininfoLookup::NotInstalled,
+        Err(_) => return XwininfoLookup::Failed,
+    };
+    if !out.status.success() {
+        return XwininfoLookup::Failed;
+    }
+    match parse_xwininfo_geometry(&String::from_utf8_lossy(&out.stdout)) {
+        Some(geom) => XwininfoLookup::Geometry(geom),
+        None => XwininfoLookup::Failed,
+    }
 }
