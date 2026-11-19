@@ -216,6 +216,7 @@ const PICKPHASE_L1_THRESHOLD: f32 = 31.0;
 const INGAME_L1_THRESHOLD: f32 = 35.0;
 const MIN_DESCRIPTOR_SATURATION: f32 = 13.0;
 const MIN_OUTER_SATURATION: f32 = 9.0;
+const MIN_MATCH_NCC_8: f32 = 0.68;
 
 fn compute_descriptor_8x4(
     rgb: &[u8],
@@ -280,6 +281,30 @@ fn compute_descriptor_8x4(
 
     let mean_intensity = (total_intensity as f32) / (DESC_LEN as f32);
     Some((out, mean_intensity))
+}
+
+fn descriptor_ncc(a: &[u8; DESC_LEN], b: &[u8; DESC_LEN]) -> f32 {
+    let n = DESC_LEN as f32;
+    let mut sum_a = 0_u32;
+    let mut sum_b = 0_u32;
+    for i in 0..DESC_LEN {
+        sum_a += u32::from(a[i]);
+        sum_b += u32::from(b[i]);
+    }
+    let mean_a = (sum_a as f32) / n;
+    let mean_b = (sum_b as f32) / n;
+    let mut num = 0.0_f32;
+    let mut var_a = 0.0_f32;
+    let mut var_b = 0.0_f32;
+    for i in 0..DESC_LEN {
+        let da = f32::from(a[i]) - mean_a;
+        let db = f32::from(b[i]) - mean_b;
+        num += da * db;
+        var_a += da * da;
+        var_b += db * db;
+    }
+    let denom = (var_a * var_b).sqrt();
+    if denom < 1e-6 { 0.0 } else { num / denom }
 }
 
 fn outer_column_stats(desc: &[u8; DESC_LEN]) -> (f32, f32) {
@@ -357,6 +382,7 @@ fn rank_descriptor_sets(
     entry_sets: &[&[(HeroId, [u8; DESC_LEN])]],
     query_desc: &[u8; DESC_LEN],
     threshold: f32,
+    min_ncc8: f32,
     max_candidates: usize,
 ) -> Vec<(HeroId, f32)> {
     let mut best_by_hero: HashMap<HeroId, f32> = HashMap::new();
@@ -368,16 +394,22 @@ fn rank_descriptor_sets(
                 sum_abs += u32::from(query_desc[i].abs_diff(candidate_desc[i]));
             }
             let mean_l1 = (sum_abs as f32) / (DESC_LEN as f32);
-            if mean_l1 < threshold {
-                best_by_hero
-                    .entry(*hero_id)
-                    .and_modify(|prev| {
-                        if mean_l1 < *prev {
-                            *prev = mean_l1;
-                        }
-                    })
-                    .or_insert(mean_l1);
+            if mean_l1 >= threshold {
+                continue;
             }
+            // Reject smooth UI gradients or uncorrelated highlights that share a coarse mean color
+            // without matching the spatial luminance/color structure of a real hero portrait.
+            if min_ncc8 > -1.0 && descriptor_ncc(query_desc, candidate_desc) < min_ncc8 {
+                continue;
+            }
+            best_by_hero
+                .entry(*hero_id)
+                .and_modify(|prev| {
+                    if mean_l1 < *prev {
+                        *prev = mean_l1;
+                    }
+                })
+                .or_insert(mean_l1);
         }
     }
 
@@ -391,7 +423,7 @@ fn match_descriptor_sets(
     entry_sets: &[&[(HeroId, [u8; DESC_LEN])]],
     query_desc: &[u8; DESC_LEN],
 ) -> Option<(HeroId, f32)> {
-    rank_descriptor_sets(entry_sets, query_desc, f32::MAX, 1)
+    rank_descriptor_sets(entry_sets, query_desc, f32::MAX, -1.0, 1)
         .into_iter()
         .next()
 }
@@ -565,13 +597,24 @@ impl HeroVisionCatalog {
             return Vec::new();
         }
 
-        let ranked = rank_descriptor_sets(entry_sets, &query_desc, threshold, max_candidates);
-        // A weak near-tie is not identity evidence: interior overlays can shift the
-        // nearest RGB template to an unrelated hero. Abstain before collision recovery
-        // can promote any of these indistinguishable alternatives. Keep strong matches.
-        if layout == TopBarLayout::InGame
+        let ranked = rank_descriptor_sets(
+            entry_sets,
+            &query_desc,
+            threshold,
+            MIN_MATCH_NCC_8,
+            max_candidates,
+        );
+        // A weak near-tie is not identity evidence: interior overlays or non-HUD chrome can shift
+        // the nearest RGB template to an unrelated hero. Abstain before collision recovery can
+        // promote indistinguishable alternatives, while keeping strong matches intact.
+        let weak_cutoff = match layout {
+            TopBarLayout::InGame => Some(26.0),
+            TopBarLayout::PickPhase => Some(24.0),
+            TopBarLayout::SyntheticExact => None,
+        };
+        if let Some(cutoff) = weak_cutoff
             && ranked.len() >= 2
-            && ranked[0].1 > 26.0
+            && ranked[0].1 > cutoff
             && ranked[1].1 - ranked[0].1 < 2.0
         {
             return Vec::new();
