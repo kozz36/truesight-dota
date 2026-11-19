@@ -324,9 +324,16 @@ impl<S: ScreenFrameSource> VisionCaptureAdapter<S> {
             self.clear_pending_slots();
             return Ok((None, CaptureRuntimeHealth::Suppressed));
         }
-        let Some(frame) = self.source.capture_frame()? else {
-            self.clear_pending_slots();
-            return Ok((None, CaptureRuntimeHealth::WaitingForGame));
+        let frame = match self.source.capture_frame() {
+            Ok(Some(frame)) => frame,
+            Ok(None) => {
+                self.clear_pending_slots();
+                return Ok((None, CaptureRuntimeHealth::WaitingForGame));
+            }
+            Err(err) => {
+                self.clear_pending_slots();
+                return Err(err);
+            }
         };
 
         let virtual_h = frame.source_height.unwrap_or_else(|| {
