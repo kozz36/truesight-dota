@@ -18,6 +18,8 @@ pub use worker::{BoundedVisionWorker, ScreenFrameSource, VisionCaptureAdapter};
 pub(crate) use worker::{dedup_layout_candidates, select_best_layout_candidates};
 #[cfg(target_os = "linux")]
 pub use x11::X11TopBarFrameSource;
+#[cfg(test)]
+pub(crate) use x11::evaluate_x11_window_visibility_with;
 pub use x11::{build_x11_import_args, is_dota2_xprop_output};
 
 use std::collections::HashMap;

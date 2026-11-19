@@ -4152,3 +4152,108 @@ fn vision_capture_error_clears_pending_confirmations_while_preserving_confirmed_
         "Only the newly confirmed slot 1 pick should emit after two consecutive post-error frames"
     );
 }
+
+#[test]
+fn vision_x11_revalidates_cached_window_visibility_desktop_and_single_monitor_occlusion() {
+    use crate::vision::{evaluate_x11_window_visibility_with, is_dota2_xprop_output};
+
+    // 1. is_dota2_xprop_output rejects ICCCM Iconic / Withdrawn states while keeping Normal & omitted WM_STATE.
+    assert!(!is_dota2_xprop_output(
+        "WM_CLASS(STRING) = \"dota2\", \"dota2\"\nWM_STATE(WM_STATE):\n\t\twindow state: Iconic\n\t\ticon window: 0x0\n"
+    ));
+    assert!(!is_dota2_xprop_output(
+        "WM_CLASS(STRING) = \"dota2\", \"dota2\"\nWM_STATE(WM_STATE):\n\t\twindow state: Withdrawn\n\t\ticon window: 0x0\n"
+    ));
+    assert!(is_dota2_xprop_output(
+        "WM_CLASS(STRING) = \"dota2\", \"dota2\"\nWM_STATE(WM_STATE):\n\t\twindow state: Normal\n\t\ticon window: 0x0\n_NET_WM_STATE(ATOM) = _NET_WM_STATE_FULLSCREEN\n"
+    ));
+
+    let root_single = "_NET_CURRENT_DESKTOP(CARDINAL) = 0\n_NET_DESKTOP_GEOMETRY(CARDINAL) = 2560, 1440\n_NET_CLIENT_LIST_STACKING(WINDOW): window id # 0x5a00004, 0x0660013d, 0x7200010\n";
+    let dota_visible = "WM_CLASS(STRING) = \"dota2\", \"dota2\"\nWM_STATE(WM_STATE):\n\t\twindow state: Normal\n_NET_WM_STATE(ATOM) = _NET_WM_STATE_FULLSCREEN\n_NET_WM_DESKTOP(CARDINAL) = 0\n";
+
+    // 2. Hidden / Iconic cached window transitions cleanly to invisible (false).
+    let dota_hidden = "WM_CLASS(STRING) = \"dota2\", \"dota2\"\n_NET_WM_STATE(ATOM) = _NET_WM_STATE_HIDDEN\n_NET_WM_DESKTOP(CARDINAL) = 0\n";
+    assert!(!evaluate_x11_window_visibility_with(
+        "0x660013d",
+        root_single,
+        dota_hidden,
+        Some(2560),
+        |_| None,
+    ));
+
+    let dota_iconic = "WM_CLASS(STRING) = \"dota2\", \"dota2\"\nWM_STATE(WM_STATE):\n\t\twindow state: Iconic\n_NET_WM_DESKTOP(CARDINAL) = 0\n";
+    assert!(!evaluate_x11_window_visibility_with(
+        "0x660013d",
+        root_single,
+        dota_iconic,
+        Some(2560),
+        |_| None,
+    ));
+
+    // 3. Desktop mismatch hides cached window; sticky (0xFFFFFFFF / 4294967295) stays visible.
+    let root_clean_stack = "_NET_CURRENT_DESKTOP(CARDINAL) = 0\n_NET_DESKTOP_GEOMETRY(CARDINAL) = 2560, 1440\n_NET_CLIENT_LIST_STACKING(WINDOW): window id # 0x5a00004, 0x660013d\n";
+    let dota_other_desktop =
+        "WM_CLASS(STRING) = \"dota2\", \"dota2\"\n_NET_WM_DESKTOP(CARDINAL) = 1\n";
+    assert!(!evaluate_x11_window_visibility_with(
+        "0x660013d",
+        root_clean_stack,
+        dota_other_desktop,
+        Some(2560),
+        |_| None,
+    ));
+    let dota_sticky =
+        "WM_CLASS(STRING) = \"dota2\", \"dota2\"\n_NET_WM_DESKTOP(CARDINAL) = 4294967295\n";
+    assert!(evaluate_x11_window_visibility_with(
+        "0x660013d",
+        root_clean_stack,
+        dota_sticky,
+        Some(2560),
+        |_| None,
+    ));
+
+    // 4. Single-monitor occlusion: visible non-truesight window stacked above Dota blocks capture.
+    let firefox_visible = "WM_CLASS(STRING) = \"Navigator\", \"firefox\"\nWM_STATE(WM_STATE):\n\t\twindow state: Normal\n_NET_WM_DESKTOP(CARDINAL) = 0\n";
+    assert!(!evaluate_x11_window_visibility_with(
+        "0x660013d",
+        root_single,
+        dota_visible,
+        Some(2560),
+        |wid| (wid == "0x7200010").then(|| firefox_visible.to_string()),
+    ));
+
+    // 5. Single-monitor exceptions: truesight-dota overlay, hidden windows, or other-desktop windows do not occlude.
+    let truesight_win = "WM_CLASS(STRING) = \"truesight-dota\", \"truesight-dota\"\nWM_STATE(WM_STATE):\n\t\twindow state: Normal\n_NET_WM_DESKTOP(CARDINAL) = 0\n";
+    assert!(evaluate_x11_window_visibility_with(
+        "0x660013d",
+        root_single,
+        dota_visible,
+        Some(2560),
+        |wid| (wid == "0x7200010").then(|| truesight_win.to_string()),
+    ));
+    let firefox_hidden = "WM_CLASS(STRING) = \"Navigator\", \"firefox\"\n_NET_WM_STATE(ATOM) = _NET_WM_STATE_HIDDEN\n_NET_WM_DESKTOP(CARDINAL) = 0\n";
+    assert!(evaluate_x11_window_visibility_with(
+        "0x660013d",
+        root_single,
+        dota_visible,
+        Some(2560),
+        |wid| (wid == "0x7200010").then(|| firefox_hidden.to_string()),
+    ));
+    let firefox_other_desk = "WM_CLASS(STRING) = \"Navigator\", \"firefox\"\nWM_STATE(WM_STATE):\n\t\twindow state: Normal\n_NET_WM_DESKTOP(CARDINAL) = 2\n";
+    assert!(evaluate_x11_window_visibility_with(
+        "0x660013d",
+        root_single,
+        dota_visible,
+        Some(2560),
+        |wid| (wid == "0x7200010").then(|| firefox_other_desk.to_string()),
+    ));
+
+    // 6. Multi-monitor (desktop_w > frame_w) preserves borderless workflows even with another visible window above.
+    let root_multi = "_NET_CURRENT_DESKTOP(CARDINAL) = 0\n_NET_DESKTOP_GEOMETRY(CARDINAL) = 4000, 2560\n_NET_CLIENT_LIST_STACKING(WINDOW): window id # 0x5a00004, 0x0660013d, 0x7200010\n";
+    assert!(evaluate_x11_window_visibility_with(
+        "0x660013d",
+        root_multi,
+        dota_visible,
+        Some(2560),
+        |wid| (wid == "0x7200010").then(|| firefox_visible.to_string()),
+    ));
+}
