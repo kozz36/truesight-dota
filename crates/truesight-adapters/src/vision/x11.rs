@@ -1,19 +1,217 @@
 #[cfg(target_os = "linux")]
+use super::x11_geom::{X11GeometryClient, XwininfoLookup, query_xwininfo_geometry};
+#[cfg(any(target_os = "linux", test))]
+use super::x11_geom::{X11WindowGeometry, parse_xprop_frame_extents, top_bar_intersects_window};
+#[cfg(target_os = "linux")]
 use super::{RgbFrame, ScreenFrameSource, parse_ppm_p6};
 #[cfg(target_os = "linux")]
 use std::process::Command;
 #[cfg(target_os = "linux")]
 use truesight_core::ports::PortError;
 
-/// Validates `xprop` output so only visible Dota 2 (`WM_CLASS = "dota2"`) windows qualify.
-pub fn is_dota2_xprop_output(props_str: &str) -> bool {
-    if props_str.contains("_NET_WM_STATE_HIDDEN") {
-        return false;
-    }
+fn has_dota2_wm_class(props_str: &str) -> bool {
     props_str.lines().any(|line| {
         let trimmed = line.trim_start();
         trimmed.starts_with("WM_CLASS") && trimmed.contains("\"dota2\"")
     })
+}
+
+fn is_window_hidden_or_iconic(props_str: &str) -> bool {
+    if props_str.contains("_NET_WM_STATE_HIDDEN") {
+        return true;
+    }
+    props_str.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed.starts_with("window state:")
+            && (trimmed.contains("Iconic") || trimmed.contains("Withdrawn"))
+    })
+}
+
+/// Validates `xprop` output so only visible Dota 2 (`WM_CLASS = "dota2"`) windows qualify.
+pub fn is_dota2_xprop_output(props_str: &str) -> bool {
+    if is_window_hidden_or_iconic(props_str) {
+        return false;
+    }
+    has_dota2_wm_class(props_str)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn is_truesight_window(props_str: &str) -> bool {
+    props_str.lines().any(|line| {
+        let trimmed = line.trim_start();
+        trimmed.starts_with("WM_CLASS")
+            && trimmed.to_ascii_lowercase().contains("\"truesight-dota\"")
+    })
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_xprop_window_id_u64(tok: &str) -> Option<u64> {
+    let clean = tok.trim().trim_end_matches(',');
+    let hex = clean
+        .strip_prefix("0x")
+        .or_else(|| clean.strip_prefix("0X"))?;
+    u64::from_str_radix(hex, 16).ok().filter(|&v| v != 0)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_xprop_stacking_ids(root_props: &str) -> Vec<(u64, String)> {
+    let mut ids = Vec::new();
+    for line in root_props.lines() {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with("_NET_CLIENT_LIST_STACKING") {
+            continue;
+        }
+        let tail = trimmed
+            .split_once('#')
+            .or_else(|| trimmed.split_once('='))
+            .map(|(_, rhs)| rhs)
+            .unwrap_or("");
+        for tok in tail.split(|c: char| c.is_whitespace() || c == ',') {
+            if let Some(num) = parse_xprop_window_id_u64(tok) {
+                ids.push((num, tok.to_string()));
+            }
+        }
+    }
+    ids
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_xprop_cardinal(props_str: &str, atom: &str) -> Option<u32> {
+    for line in props_str.lines() {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with(atom) {
+            continue;
+        }
+        let (_, rhs) = trimmed.split_once('=')?;
+        let tok = rhs.split([',', ' ']).find(|s| !s.is_empty())?;
+        if let Some(hex) = tok.strip_prefix("0x").or_else(|| tok.strip_prefix("0X")) {
+            return u32::from_str_radix(hex, 16).ok();
+        }
+        return tok.parse::<u32>().ok();
+    }
+    None
+}
+
+/// Resolves window geometry via primary source first and falls back per query on `None`.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn resolve_window_geometry_with<Fp, Ff>(
+    wid: &str,
+    mut primary: Fp,
+    mut fallback: Ff,
+) -> Option<X11WindowGeometry>
+where
+    Fp: FnMut(&str) -> Option<X11WindowGeometry>,
+    Ff: FnMut(&str) -> Option<X11WindowGeometry>,
+{
+    primary(wid).or_else(|| fallback(wid))
+}
+
+/// Evaluates whether a Dota 2 X11 window remains visible, on the active virtual desktop, and
+/// unobstructed over its top bar (`100%x8%+0+0`) by higher-stacked windows.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn evaluate_x11_window_visibility_with<Fp, Fg>(
+    wid: &str,
+    root_props: &str,
+    dota_props: &str,
+    mut fetch_window_props: Fp,
+    mut fetch_window_geometry: Fg,
+) -> bool
+where
+    Fp: FnMut(&str) -> Option<String>,
+    Fg: FnMut(&str) -> Option<X11WindowGeometry>,
+{
+    if !is_dota2_xprop_output(dota_props) {
+        return false;
+    }
+
+    let cur_desktop = parse_xprop_cardinal(root_props, "_NET_CURRENT_DESKTOP");
+    let dota_desktop = parse_xprop_cardinal(dota_props, "_NET_WM_DESKTOP");
+    if let (Some(cur), Some(desk)) = (cur_desktop, dota_desktop)
+        && desk != u32::MAX
+        && desk != cur
+    {
+        return false;
+    }
+
+    let dota_geom = fetch_window_geometry(wid);
+    if let Some(geom) = dota_geom
+        && (!geom.viewable || geom.width == 0 || geom.height == 0)
+    {
+        return false;
+    }
+
+    let Some(dota_id) = parse_xprop_window_id_u64(wid) else {
+        return false;
+    };
+
+    let stack = parse_xprop_stacking_ids(root_props);
+    if let Some(pos) = stack.iter().position(|(id, _)| *id == dota_id) {
+        for (_, other_wid) in &stack[pos + 1..] {
+            let Some(other_props) = fetch_window_props(other_wid) else {
+                continue;
+            };
+            if is_window_hidden_or_iconic(&other_props) || is_truesight_window(&other_props) {
+                continue;
+            }
+            if let (Some(cur), Some(other_desk)) = (
+                cur_desktop,
+                parse_xprop_cardinal(&other_props, "_NET_WM_DESKTOP"),
+            ) && other_desk != u32::MAX
+                && other_desk != cur
+            {
+                continue;
+            }
+            // A visible non-truesight same-desktop window sits above Dota 2 in stacking order:
+            // fail closed if either window's geometry cannot be verified.
+            let Some(dota_geom) = dota_geom else {
+                return false;
+            };
+            let Some(other_geom) = fetch_window_geometry(other_wid) else {
+                return false;
+            };
+            if !other_geom.viewable || other_geom.width == 0 || other_geom.height == 0 {
+                continue;
+            }
+            let extents = parse_xprop_frame_extents(&other_props);
+            if top_bar_intersects_window(dota_geom, other_geom, extents) {
+                return false;
+            }
+        }
+    }
+
+    true
+}
+
+/// Selects the first candidate `"dota2"` window that is visible and unobstructed over its top bar.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn select_visible_dota_window_with<Fp, Fg>(
+    root_props: &str,
+    candidate_wids: &[String],
+    mut fetch_window_props: Fp,
+    mut fetch_window_geometry: Fg,
+) -> Option<String>
+where
+    Fp: FnMut(&str) -> Option<String>,
+    Fg: FnMut(&str) -> Option<X11WindowGeometry>,
+{
+    for wid in candidate_wids {
+        let Some(props_str) = fetch_window_props(wid) else {
+            continue;
+        };
+        if !has_dota2_wm_class(&props_str) {
+            continue;
+        }
+        if evaluate_x11_window_visibility_with(
+            wid,
+            root_props,
+            &props_str,
+            &mut fetch_window_props,
+            &mut fetch_window_geometry,
+        ) {
+            return Some(wid.clone());
+        }
+    }
+    None
 }
 
 /// Builds the ImageMagick `import` arguments for silent top-bar X11 capture.
@@ -43,9 +241,9 @@ impl X11TopBarFrameSource {
         Self::default()
     }
 
-    fn find_dota_window() -> Result<Option<String>, PortError> {
+    fn query_root_visibility_props() -> Result<String, PortError> {
         let root_out = Command::new("xprop")
-            .args(["-root", "_NET_CLIENT_LIST"])
+            .args(["-root", "_NET_CURRENT_DESKTOP", "_NET_CLIENT_LIST_STACKING"])
             .output()
             .map_err(|e| PortError(format!("Failed to execute xprop: {e}")))?;
         if !root_out.status.success() {
@@ -54,34 +252,123 @@ impl X11TopBarFrameSource {
                 root_out.status.code()
             )));
         }
-        let root_text = String::from_utf8_lossy(&root_out.stdout);
-        for tok in root_text.split_whitespace() {
-            let wid = tok.trim_end_matches(',');
-            if !wid.starts_with("0x") {
-                continue;
-            }
-            let props = Command::new("xprop")
-                .args(["-id", wid, "WM_CLASS", "_NET_WM_STATE"])
+        Ok(String::from_utf8_lossy(&root_out.stdout).into_owned())
+    }
+
+    fn query_window_props(wid: &str) -> Option<String> {
+        let props = Command::new("xprop")
+            .args([
+                "-id",
+                wid,
+                "WM_CLASS",
+                "WM_STATE",
+                "_NET_WM_STATE",
+                "_NET_WM_DESKTOP",
+                "_NET_FRAME_EXTENTS",
+            ])
+            .output()
+            .ok()?;
+        props
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&props.stdout).into_owned())
+    }
+
+    fn find_dota_window<Fg>(
+        root_props: &str,
+        mut fetch_window_geometry: Fg,
+    ) -> Result<Option<String>, PortError>
+    where
+        Fg: FnMut(&str) -> Option<X11WindowGeometry>,
+    {
+        let mut candidate_wids: Vec<String> = parse_xprop_stacking_ids(root_props)
+            .into_iter()
+            .rev()
+            .map(|(_, wid)| wid)
+            .collect();
+
+        if candidate_wids.is_empty() {
+            let root_out = Command::new("xprop")
+                .args(["-root", "_NET_CLIENT_LIST"])
                 .output()
-                .ok();
-            let Some(props) = props else {
-                continue;
-            };
-            let props_str = String::from_utf8_lossy(&props.stdout);
-            if !is_dota2_xprop_output(&props_str) {
-                continue;
+                .map_err(|e| PortError(format!("Failed to execute xprop: {e}")))?;
+            if !root_out.status.success() {
+                return Err(PortError(format!(
+                    "X11 display unreachable via xprop (status {:?})",
+                    root_out.status.code()
+                )));
             }
-            return Ok(Some(wid.to_string()));
+            let root_text = String::from_utf8_lossy(&root_out.stdout);
+            for tok in root_text.split_whitespace() {
+                let wid = tok.trim_end_matches(',');
+                if wid.starts_with("0x") {
+                    candidate_wids.push(wid.to_string());
+                }
+            }
         }
-        Ok(None)
+
+        Ok(select_visible_dota_window_with(
+            root_props,
+            &candidate_wids,
+            Self::query_window_props,
+            &mut fetch_window_geometry,
+        ))
     }
 }
 
 #[cfg(target_os = "linux")]
 impl ScreenFrameSource for X11TopBarFrameSource {
     fn capture_frame(&mut self) -> Result<Option<RgbFrame>, PortError> {
+        let mut root_props = Self::query_root_visibility_props()?;
+        let mut geom_client = None;
+        let mut xwininfo_available = true;
+        let mut query_geom = |wid_str: &str| -> Option<X11WindowGeometry> {
+            resolve_window_geometry_with(
+                wid_str,
+                |id| {
+                    let client_opt = geom_client.get_or_insert_with(X11GeometryClient::connect);
+                    let client = client_opt.as_mut()?;
+                    let wid_num =
+                        parse_xprop_window_id_u64(id).and_then(|v| u32::try_from(v).ok())?;
+                    client.query_window_geometry(wid_num)
+                },
+                |id| {
+                    if !xwininfo_available {
+                        return None;
+                    }
+                    match query_xwininfo_geometry(id) {
+                        XwininfoLookup::Geometry(geom) => Some(geom),
+                        XwininfoLookup::NotInstalled => {
+                            xwininfo_available = false;
+                            None
+                        }
+                        XwininfoLookup::Failed => None,
+                    }
+                },
+            )
+        };
+
+        if let Some(ref wid) = self.cached_window {
+            match Self::query_window_props(wid) {
+                Some(dota_props) if has_dota2_wm_class(&dota_props) => {
+                    if !evaluate_x11_window_visibility_with(
+                        wid,
+                        &root_props,
+                        &dota_props,
+                        Self::query_window_props,
+                        &mut query_geom,
+                    ) {
+                        return Ok(None);
+                    }
+                }
+                _ => {
+                    self.cached_window = None;
+                }
+            }
+        }
+
         if self.cached_window.is_none() {
-            self.cached_window = Self::find_dota_window()?;
+            self.cached_window = Self::find_dota_window(&root_props, &mut query_geom)?;
         }
         let Some(ref wid) = self.cached_window else {
             return Ok(None);
@@ -94,9 +381,9 @@ impl ScreenFrameSource for X11TopBarFrameSource {
 
         if !output.status.success() {
             self.cached_window = None;
-            // If Dota 2 window closed/minimized between lookup and import, wait cleanly;
-            // if a Dota 2 window is still open and import failed, surface the error.
-            if Self::find_dota_window()?.is_none() {
+            // Refresh root stacking state before checking if Dota 2 is still visible.
+            root_props = Self::query_root_visibility_props()?;
+            if Self::find_dota_window(&root_props, &mut query_geom)?.is_none() {
                 return Ok(None);
             }
             return Err(PortError(format!(
