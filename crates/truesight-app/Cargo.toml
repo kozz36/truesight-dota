@@ -23,7 +23,7 @@ gui = ["dep:eframe"]
 [dependencies]
 truesight-core = { path = "../truesight-core" }
 truesight-adapters = { path = "../truesight-adapters" }
-eframe = { version = "0.31", optional = true }
+eframe = { version = "0.32", optional = true }
 
 [lints]
 workspace = true
