@@ -3870,3 +3870,285 @@ fn player_rank_tier_parser_and_app_config_preserve_bracket_and_account() {
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+#[test]
+fn vision_rejects_main_menu_chrome_and_weak_uncorrelated_patches() {
+    use crate::vision::{
+        HeroVisionCatalog, RgbFrame, ScreenFrameSource, TopBarSlotRect, VisionCaptureAdapter,
+        VisionCaptureMode, compute_ingame_topbar_slot_rects, parse_hero_atlas,
+    };
+    use std::collections::VecDeque;
+    use truesight_core::domain::{Faction, Side};
+    use truesight_core::ports::DraftEvent;
+
+    struct QueueSource(VecDeque<RgbFrame>);
+    impl ScreenFrameSource for QueueSource {
+        fn capture_frame(&mut self) -> Result<Option<RgbFrame>, truesight_core::ports::PortError> {
+            Ok(self.0.pop_front())
+        }
+    }
+
+    // 1. Deterministic 2560x115 synthetic Dota 2 main-menu navigation bar replicating the measured
+    // slanted glowing tab geometry (InGame Rad[0..2] over the illuminated ARMORY tab and seam into WATCH).
+    let (mw, mh) = (2560_usize, 115_usize);
+    let mut menu_rgb = vec![16_u8; mw * mh * 3];
+    for y in 0..mh {
+        let vy = (y as f32 / 46.0).clamp(0.0, 1.0);
+        for x in 0..mw {
+            let idx = (y * mw + x) * 3;
+            let slant_x = 918.0 - (y as f32) * 0.25;
+            let xf = x as f32;
+            let px = if (760.0..=965.0).contains(&xf) && y < 60 {
+                let horiz = if xf < slant_x {
+                    let t = ((xf - 760.0) / (slant_x - 760.0)).clamp(0.0, 1.0);
+                    (1.0 - (t - 0.55).abs() * 0.65).clamp(0.35, 1.0)
+                } else {
+                    let drop = ((xf - slant_x) / 42.0).clamp(0.0, 1.0);
+                    (0.55 * (1.0 - drop)).clamp(0.05, 0.55)
+                };
+                let lit = vy * horiz;
+                let text_band: f32 =
+                    if (28..=38).contains(&y) && (805..=895).contains(&x) && (x % 9) < 5 {
+                        38.0
+                    } else {
+                        0.0
+                    };
+                [
+                    (30.0 + 128.0 * lit + text_band).min(255.0),
+                    (40.0 + 140.0 * lit + text_band).min(255.0),
+                    (55.0 + 150.0 * lit + text_band).min(255.0),
+                ]
+            } else {
+                [18.0, 22.0, 30.0]
+            };
+            menu_rgb[idx] = px[0] as u8;
+            menu_rgb[idx + 1] = px[1] as u8;
+            menu_rgb[idx + 2] = px[2] as u8;
+        }
+    }
+
+    let catalog = HeroVisionCatalog::from_embedded().expect("vision catalog must load");
+    for mode in [VisionCaptureMode::Any, VisionCaptureMode::DraftOnly] {
+        let mut adapter = VisionCaptureAdapter::new(
+            QueueSource(VecDeque::from([
+                RgbFrame::new(mw, mh, menu_rgb.clone()),
+                RgbFrame::new(mw, mh, menu_rgb.clone()),
+                RgbFrame::new(mw, mh, menu_rgb.clone()),
+            ])),
+            catalog.clone(),
+        );
+        adapter.set_ally_faction(Faction::Radiant);
+        adapter.set_capture_mode(mode);
+        for poll in 0..3 {
+            let events = adapter.poll_events().expect("poll must succeed");
+            assert!(
+                events.is_empty(),
+                "Synthetic main-menu chrome must emit 0 phantom picks under {mode:?} (poll {poll}), got {events:?}"
+            );
+        }
+    }
+
+    // 2. Weak/marginal initial match (diff > 18.0 but high NCC): must NOT emit on a single transient
+    // flash, must reset pending state across an empty frame, and must confirm on 2 consecutive frames.
+    let atlas = parse_hero_atlas().expect("base atlas must load");
+    let (w, h) = (1920_usize, 1080_usize);
+    let (rad_ig, dire_ig) = compute_ingame_topbar_slot_rects(w, h);
+    let mut shifted_frame = vec![16_u8; w * h * 3];
+    let paint_shifted_ingame = |buf: &mut [u8], rect: TopBarSlotRect, hid: u16| {
+        let hero_rgb = &atlas.heroes[&HeroId(hid)];
+        let (sx0, sw0, sy0, sh0) = (
+            4_usize,
+            atlas.hero_width - 8,
+            2_usize,
+            atlas.hero_height - 4,
+        );
+        for dy in 0..rect.height {
+            let sy = sy0 + (dy * sh0) / rect.height;
+            for dx in 0..rect.width {
+                let sx = sx0 + (dx * sw0) / rect.width;
+                let si = (sy * atlas.hero_width + sx) * 3;
+                let di = ((rect.y + dy) * w + (rect.x + dx)) * 3;
+                for c in 0..3 {
+                    // Positive affine brightness/contrast shift keeps Pearson NCC ~1.0 while pushing L1 > 18.0
+                    buf[di + c] =
+                        (f32::from(hero_rgb[si + c]) * 0.80 + 38.0).clamp(0.0, 255.0) as u8;
+                }
+            }
+        }
+    };
+    paint_shifted_ingame(&mut shifted_frame, rad_ig[0], 2); // Axe
+    paint_shifted_ingame(&mut shifted_frame, dire_ig[0], 48); // Luna
+
+    let blank_frame = vec![16_u8; w * h * 3];
+    let mut flash_adapter = VisionCaptureAdapter::new(
+        QueueSource(VecDeque::from([
+            RgbFrame::new(w, h, shifted_frame.clone()), // frame 0: single flash (pending=1)
+            RgbFrame::new(w, h, blank_frame),           // frame 1: blank (must clear pending)
+            RgbFrame::new(w, h, shifted_frame.clone()), // frame 2: first consecutive (pending=1)
+            RgbFrame::new(w, h, shifted_frame),         // frame 3: second consecutive -> confirmed
+        ])),
+        catalog,
+    );
+    flash_adapter.set_ally_faction(Faction::Radiant);
+    flash_adapter.set_capture_mode(VisionCaptureMode::Any);
+
+    let ev0 = flash_adapter.poll_events().unwrap();
+    assert!(
+        ev0.is_empty(),
+        "Single-frame weak initial match (diff > 18.0) must not emit on flash frame 0: {ev0:?}"
+    );
+    let ev1 = flash_adapter.poll_events().unwrap();
+    assert!(ev1.is_empty(), "Blank frame must emit 0 picks: {ev1:?}");
+    let ev2 = flash_adapter.poll_events().unwrap();
+    assert!(
+        ev2.is_empty(),
+        "Non-consecutive flash after blank frame must restart 2-frame confirmation: {ev2:?}"
+    );
+    let ev3 = flash_adapter.poll_events().unwrap();
+    assert_eq!(
+        ev3.len(),
+        2,
+        "Two consecutive frames of marginal match must confirm both picks: {ev3:?}"
+    );
+    assert!(ev3.contains(&DraftEvent::PickDetected {
+        side: Side::Allies,
+        slot: 0,
+        hero_id: HeroId(2),
+        role: Some(Role::Carry),
+    }));
+    assert!(ev3.contains(&DraftEvent::PickDetected {
+        side: Side::Enemies,
+        slot: 0,
+        hero_id: HeroId(48),
+        role: Some(Role::Carry),
+    }));
+}
+
+#[test]
+fn vision_capture_error_clears_pending_confirmations_while_preserving_confirmed_picks() {
+    use crate::vision::{
+        HeroVisionCatalog, RgbFrame, ScreenFrameSource, TopBarSlotRect, VisionCaptureAdapter,
+        VisionCaptureMode, compute_ingame_topbar_slot_rects, parse_hero_atlas,
+    };
+    use std::collections::VecDeque;
+    use truesight_core::domain::{Faction, HeroId, Role, Side};
+    use truesight_core::ports::{DraftEvent, DraftEventSource, PortError};
+
+    struct ScriptedSource(VecDeque<Result<Option<RgbFrame>, PortError>>);
+    impl ScreenFrameSource for ScriptedSource {
+        fn capture_frame(&mut self) -> Result<Option<RgbFrame>, PortError> {
+            self.0
+                .pop_front()
+                .expect("scripted frame queue must cover all test polls")
+        }
+    }
+
+    let atlas = parse_hero_atlas().expect("base atlas must load");
+    let catalog = HeroVisionCatalog::from_embedded().expect("vision catalog must load");
+    let (w, h) = (1920_usize, 1080_usize);
+    let (rad_ig, dire_ig) = compute_ingame_topbar_slot_rects(w, h);
+
+    let paint_ingame = |buf: &mut [u8], rect: TopBarSlotRect, hid: u16, marginal: bool| {
+        let hero_rgb = &atlas.heroes[&HeroId(hid)];
+        let (sx0, sw0, sy0, sh0) = if marginal {
+            (
+                4_usize,
+                atlas.hero_width - 8,
+                2_usize,
+                atlas.hero_height - 4,
+            )
+        } else {
+            (0_usize, atlas.hero_width, 0_usize, atlas.hero_height)
+        };
+        for dy in 0..rect.height {
+            let sy = sy0 + (dy * sh0) / rect.height;
+            for dx in 0..rect.width {
+                let sx = sx0 + (dx * sw0) / rect.width;
+                let si = (sy * atlas.hero_width + sx) * 3;
+                let di = ((rect.y + dy) * w + (rect.x + dx)) * 3;
+                for c in 0..3 {
+                    buf[di + c] = if marginal {
+                        (f32::from(hero_rgb[si + c]) * 0.80 + 38.0).clamp(0.0, 255.0) as u8
+                    } else {
+                        hero_rgb[si + c]
+                    };
+                }
+            }
+        }
+    };
+
+    let mut strong_buf = vec![16_u8; w * h * 3];
+    paint_ingame(&mut strong_buf, rad_ig[0], 1, false); // Anti-Mage (strong exact match)
+    paint_ingame(&mut strong_buf, dire_ig[0], 7, false); // Earthshaker (strong exact match)
+    let strong_frame = RgbFrame::new(w, h, strong_buf.clone());
+
+    let mut weak_plus_strong_buf = strong_buf;
+    paint_ingame(&mut weak_plus_strong_buf, rad_ig[1], 2, true); // Axe (marginal diff > 18.0)
+    let weak_plus_strong_frame = RgbFrame::new(w, h, weak_plus_strong_buf);
+
+    let mut adapter = VisionCaptureAdapter::new(
+        ScriptedSource(VecDeque::from([
+            Ok(Some(strong_frame)),
+            Ok(Some(weak_plus_strong_frame.clone())),
+            Err(PortError("transient capture failure".into())),
+            Ok(Some(weak_plus_strong_frame.clone())),
+            Ok(Some(weak_plus_strong_frame)),
+        ])),
+        catalog,
+    );
+    adapter.set_ally_faction(Faction::Radiant);
+    adapter.set_capture_mode(VisionCaptureMode::Any);
+
+    // Poll 0: strong confirmed picks emit immediately.
+    let ev0 = adapter.poll_events().expect("poll 0 must succeed");
+    assert_eq!(
+        ev0.len(),
+        2,
+        "Confirmed strong picks must emit on poll 0: {ev0:?}"
+    );
+    assert!(ev0.contains(&DraftEvent::PickDetected {
+        side: Side::Allies,
+        slot: 0,
+        hero_id: HeroId(1),
+        role: Some(Role::Carry),
+    }));
+    assert!(ev0.contains(&DraftEvent::PickDetected {
+        side: Side::Enemies,
+        slot: 0,
+        hero_id: HeroId(7),
+        role: Some(Role::Carry),
+    }));
+
+    // Poll 1: weak match on slot 1 waits in pending (count = 1).
+    let ev1 = adapter.poll_events().expect("poll 1 must succeed");
+    assert!(
+        ev1.is_empty(),
+        "First marginal frame must not emit slot 1 immediately: {ev1:?}"
+    );
+
+    // Poll 2: transient capture error must surface Err and break the confirmation streak.
+    assert!(
+        adapter.poll_events().is_err(),
+        "Scripted capture failure must return Err"
+    );
+
+    // Poll 3: weak match after Err must restart streak (count = 1), preserving slot 0 without re-emit.
+    let ev3 = adapter.poll_events().expect("poll 3 must succeed");
+    assert!(
+        ev3.is_empty(),
+        "Post-error weak match must not confirm without 2 consecutive frames, nor re-emit confirmed picks: {ev3:?}"
+    );
+
+    // Poll 4: second consecutive weak match confirms only Allies slot 1 (Axe).
+    let ev4 = adapter.poll_events().expect("poll 4 must succeed");
+    assert_eq!(
+        ev4,
+        vec![DraftEvent::PickDetected {
+            side: Side::Allies,
+            slot: 1,
+            hero_id: HeroId(2),
+            role: Some(Role::Mid),
+        }],
+        "Only the newly confirmed slot 1 pick should emit after two consecutive post-error frames"
+    );
+}

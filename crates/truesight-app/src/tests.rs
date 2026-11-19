@@ -2605,3 +2605,260 @@ fn bracket_auto_selects_from_rank_tier_and_persists_manual_selection() {
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+#[test]
+fn session_rejects_pre_match_menu_frames_and_transitions_cleanly_to_live_match() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use truesight_adapters::vision::{
+        BoundedVisionWorker, RgbFrame, ScreenFrameSource, TopBarSlotRect,
+        compute_ingame_topbar_slot_rects, compute_pickphase_topbar_slot_rects, parse_hero_atlas,
+    };
+    use truesight_core::domain::HeroId;
+    use truesight_core::ports::DraftEvent;
+
+    struct SharedFrameSource {
+        frame: Arc<Mutex<RgbFrame>>,
+        captures: Arc<AtomicUsize>,
+    }
+    impl ScreenFrameSource for SharedFrameSource {
+        fn capture_frame(&mut self) -> Result<Option<RgbFrame>, truesight_core::ports::PortError> {
+            self.captures.fetch_add(1, Ordering::Release);
+            Ok(Some(self.frame.lock().unwrap().clone()))
+        }
+    }
+
+    fn paint_slot(
+        frame: &mut [u8],
+        frame_w: usize,
+        rect: TopBarSlotRect,
+        hero_rgb: &[u8],
+        src_w: usize,
+        src_h: usize,
+        full_crop: bool,
+    ) {
+        let (sx0, sw0, sy0, sh0) = if full_crop {
+            (0_usize, src_w, 0_usize, src_h)
+        } else {
+            (4_usize, src_w - 8, 2_usize, src_h - 4)
+        };
+        for dy in 0..rect.height {
+            let sy = sy0 + (dy * sh0) / rect.height;
+            for dx in 0..rect.width {
+                let sx = sx0 + (dx * sw0) / rect.width;
+                let si = (sy * src_w + sx) * 3;
+                let di = ((rect.y + dy) * frame_w + (rect.x + dx)) * 3;
+                frame[di..di + 3].copy_from_slice(&hero_rgb[si..si + 3]);
+            }
+        }
+    }
+
+    // Synthetic 2560x115 main-menu navigation chrome matching the measured menu tab geometry.
+    let (mw, mh) = (2560_usize, 115_usize);
+    let mut menu_rgb = vec![16_u8; mw * mh * 3];
+    for y in 0..mh {
+        let vy = (y as f32 / 46.0).clamp(0.0, 1.0);
+        for x in 0..mw {
+            let idx = (y * mw + x) * 3;
+            let slant_x = 918.0 - (y as f32) * 0.25;
+            let xf = x as f32;
+            let px = if (760.0..=965.0).contains(&xf) && y < 60 {
+                let horiz = if xf < slant_x {
+                    let t = ((xf - 760.0) / (slant_x - 760.0)).clamp(0.0, 1.0);
+                    (1.0 - (t - 0.55).abs() * 0.65).clamp(0.35, 1.0)
+                } else {
+                    let drop = ((xf - slant_x) / 42.0).clamp(0.0, 1.0);
+                    (0.55 * (1.0 - drop)).clamp(0.05, 0.55)
+                };
+                let lit = vy * horiz;
+                let text_band: f32 =
+                    if (28..=38).contains(&y) && (805..=895).contains(&x) && (x % 9) < 5 {
+                        38.0
+                    } else {
+                        0.0
+                    };
+                [
+                    (30.0 + 128.0 * lit + text_band).min(255.0),
+                    (40.0 + 140.0 * lit + text_band).min(255.0),
+                    (55.0 + 150.0 * lit + text_band).min(255.0),
+                ]
+            } else {
+                [18.0, 22.0, 30.0]
+            };
+            menu_rgb[idx] = px[0] as u8;
+            menu_rgb[idx + 1] = px[1] as u8;
+            menu_rgb[idx + 2] = px[2] as u8;
+        }
+    }
+
+    let atlas = parse_hero_atlas().unwrap();
+    let shared_frame = Arc::new(Mutex::new(RgbFrame::new(mw, mh, menu_rgb)));
+    let captures = Arc::new(AtomicUsize::new(0));
+    let mut worker = BoundedVisionWorker::spawn_with_source(SharedFrameSource {
+        frame: Arc::clone(&shared_frame),
+        captures: Arc::clone(&captures),
+    })
+    .unwrap();
+    let mut session = AppSession::new().unwrap();
+
+    // 1. Pre-match main menu with absent GSI (last_rules_state == None) must emit 0 phantom picks
+    // across >= 2 captures (covering the 2-frame initial confirmation window).
+    for _ in 0..120 {
+        session.poll_live_sources(None, Some(&mut worker));
+        if captures.load(Ordering::Acquire) >= 2 {
+            // Drain any queued events from the second capture before asserting.
+            std::thread::sleep(Duration::from_millis(50));
+            session.poll_live_sources(None, Some(&mut worker));
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        captures.load(Ordering::Acquire) >= 2,
+        "Expected >= 2 pre-match menu captures during Step 1"
+    );
+    assert_eq!(
+        session.draft.allies.iter().flatten().count(),
+        0,
+        "Pre-match menu without GSI must leave allies empty, got: {:?}",
+        session.draft.allies
+    );
+    assert_eq!(
+        session.draft.enemies.iter().flatten().count(),
+        0,
+        "Pre-match menu without GSI must leave enemies empty, got: {:?}",
+        session.draft.enemies
+    );
+
+    // 2. Match starts: WAIT_FOR_PLAYERS_TO_LOAD -> HERO_SELECTION with real PickPhase portraits.
+    session.apply_event(DraftEvent::GameRulesStateChanged {
+        state_name: "DOTA_GAMERULES_STATE_WAIT_FOR_PLAYERS_TO_LOAD".into(),
+        game_time_secs: -90,
+    });
+    let (vw, vh) = (2560_usize, 1440_usize);
+    let (rad_pick, dire_pick) = compute_pickphase_topbar_slot_rects(vw, vh);
+    let mut pick_rgb = vec![15_u8; vw * 160 * 3];
+    paint_slot(
+        &mut pick_rgb,
+        vw,
+        rad_pick[0],
+        &atlas.heroes[&HeroId(88)],
+        atlas.hero_width,
+        atlas.hero_height,
+        false,
+    );
+    paint_slot(
+        &mut pick_rgb,
+        vw,
+        dire_pick[0],
+        &atlas.heroes[&HeroId(2)],
+        atlas.hero_width,
+        atlas.hero_height,
+        false,
+    );
+    *shared_frame.lock().unwrap() = RgbFrame::with_source_height(vw, 160, vh, pick_rgb);
+    session.apply_event(DraftEvent::GameRulesStateChanged {
+        state_name: "DOTA_GAMERULES_STATE_HERO_SELECTION".into(),
+        game_time_secs: 45,
+    });
+    for _ in 0..40 {
+        session.poll_live_sources(None, Some(&mut worker));
+        let allies: Vec<u16> = session
+            .draft
+            .allies
+            .iter()
+            .flatten()
+            .map(|p| p.hero_id.0)
+            .collect();
+        let enemies: Vec<u16> = session
+            .draft
+            .enemies
+            .iter()
+            .flatten()
+            .map(|p| p.hero_id.0)
+            .collect();
+        if allies == [88] && enemies == [2] {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let allies_pick: Vec<u16> = session
+        .draft
+        .allies
+        .iter()
+        .flatten()
+        .map(|p| p.hero_id.0)
+        .collect();
+    let enemies_pick: Vec<u16> = session
+        .draft
+        .enemies
+        .iter()
+        .flatten()
+        .map(|p| p.hero_id.0)
+        .collect();
+    assert_eq!(allies_pick, vec![88]);
+    assert_eq!(enemies_pick, vec![2]);
+
+    // 3. Transition to GAME_IN_PROGRESS with InGame portraits (adding Anti-Mage=1 on allies).
+    let (rad_ig, dire_ig) = compute_ingame_topbar_slot_rects(vw, vh);
+    let mut ig_rgb = vec![15_u8; vw * 160 * 3];
+    paint_slot(
+        &mut ig_rgb,
+        vw,
+        rad_ig[0],
+        &atlas.heroes[&HeroId(88)],
+        atlas.hero_width,
+        atlas.hero_height,
+        true,
+    );
+    paint_slot(
+        &mut ig_rgb,
+        vw,
+        rad_ig[1],
+        &atlas.heroes[&HeroId(1)],
+        atlas.hero_width,
+        atlas.hero_height,
+        true,
+    );
+    paint_slot(
+        &mut ig_rgb,
+        vw,
+        dire_ig[0],
+        &atlas.heroes[&HeroId(2)],
+        atlas.hero_width,
+        atlas.hero_height,
+        true,
+    );
+    *shared_frame.lock().unwrap() = RgbFrame::with_source_height(vw, 160, vh, ig_rgb);
+    session.apply_event(DraftEvent::GameRulesStateChanged {
+        state_name: "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS".into(),
+        game_time_secs: 60,
+    });
+    for _ in 0..160 {
+        session.poll_live_sources(None, Some(&mut worker));
+        let allies_cnt = session.draft.allies.iter().flatten().count();
+        let enemies_cnt = session.draft.enemies.iter().flatten().count();
+        if allies_cnt == 2 && enemies_cnt == 1 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let mut allies_ig: Vec<u16> = session
+        .draft
+        .allies
+        .iter()
+        .flatten()
+        .map(|p| p.hero_id.0)
+        .collect();
+    allies_ig.sort_unstable();
+    let enemies_ig: Vec<u16> = session
+        .draft
+        .enemies
+        .iter()
+        .flatten()
+        .map(|p| p.hero_id.0)
+        .collect();
+    assert_eq!(allies_ig, vec![1, 88]);
+    assert_eq!(enemies_ig, vec![2]);
+}

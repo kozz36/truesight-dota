@@ -16,6 +16,8 @@ const MIN_DETECTED_SLOTS_QUORUM: usize = 2;
 const MIN_OVERWRITE_SATURATION: f32 = 12.0;
 const MAX_OVERWRITE_L1_DIFF: f32 = 26.0;
 const OVERWRITE_CONFIRM_FRAMES: u8 = 2;
+const INITIAL_INSTANT_L1_DIFF: f32 = 18.0;
+const INITIAL_CONFIRM_FRAMES: u8 = 2;
 
 type SlotCandidate = Option<(HeroId, f32, f32)>;
 type FrameCandidates = ([SlotCandidate; 5], [SlotCandidate; 5]);
@@ -40,14 +42,31 @@ fn resolve_slot_transition(
     events: &mut Vec<DraftEvent>,
 ) {
     match *last_slot {
-        None => {
-            *pending_slot = None;
-            if let Some((hero_id, _, _)) = candidate {
+        None => match candidate {
+            Some((hero_id, diff, _)) if diff <= INITIAL_INSTANT_L1_DIFF => {
                 *last_slot = Some(hero_id);
+                *pending_slot = None;
                 *needs_replay = false;
                 push_pick_event(events, side, slot, hero_id);
             }
-        }
+            Some((hero_id, _, _)) => {
+                let next_count = match *pending_slot {
+                    Some((pending_id, count)) if pending_id == hero_id => count.saturating_add(1),
+                    _ => 1,
+                };
+                if next_count >= INITIAL_CONFIRM_FRAMES {
+                    *last_slot = Some(hero_id);
+                    *pending_slot = None;
+                    *needs_replay = false;
+                    push_pick_event(events, side, slot, hero_id);
+                } else {
+                    *pending_slot = Some((hero_id, next_count));
+                }
+            }
+            None => {
+                *pending_slot = None;
+            }
+        },
         Some(prev_id) => match candidate {
             Some((cand_id, diff, sat)) if cand_id != prev_id => {
                 // Ignore desaturated dead/respawn overlays or weak matches on already-locked slots.
@@ -293,14 +312,28 @@ impl<S: ScreenFrameSource> VisionCaptureAdapter<S> {
         Ok((events, health))
     }
 
+    fn clear_pending_slots(&mut self) {
+        self.pending_radiant = [None; 5];
+        self.pending_dire = [None; 5];
+    }
+
     fn capture_candidates(
         &mut self,
     ) -> Result<(Option<FrameCandidates>, CaptureRuntimeHealth), PortError> {
         if self.capture_mode == VisionCaptureMode::Suppressed {
+            self.clear_pending_slots();
             return Ok((None, CaptureRuntimeHealth::Suppressed));
         }
-        let Some(frame) = self.source.capture_frame()? else {
-            return Ok((None, CaptureRuntimeHealth::WaitingForGame));
+        let frame = match self.source.capture_frame() {
+            Ok(Some(frame)) => frame,
+            Ok(None) => {
+                self.clear_pending_slots();
+                return Ok((None, CaptureRuntimeHealth::WaitingForGame));
+            }
+            Err(err) => {
+                self.clear_pending_slots();
+                return Err(err);
+            }
         };
 
         let virtual_h = frame.source_height.unwrap_or_else(|| {
@@ -325,6 +358,9 @@ impl<S: ScreenFrameSource> VisionCaptureAdapter<S> {
 
         let candidates = select_best_layout_candidates(&layout_batches)
             .map(|(_, radiant, dire)| (radiant, dire));
+        if candidates.is_none() {
+            self.clear_pending_slots();
+        }
         Ok((candidates, CaptureRuntimeHealth::Capturing))
     }
 
