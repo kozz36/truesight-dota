@@ -4154,8 +4154,19 @@ fn vision_capture_error_clears_pending_confirmations_while_preserving_confirmed_
 }
 
 #[test]
-fn vision_x11_revalidates_cached_window_visibility_desktop_and_single_monitor_occlusion() {
-    use crate::vision::{evaluate_x11_window_visibility_with, is_dota2_xprop_output};
+fn vision_x11_checks_topbar_geometry_occlusion_on_first_and_cached_captures() {
+    use crate::vision::{
+        X11WindowGeometry, evaluate_x11_window_visibility_with, is_dota2_xprop_output,
+        select_visible_dota_window_with, top_bar_intersects_window,
+    };
+
+    let win = |x, y, width, height| X11WindowGeometry {
+        x,
+        y,
+        width,
+        height,
+        viewable: true,
+    };
 
     // 1. is_dota2_xprop_output rejects ICCCM Iconic / Withdrawn states while keeping Normal & omitted WM_STATE.
     assert!(!is_dota2_xprop_output(
@@ -4168,38 +4179,52 @@ fn vision_x11_revalidates_cached_window_visibility_desktop_and_single_monitor_oc
         "WM_CLASS(STRING) = \"dota2\", \"dota2\"\nWM_STATE(WM_STATE):\n\t\twindow state: Normal\n\t\ticon window: 0x0\n_NET_WM_STATE(ATOM) = _NET_WM_STATE_FULLSCREEN\n"
     ));
 
-    let root_single = "_NET_CURRENT_DESKTOP(CARDINAL) = 0\n_NET_DESKTOP_GEOMETRY(CARDINAL) = 2560, 1440\n_NET_CLIENT_LIST_STACKING(WINDOW): window id # 0x5a00004, 0x0660013d, 0x7200010\n";
+    let root_windowed = "_NET_CURRENT_DESKTOP(CARDINAL) = 0\n_NET_CLIENT_LIST_STACKING(WINDOW): window id # 0x5a00004, 0x0660013d, 0x7200010\n";
     let dota_visible = "WM_CLASS(STRING) = \"dota2\", \"dota2\"\nWM_STATE(WM_STATE):\n\t\twindow state: Normal\n_NET_WM_STATE(ATOM) = _NET_WM_STATE_FULLSCREEN\n_NET_WM_DESKTOP(CARDINAL) = 0\n";
+    let dota_windowed_geom = win(100, 100, 1280, 720);
 
-    // 2. Hidden / Iconic cached window transitions cleanly to invisible (false).
+    // 2. Hidden / Iconic / Unmapped Dota 2 window returns invisible (false).
     let dota_hidden = "WM_CLASS(STRING) = \"dota2\", \"dota2\"\n_NET_WM_STATE(ATOM) = _NET_WM_STATE_HIDDEN\n_NET_WM_DESKTOP(CARDINAL) = 0\n";
     assert!(!evaluate_x11_window_visibility_with(
         "0x660013d",
-        root_single,
+        root_windowed,
         dota_hidden,
-        Some(2560),
         |_| None,
+        |_| Some(dota_windowed_geom),
     ));
 
     let dota_iconic = "WM_CLASS(STRING) = \"dota2\", \"dota2\"\nWM_STATE(WM_STATE):\n\t\twindow state: Iconic\n_NET_WM_DESKTOP(CARDINAL) = 0\n";
     assert!(!evaluate_x11_window_visibility_with(
         "0x660013d",
-        root_single,
+        root_windowed,
         dota_iconic,
-        Some(2560),
         |_| None,
+        |_| Some(dota_windowed_geom),
+    ));
+
+    assert!(!evaluate_x11_window_visibility_with(
+        "0x660013d",
+        root_windowed,
+        dota_visible,
+        |_| None,
+        |wid| {
+            (wid == "0x660013d").then_some(X11WindowGeometry {
+                viewable: false,
+                ..dota_windowed_geom
+            })
+        },
     ));
 
     // 3. Desktop mismatch hides cached window; sticky (0xFFFFFFFF / 4294967295) stays visible.
-    let root_clean_stack = "_NET_CURRENT_DESKTOP(CARDINAL) = 0\n_NET_DESKTOP_GEOMETRY(CARDINAL) = 2560, 1440\n_NET_CLIENT_LIST_STACKING(WINDOW): window id # 0x5a00004, 0x660013d\n";
+    let root_clean_stack = "_NET_CURRENT_DESKTOP(CARDINAL) = 0\n_NET_CLIENT_LIST_STACKING(WINDOW): window id # 0x5a00004, 0x660013d\n";
     let dota_other_desktop =
         "WM_CLASS(STRING) = \"dota2\", \"dota2\"\n_NET_WM_DESKTOP(CARDINAL) = 1\n";
     assert!(!evaluate_x11_window_visibility_with(
         "0x660013d",
         root_clean_stack,
         dota_other_desktop,
-        Some(2560),
         |_| None,
+        |_| Some(dota_windowed_geom),
     ));
     let dota_sticky =
         "WM_CLASS(STRING) = \"dota2\", \"dota2\"\n_NET_WM_DESKTOP(CARDINAL) = 4294967295\n";
@@ -4207,53 +4232,328 @@ fn vision_x11_revalidates_cached_window_visibility_desktop_and_single_monitor_oc
         "0x660013d",
         root_clean_stack,
         dota_sticky,
-        Some(2560),
         |_| None,
+        |_| Some(dota_windowed_geom),
     ));
 
-    // 4. Single-monitor occlusion: visible non-truesight window stacked above Dota blocks capture.
+    // 4. First capture in windowed mode (1280x720 at 100,100 on 1920px display):
+    // top bar spans [100, 1380) x [100, 158). Must NOT skip stacking checks when desk_w > fw.
+    let root_windowed_with_geom = "_NET_CURRENT_DESKTOP(CARDINAL) = 0\n_NET_DESKTOP_GEOMETRY(CARDINAL) = 1920, 1080\n_NET_CLIENT_LIST_STACKING(WINDOW): window id # 0x5a00004, 0x0660013d, 0x7200010\n";
     let firefox_visible = "WM_CLASS(STRING) = \"Navigator\", \"firefox\"\nWM_STATE(WM_STATE):\n\t\twindow state: Normal\n_NET_WM_DESKTOP(CARDINAL) = 0\n";
+    let candidates = vec!["0x7200010".to_string(), "0x0660013d".to_string()];
+
+    // Higher-stacked firefox overlapping top bar blocks first discovery capture!
+    assert_eq!(
+        select_visible_dota_window_with(
+            root_windowed_with_geom,
+            &candidates,
+            |wid| match wid {
+                "0x0660013d" => Some(dota_visible.to_string()),
+                "0x7200010" => Some(firefox_visible.to_string()),
+                _ => None,
+            },
+            |wid| match wid {
+                "0x0660013d" => Some(dota_windowed_geom),
+                "0x7200010" => Some(win(150, 80, 500, 400)),
+                _ => None,
+            },
+        ),
+        None
+    );
+
+    // Higher-stacked firefox positioned below Dota's top bar (y=260 > 158) allows first capture!
+    assert_eq!(
+        select_visible_dota_window_with(
+            root_windowed_with_geom,
+            &candidates,
+            |wid| match wid {
+                "0x0660013d" => Some(dota_visible.to_string()),
+                "0x7200010" => Some(firefox_visible.to_string()),
+                _ => None,
+            },
+            |wid| match wid {
+                "0x0660013d" => Some(dota_windowed_geom),
+                "0x7200010" => Some(win(150, 260, 500, 400)),
+                _ => None,
+            },
+        ),
+        Some("0x0660013d".to_string())
+    );
+
+    // 5. Cached revalidation in windowed mode: covered directly AND covered only via WM titlebar (_NET_FRAME_EXTENTS).
     assert!(!evaluate_x11_window_visibility_with(
         "0x660013d",
-        root_single,
+        root_windowed_with_geom,
         dota_visible,
-        Some(2560),
         |wid| (wid == "0x7200010").then(|| firefox_visible.to_string()),
+        |wid| match wid {
+            "0x660013d" => Some(dota_windowed_geom),
+            "0x7200010" => Some(win(150, 80, 500, 400)),
+            _ => None,
+        },
     ));
 
-    // 5. Single-monitor exceptions: truesight-dota overlay, hidden windows, or other-desktop windows do not occlude.
-    let truesight_win = "WM_CLASS(STRING) = \"truesight-dota\", \"truesight-dota\"\nWM_STATE(WM_STATE):\n\t\twindow state: Normal\n_NET_WM_DESKTOP(CARDINAL) = 0\n";
-    assert!(evaluate_x11_window_visibility_with(
-        "0x660013d",
-        root_single,
-        dota_visible,
-        Some(2560),
-        |wid| (wid == "0x7200010").then(|| truesight_win.to_string()),
+    let firefox_with_titlebar = "WM_CLASS(STRING) = \"Navigator\", \"firefox\"\nWM_STATE(WM_STATE):\n\t\twindow state: Normal\n_NET_WM_DESKTOP(CARDINAL) = 0\n_NET_FRAME_EXTENTS(CARDINAL) = 0, 0, 32, 0\n";
+    // Client rect y=162 is below top bar [100, 158), but 32px top frame extent pulls it to y=130..162.
+    assert!(top_bar_intersects_window(
+        dota_windowed_geom,
+        win(150, 162, 500, 400),
+        [0, 0, 32, 0]
     ));
-    let firefox_hidden = "WM_CLASS(STRING) = \"Navigator\", \"firefox\"\n_NET_WM_STATE(ATOM) = _NET_WM_STATE_HIDDEN\n_NET_WM_DESKTOP(CARDINAL) = 0\n";
-    assert!(evaluate_x11_window_visibility_with(
+    assert!(!evaluate_x11_window_visibility_with(
         "0x660013d",
-        root_single,
+        root_windowed_with_geom,
         dota_visible,
-        Some(2560),
-        |wid| (wid == "0x7200010").then(|| firefox_hidden.to_string()),
-    ));
-    let firefox_other_desk = "WM_CLASS(STRING) = \"Navigator\", \"firefox\"\nWM_STATE(WM_STATE):\n\t\twindow state: Normal\n_NET_WM_DESKTOP(CARDINAL) = 2\n";
-    assert!(evaluate_x11_window_visibility_with(
-        "0x660013d",
-        root_single,
-        dota_visible,
-        Some(2560),
-        |wid| (wid == "0x7200010").then(|| firefox_other_desk.to_string()),
+        |wid| (wid == "0x7200010").then(|| firefox_with_titlebar.to_string()),
+        |wid| match wid {
+            "0x660013d" => Some(dota_windowed_geom),
+            "0x7200010" => Some(win(150, 162, 500, 400)),
+            _ => None,
+        },
     ));
 
-    // 6. Multi-monitor (desktop_w > frame_w) preserves borderless workflows even with another visible window above.
+    // 6. Non-overlapping visible window on another monitor stays visible on BOTH first & cached captures.
     let root_multi = "_NET_CURRENT_DESKTOP(CARDINAL) = 0\n_NET_DESKTOP_GEOMETRY(CARDINAL) = 4000, 2560\n_NET_CLIENT_LIST_STACKING(WINDOW): window id # 0x5a00004, 0x0660013d, 0x7200010\n";
+    let dota_mon2 = win(1440, 560, 2560, 1440);
+    let firefox_mon1 = win(0, 0, 1440, 1080);
+    assert!(!top_bar_intersects_window(
+        dota_mon2,
+        firefox_mon1,
+        [0, 0, 0, 0]
+    ));
     assert!(evaluate_x11_window_visibility_with(
         "0x660013d",
         root_multi,
         dota_visible,
-        Some(2560),
         |wid| (wid == "0x7200010").then(|| firefox_visible.to_string()),
+        |wid| match wid {
+            "0x660013d" => Some(dota_mon2),
+            "0x7200010" => Some(firefox_mon1),
+            _ => None,
+        },
     ));
+    assert_eq!(
+        select_visible_dota_window_with(
+            root_multi,
+            &candidates,
+            |wid| match wid {
+                "0x0660013d" => Some(dota_visible.to_string()),
+                "0x7200010" => Some(firefox_visible.to_string()),
+                _ => None,
+            },
+            |wid| match wid {
+                "0x0660013d" => Some(dota_mon2),
+                "0x7200010" => Some(firefox_mon1),
+                _ => None,
+            },
+        ),
+        Some("0x0660013d".to_string())
+    );
+
+    // 7. Occlusion exceptions even when geometry overlaps top bar:
+    // truesight-dota overlay, hidden windows, iconic windows, unmapped windows, or other-desktop windows.
+    let truesight_win = "WM_CLASS(STRING) = \"truesight-dota\", \"truesight-dota\"\nWM_STATE(WM_STATE):\n\t\twindow state: Normal\n_NET_WM_DESKTOP(CARDINAL) = 0\n";
+    let firefox_hidden = "WM_CLASS(STRING) = \"Navigator\", \"firefox\"\n_NET_WM_STATE(ATOM) = _NET_WM_STATE_HIDDEN\n_NET_WM_DESKTOP(CARDINAL) = 0\n";
+    let firefox_other_desk = "WM_CLASS(STRING) = \"Navigator\", \"firefox\"\nWM_STATE(WM_STATE):\n\t\twindow state: Normal\n_NET_WM_DESKTOP(CARDINAL) = 2\n";
+    for (label, props, geom) in [
+        ("truesight-dota", truesight_win, win(100, 80, 500, 400)),
+        ("hidden", firefox_hidden, win(100, 80, 500, 400)),
+        ("other-desktop", firefox_other_desk, win(100, 80, 500, 400)),
+        (
+            "unmapped",
+            firefox_visible,
+            X11WindowGeometry {
+                viewable: false,
+                ..win(100, 80, 500, 400)
+            },
+        ),
+    ] {
+        assert!(
+            evaluate_x11_window_visibility_with(
+                "0x660013d",
+                root_windowed_with_geom,
+                dota_visible,
+                |wid| (wid == "0x7200010").then(|| props.to_string()),
+                |wid| match wid {
+                    "0x660013d" => Some(dota_windowed_geom),
+                    "0x7200010" => Some(geom),
+                    _ => None,
+                },
+            ),
+            "Non-occluding case {label} must keep capture visible"
+        );
+    }
+}
+
+#[test]
+fn vision_x11_wire_geometry_and_parsers() {
+    use crate::vision::{
+        X11DisplayTarget, X11WindowGeometry, parse_x11_display, parse_xauth_cookie,
+        parse_xprop_frame_extents, parse_xwininfo_geometry,
+    };
+
+    assert_eq!(
+        parse_x11_display(":0"),
+        Some(X11DisplayTarget::Unix {
+            path: "/tmp/.X11-unix/X0".to_string(),
+            display_num: "0".to_string(),
+        })
+    );
+    assert_eq!(
+        parse_x11_display("unix:1.0"),
+        Some(X11DisplayTarget::Unix {
+            path: "/tmp/.X11-unix/X1".to_string(),
+            display_num: "1".to_string(),
+        })
+    );
+    assert_eq!(
+        parse_x11_display("127.0.0.1:10.2"),
+        Some(X11DisplayTarget::Tcp {
+            host: "127.0.0.1".to_string(),
+            port: 6010,
+            display_num: "10".to_string(),
+        })
+    );
+
+    assert_eq!(
+        parse_xprop_frame_extents("_NET_FRAME_EXTENTS(CARDINAL) = 4, 4, 32, 4\n"),
+        [4, 4, 32, 4]
+    );
+    assert_eq!(
+        parse_xprop_frame_extents("_NET_FRAME_EXTENTS:  not found.\n"),
+        [0, 0, 0, 0]
+    );
+
+    assert_eq!(
+        parse_xwininfo_geometry(
+            "xwininfo: Window id: 0x660013d \"Dota 2\"\n  Absolute upper-left X:  1440\n  Absolute upper-left Y:  560\n  Width: 2560\n  Height: 1440\n  Map State: IsViewable\n"
+        ),
+        Some(X11WindowGeometry {
+            x: 1440,
+            y: 560,
+            width: 2560,
+            height: 1440,
+            viewable: true,
+        })
+    );
+
+    // Big-endian Xauthority encoding: two entries + bounds safety on truncated tail.
+    let mut xauth = Vec::new();
+    let push_entry =
+        |buf: &mut Vec<u8>, fam: u16, addr: &[u8], num: &[u8], name: &[u8], data: &[u8]| {
+            buf.extend_from_slice(&fam.to_be_bytes());
+            for slice in [addr, num, name, data] {
+                buf.extend_from_slice(&(slice.len() as u16).to_be_bytes());
+                buf.extend_from_slice(slice);
+            }
+        };
+    push_entry(
+        &mut xauth,
+        256,
+        b"otherhost",
+        b"0",
+        b"MIT-MAGIC-COOKIE-1",
+        &[1; 16],
+    );
+    push_entry(
+        &mut xauth,
+        256,
+        b"master",
+        b"0",
+        b"MIT-MAGIC-COOKIE-1",
+        &[7; 16],
+    );
+    assert_eq!(
+        parse_xauth_cookie(&xauth, "0", Some("master")),
+        Some((b"MIT-MAGIC-COOKIE-1".to_vec(), vec![7; 16]))
+    );
+    assert_eq!(parse_xauth_cookie(&[0, 1, 0, 5], "0", None), None);
+
+    #[cfg(target_os = "linux")]
+    {
+        use crate::vision::X11GeometryClient;
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixStream;
+        use std::thread;
+
+        let (client_sock, mut server_sock) = UnixStream::pair().expect("UnixStream pair must work");
+        let server = thread::spawn(move || {
+            let mut setup_hdr = [0_u8; 12];
+            server_sock.read_exact(&mut setup_hdr).unwrap();
+            assert_eq!(setup_hdr[0], b'l');
+            let nlen = u16::from_le_bytes([setup_hdr[6], setup_hdr[7]]) as usize;
+            let dlen = u16::from_le_bytes([setup_hdr[8], setup_hdr[9]]) as usize;
+            let pad = |n: usize| (n + 3) & !3;
+            let mut auth_buf = vec![0_u8; pad(nlen) + pad(dlen)];
+            server_sock.read_exact(&mut auth_buf).unwrap();
+            assert_eq!(&auth_buf[..nlen], b"MIT-MAGIC-COOKIE-1");
+
+            // Setup success reply (8 bytes header + 0 additional words).
+            server_sock.write_all(&[1, 0, 11, 0, 0, 0, 0, 0]).unwrap();
+
+            // Req 1: GetGeometry -> inject 32-byte MappingNotify event (type 34) first, then reply.
+            let mut req1 = [0_u8; 8];
+            server_sock.read_exact(&mut req1).unwrap();
+            assert_eq!(req1[0], 14);
+            let mut event = [0_u8; 32];
+            event[0] = 34;
+            server_sock.write_all(&event).unwrap();
+
+            let mut r1 = [0_u8; 32];
+            r1[0] = 1;
+            r1[2..4].copy_from_slice(&1_u16.to_le_bytes());
+            r1[8..12].copy_from_slice(&0x39c_u32.to_le_bytes());
+            r1[16..18].copy_from_slice(&1280_u16.to_le_bytes());
+            r1[18..20].copy_from_slice(&720_u16.to_le_bytes());
+            server_sock.write_all(&r1).unwrap();
+
+            // Req 2: TranslateCoordinates
+            let mut req2 = [0_u8; 16];
+            server_sock.read_exact(&mut req2).unwrap();
+            assert_eq!(req2[0], 40);
+            let mut r2 = [0_u8; 32];
+            r2[0] = 1;
+            r2[1] = 1; // same_screen
+            r2[2..4].copy_from_slice(&2_u16.to_le_bytes());
+            r2[12..14].copy_from_slice(&(-120_i16).to_le_bytes());
+            r2[14..16].copy_from_slice(&45_i16.to_le_bytes());
+            server_sock.write_all(&r2).unwrap();
+
+            // Req 3: GetWindowAttributes (3 extra 4-byte words = 12 bytes)
+            let mut req3 = [0_u8; 8];
+            server_sock.read_exact(&mut req3).unwrap();
+            assert_eq!(req3[0], 3);
+            let mut r3 = [0_u8; 44];
+            r3[0] = 1;
+            r3[2..4].copy_from_slice(&3_u16.to_le_bytes());
+            r3[4..8].copy_from_slice(&3_u32.to_le_bytes());
+            r3[26] = 2; // IsViewable
+            server_sock.write_all(&r3).unwrap();
+
+            // Second window query receives X11 error packet (type 0) -> None.
+            let mut req4 = [0_u8; 8];
+            server_sock.read_exact(&mut req4).unwrap();
+            let mut err = [0_u8; 32];
+            err[0] = 0;
+            err[1] = 3; // BadWindow
+            err[2..4].copy_from_slice(&4_u16.to_le_bytes());
+            server_sock.write_all(&err).unwrap();
+        });
+
+        let mut client =
+            X11GeometryClient::connect_stream(client_sock, b"MIT-MAGIC-COOKIE-1", &[7; 16])
+                .expect("handshake over UnixStream must succeed");
+        assert_eq!(
+            client.query_window_geometry(0x660013d),
+            Some(X11WindowGeometry {
+                x: -120,
+                y: 45,
+                width: 1280,
+                height: 720,
+                viewable: true,
+            })
+        );
+        assert_eq!(client.query_window_geometry(0xdead), None);
+        server.join().unwrap();
+    }
 }
