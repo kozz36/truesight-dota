@@ -70,7 +70,7 @@ jobs:
             LICENSE README.md
 
       - name: Upload Linux release artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-linux-x86_64
           path: dist-linux/truesight-dota-linux-x86_64.tar.gz
@@ -124,7 +124,7 @@ jobs:
             -OutDir ".\dist-windows"
 
       - name: Upload Windows release artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-windows-x86_64
           path: |
