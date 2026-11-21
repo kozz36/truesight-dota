@@ -3698,3 +3698,21 @@ fn overlay_geometry_mixed_dpi_normalizes_points_to_desktop_pixels_for_monitor_se
     assert_eq!(clamped_pts.width, 380.0);
     assert_eq!(clamped_pts.height, 230.0);
 }
+
+#[test]
+fn resolve_effective_pixels_per_point_honors_native_scale_and_app_zoom() {
+    assert!(
+        (AppSession::resolve_effective_pixels_per_point(Some(1.5), 1.0, 1.2) - 1.8).abs() < 1e-5
+    );
+    assert!(
+        (AppSession::resolve_effective_pixels_per_point(Some(1.5), 1.5, 1.0) - 1.5).abs() < 1e-5
+    );
+    assert!((AppSession::resolve_effective_pixels_per_point(None, 1.25, 1.25) - 1.25).abs() < 1e-5);
+    assert!(
+        (AppSession::resolve_effective_pixels_per_point(Some(0.0), 1.4, 1.0) - 1.4).abs() < 1e-5
+    );
+    assert!(
+        (AppSession::resolve_effective_pixels_per_point(Some(1.5), 1.0, f32::NAN) - 1.5).abs()
+            < 1e-5
+    );
+}

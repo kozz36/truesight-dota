@@ -42,6 +42,7 @@ impl TrueSightGuiApp {
             self.native_monitors_probed = true;
         }
 
+        let zoom_factor = vctx.zoom_factor();
         let (vp_monitor_size, vp_outer_rect, vp_inner_rect, vp_native_ppp, ctx_ppp, screen_rect) =
             vctx.input(|i| {
                 let vp = i.viewport();
@@ -54,8 +55,11 @@ impl TrueSightGuiApp {
                     i.screen_rect(),
                 )
             });
-        let ppp =
-            crate::session::AppSession::sanitize_pixels_per_point(vp_native_ppp.unwrap_or(ctx_ppp));
+        let ppp = crate::session::AppSession::resolve_effective_pixels_per_point(
+            vp_native_ppp,
+            ctx_ppp,
+            zoom_factor,
+        );
 
         let fallback_monitor_size_pts = vp_monitor_size
             .map(|s| (s.x, s.y))

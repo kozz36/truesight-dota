@@ -1446,6 +1446,21 @@ impl AppSession {
         }
     }
 
+    /// Resolves the effective viewport `pixels_per_point` (`native_pixels_per_point * zoom_factor`
+    /// when native DPI is reported, falling back to `context_pixels_per_point`).
+    pub fn resolve_effective_pixels_per_point(
+        vp_native_pixels_per_point: Option<f32>,
+        context_pixels_per_point: f32,
+        zoom_factor: f32,
+    ) -> f32 {
+        let zoom = Self::sanitize_pixels_per_point(zoom_factor);
+        let raw_ppp = match vp_native_pixels_per_point.filter(|n| n.is_finite() && *n > 0.0) {
+            Some(native_ppp) => native_ppp * zoom,
+            None => context_pixels_per_point,
+        };
+        Self::sanitize_pixels_per_point(raw_ppp)
+    }
+
     /// Returns the persisted overlay geometry converted into physical desktop pixels
     /// using `pixels_per_point`.
     pub fn overlay_geometry_in_desktop_pixels(&self, pixels_per_point: f32) -> OverlayGeometry {
