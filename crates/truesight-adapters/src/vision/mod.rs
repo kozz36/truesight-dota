@@ -675,6 +675,8 @@ pub struct RgbFrame {
     pub height: usize,
     /// Full pre-crop window height in pixels when `height` only carries the top-bar strip.
     pub source_height: Option<usize>,
+    /// Desktop-coordinate top-bar capture strip rectangle `(x, y, width, height)` when known.
+    pub capture_strip_rect: Option<(f32, f32, f32, f32)>,
     pub rgb: Vec<u8>,
 }
 
@@ -685,6 +687,7 @@ impl RgbFrame {
             width,
             height,
             source_height: None,
+            capture_strip_rect: None,
             rgb,
         }
     }
@@ -700,8 +703,114 @@ impl RgbFrame {
             width,
             height,
             source_height: Some(source_height),
+            capture_strip_rect: None,
             rgb,
         }
+    }
+
+    /// Attaches the desktop-coordinate top-bar capture strip rectangle `(x, y, width, height)`.
+    pub fn with_capture_strip_rect(mut self, rect: (f32, f32, f32, f32)) -> Self {
+        self.capture_strip_rect = Some(rect);
+        self
+    }
+}
+
+/// Computes the desktop-coordinate top-bar capture strip rectangle `(x, y, width, height)`
+/// for a Dota 2 window at `(win_x, win_y)` with dimensions `(win_w, win_h)`.
+pub fn compute_top_bar_capture_strip_rect(
+    win_x: i32,
+    win_y: i32,
+    win_w: u32,
+    win_h: u32,
+) -> Option<(f32, f32, f32, f32)> {
+    if win_w == 0 || win_h == 0 {
+        return None;
+    }
+    let strip_h = ((win_h as usize * 8).div_ceil(100))
+        .max(60)
+        .min(win_h as usize) as f32;
+    Some((win_x as f32, win_y as f32, win_w as f32, strip_h))
+}
+
+/// Parses `xrandr --listmonitors` output into desktop monitor rectangles `(x, y, width, height)`.
+pub fn parse_xrandr_listmonitors(output: &str) -> Vec<(f32, f32, f32, f32)> {
+    let mut monitors = Vec::new();
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("Monitors:") {
+            continue;
+        }
+        for token in trimmed.split_whitespace() {
+            if let Some(rect) = parse_xrandr_monitor_geometry(token) {
+                monitors.push(rect);
+                break;
+            }
+        }
+    }
+    monitors
+}
+
+fn parse_xrandr_monitor_geometry(token: &str) -> Option<(f32, f32, f32, f32)> {
+    let (w_part, rest) = token.split_once('x')?;
+    let w_str = w_part.split('/').next()?;
+    let width: u32 = w_str.parse().ok()?;
+    if width == 0 {
+        return None;
+    }
+    let offset_start = rest.find(['+', '-'])?;
+    let h_part = &rest[..offset_start];
+    let offsets = &rest[offset_start..];
+    let h_str = h_part.split('/').next()?;
+    let height: u32 = h_str.parse().ok()?;
+    if height == 0 {
+        return None;
+    }
+    let second_sign = offsets[1..].find(['+', '-']).map(|idx| idx + 1)?;
+    let x: i32 = offsets[..second_sign].parse().ok()?;
+    let y: i32 = offsets[second_sign..].parse().ok()?;
+    Some((x as f32, y as f32, width as f32, height as f32))
+}
+
+/// Queries native desktop monitor rectangles `(x, y, width, height)` when available.
+pub fn detect_native_monitor_rects() -> Vec<(f32, f32, f32, f32)> {
+    #[cfg(target_os = "linux")]
+    {
+        if std::env::var_os("DISPLAY").is_none() {
+            return Vec::new();
+        }
+        let Ok(output) = std::process::Command::new("xrandr")
+            .arg("--listmonitors")
+            .output()
+        else {
+            return Vec::new();
+        };
+        if !output.status.success() {
+            return Vec::new();
+        }
+        parse_xrandr_listmonitors(&String::from_utf8_lossy(&output.stdout))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let Ok(monitors) = xcap::Monitor::all() else {
+            return Vec::new();
+        };
+        monitors
+            .into_iter()
+            .filter_map(|m| {
+                let x = m.x().ok()?;
+                let y = m.y().ok()?;
+                let w = m.width().ok()?;
+                let h = m.height().ok()?;
+                if w == 0 || h == 0 {
+                    return None;
+                }
+                Some((x as f32, y as f32, w as f32, h as f32))
+            })
+            .collect()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        Vec::new()
     }
 }
 

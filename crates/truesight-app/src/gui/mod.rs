@@ -1,6 +1,8 @@
+mod build_bar;
 mod matrix_card;
 mod onboarding;
 mod oracle_card;
+mod overlay;
 mod suggested_table;
 mod team_card;
 #[cfg(test)]
@@ -78,6 +80,7 @@ pub struct TrueSightGuiApp {
     pub(super) test_clipboard_override: Option<String>,
     pub(super) stratz_paste_open: bool,
     pub(super) stratz_token_input: String,
+    pub(super) native_monitors_probed: bool,
 }
 
 impl Drop for TrueSightGuiApp {
@@ -137,6 +140,7 @@ impl TrueSightGuiApp {
             test_clipboard_override: None,
             stratz_paste_open: false,
             stratz_token_input: String::new(),
+            native_monitors_probed: false,
         }
     }
 
@@ -293,6 +297,10 @@ impl TrueSightGuiApp {
         }
         if let Some(notice) = self.session.last_sync_notice.take() {
             self.status_banner = notice;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::F8)) {
+            let next = !self.session.overlay_mode;
+            self.session.set_overlay_mode(next);
         }
 
         let (analysis, _) = self.session.evaluate();
@@ -489,6 +497,21 @@ impl TrueSightGuiApp {
             rects.account_window = acct_resp.map(|r| r.response.rect);
         }
 
+        if self.session.overlay_mode {
+            let overlay_id = egui::ViewportId::from_hash_of("truesight_compact_overlay");
+            let builder = overlay::build_overlay_viewport_builder(self.session.overlay_geometry);
+            let click_through = self.session.overlay_geometry.click_through;
+            ctx.show_viewport_immediate(overlay_id, builder, |vctx, _class| {
+                self.sync_live_overlay_viewport_geometry(vctx);
+                vctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(click_through));
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(vctx, |ui| {
+                        let _ = self.render_overlay_panel(ui);
+                    });
+            });
+        }
+
         rects
     }
 
@@ -561,14 +584,19 @@ impl TrueSightGuiApp {
                 vec2(recs_w, bottom_h),
                 Layout::top_down(Align::Min),
                 |ui| {
-                    let s_out = self.render_suggested_picks_card(ui);
-                    rects.suggested = s_out.card;
-                    rects.suggested_last_col_max_x = s_out.last_col_max_x;
-                    rects.suggested_comfort_hdr_max_x = s_out.comfort_hdr_max_x;
-                    rects.suggested_row_rects = s_out.row_rects;
-                    rects.suggested_vs_row_rects = s_out.vs_row_rects;
-                    rects.suggested_pick_rects = s_out.pick_rects;
-                    rects.suggested_pick_stripe_rects = s_out.pick_stripe_rects;
+                    if self.session.is_post_draft_build_view() {
+                        let b_out = self.render_item_build_card(ui);
+                        rects.suggested = b_out.card;
+                    } else {
+                        let s_out = self.render_suggested_picks_card(ui);
+                        rects.suggested = s_out.card;
+                        rects.suggested_last_col_max_x = s_out.last_col_max_x;
+                        rects.suggested_comfort_hdr_max_x = s_out.comfort_hdr_max_x;
+                        rects.suggested_row_rects = s_out.row_rects;
+                        rects.suggested_vs_row_rects = s_out.vs_row_rects;
+                        rects.suggested_pick_rects = s_out.pick_rects;
+                        rects.suggested_pick_stripe_rects = s_out.pick_stripe_rects;
+                    }
                 },
             );
             let dock_comp = bottom_h >= 740.0;

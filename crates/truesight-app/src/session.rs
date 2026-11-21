@@ -4,19 +4,21 @@ use std::sync::{
     mpsc::{self, Receiver, TryRecvError},
 };
 use truesight_adapters::gsi::BoundedGsiListener;
+use truesight_adapters::item_repo::SeededItemMetaRepository;
 use truesight_adapters::sync::{
     AccountLinkConfig, BracketConfig, LocalCacheManager, config_file_path, load_app_config,
     load_app_config_from, normalize_steam32_id, save_account_config_to, save_bracket_config_to,
 };
 use truesight_adapters::vision::{BoundedVisionWorker, CaptureAvailability, VisionCaptureMode};
 use truesight_core::domain::{
-    Bracket, DraftPick, DraftState, Faction, HeroId, Role, Side, TEAM_SIZE,
+    Bracket, BuildVariant, DraftPick, DraftState, Faction, HeroId, ItemId, RecommendedBuild, Role,
+    Side, TEAM_SIZE, counter_trait_table_patch,
 };
 use truesight_core::math::{
     DraftAnalysis5v5, HeroRecommendation, MatchupMatrix, ModelWeights, evaluate_draft_5v5,
-    recommend_heroes,
+    recommend_heroes, recommend_item_build,
 };
-use truesight_core::ports::{DraftEvent, DraftEventSource, StatsRepository};
+use truesight_core::ports::{DraftEvent, DraftEventSource, ItemMetaRepository, StatsRepository};
 
 pub(crate) struct SyncCompletion {
     generation: u64,
@@ -26,6 +28,19 @@ pub(crate) struct SyncCompletion {
 
 type BackgroundSyncRunner =
     Arc<dyn Fn(LocalCacheManager, bool) -> Result<String, String> + Send + Sync>;
+
+/// User-selected item variant override keyed by `(hero_id, role, primary_item_id)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VariantSelection {
+    /// Hero for which this build variant override was chosen.
+    pub hero_id: HeroId,
+    /// Role for which this build variant override was chosen.
+    pub role: Role,
+    /// Original primary item ID of the build step before swapping.
+    pub primary_item_id: ItemId,
+    /// Currently selected variant item ID replacing `primary_item_id`.
+    pub variant_item_id: ItemId,
+}
 
 pub struct AppSession {
     pub draft: DraftState,
@@ -61,6 +76,17 @@ pub struct AppSession {
     pub stratz_api_token: Option<String>,
     pub stratz_token_exp: Option<u64>,
     pub pending_stratz_steam32_link: Option<u64>,
+    pub item_repo: SeededItemMetaRepository,
+    pub game_time_secs: i32,
+    pub owned_items: Vec<ItemId>,
+    pub selected_build_variants: Vec<VariantSelection>,
+    pub post_draft_view_override: Option<bool>,
+    pub active_game_patch: String,
+    pub overlay_mode: bool,
+    pub overlay_geometry: OverlayGeometry,
+    pub active_monitor_rect: Option<MonitorRect>,
+    pub known_monitors: Vec<MonitorRect>,
+    pub active_capture_strip_rect: Option<(f32, f32, f32, f32)>,
 }
 
 impl Drop for AppSession {
@@ -146,6 +172,10 @@ impl AppSession {
         let matrix = repo
             .load_matrix(initial_bracket)
             .map_err(|e| e.to_string())?;
+        let item_repo = cache_mgr.build_item_repository();
+        let active_game_patch = cache_mgr
+            .read_cached_game_patch()
+            .unwrap_or_else(|| counter_trait_table_patch().to_string());
         let ui_cfg = read_config_path
             .as_deref()
             .and_then(Path::parent)
@@ -197,6 +227,17 @@ impl AppSession {
             stratz_api_token: ui_cfg.stratz_api_token,
             stratz_token_exp: resolved_exp,
             pending_stratz_steam32_link: None,
+            item_repo,
+            game_time_secs: 0,
+            owned_items: Vec::new(),
+            selected_build_variants: Vec::new(),
+            post_draft_view_override: None,
+            active_game_patch,
+            overlay_mode: ui_cfg.overlay_mode,
+            overlay_geometry: ui_cfg.overlay_geometry,
+            active_monitor_rect: None,
+            known_monitors: Vec::new(),
+            active_capture_strip_rect: None,
         })
     }
 
@@ -214,6 +255,8 @@ impl AppSession {
             self.onboarding_dismissed = ui_cfg.onboarding_dismissed;
             self.stratz_api_token = ui_cfg.stratz_api_token;
             self.stratz_token_exp = resolved_exp;
+            self.overlay_mode = ui_cfg.overlay_mode;
+            self.overlay_geometry = ui_cfg.overlay_geometry;
             if is_stratz_exp_expired(resolved_exp, now) {
                 self.cache_mgr.stratz_api_token = None;
                 self.cache_mgr.stratz_token_exp = None;
@@ -334,6 +377,11 @@ impl AppSession {
         {
             self.matrix = m;
         }
+        self.item_repo = self.cache_mgr.build_item_repository();
+        self.active_game_patch = self
+            .cache_mgr
+            .read_cached_game_patch()
+            .unwrap_or_else(|| counter_trait_table_patch().to_string());
         self.db_status = self
             .cache_mgr
             .freshness_badge(LocalCacheManager::now_unix());
@@ -377,6 +425,7 @@ impl AppSession {
         if self.sync_in_flight {
             return false;
         }
+        self.sync_target_item_heroes_to_cache();
         self.reap_finished_sync_workers();
         let (generation, _) = self.cache_mgr.begin_sync_generation();
         self.sync_generation = generation;
@@ -493,6 +542,7 @@ impl AppSession {
     }
 
     pub fn sync_db(&mut self, force: bool) -> Result<String, String> {
+        self.sync_target_item_heroes_to_cache();
         let (generation, _) = self.cache_mgr.begin_sync_generation();
         self.sync_generation = generation;
         let msg = self
@@ -608,6 +658,11 @@ impl AppSession {
         self.vision_reset_pending = true;
         self.vision_slots = [[None; TEAM_SIZE]; 2];
         self.vision_owned.clear();
+        self.game_time_secs = 0;
+        self.owned_items.clear();
+        self.selected_build_variants.clear();
+        self.post_draft_view_override = None;
+        self.sync_target_item_heroes_to_cache();
     }
 
     fn side_picks(&self, side: Side) -> &[Option<DraftPick>; TEAM_SIZE] {
@@ -764,6 +819,7 @@ impl AppSession {
         self.side_picks_mut(side)[slot] = pick;
         self.side_locked_mut(side)[slot] = true;
         self.sync_local_player_target_role();
+        self.sync_target_item_heroes_to_cache();
     }
 
     /// Clears `(side, slot)`, unlocks the slot, and suppresses vision re-adding that hero until reset.
@@ -781,6 +837,7 @@ impl AppSession {
                 self.local_player_hero = None;
             }
         }
+        self.sync_target_item_heroes_to_cache();
     }
 
     pub fn apply_event(&mut self, event: DraftEvent) {
@@ -807,6 +864,7 @@ impl AppSession {
                 if entered_wait_for_players || entered_new_hero_selection {
                     self.reset_draft();
                 }
+                self.game_time_secs = game_time_secs;
                 self.last_rules_state = Some(state_name);
             }
             DraftEvent::FactionDetected { faction } => {
@@ -825,6 +883,7 @@ impl AppSession {
                     self.local_player_hero = Some(id);
                     self.apply_side_pick(Side::Allies, 0, id, None);
                     self.sync_local_player_target_role();
+                    self.sync_target_item_heroes_to_cache();
                 }
             }
             DraftEvent::PlayerHeroMapped {
@@ -837,6 +896,7 @@ impl AppSession {
                     if let Some(id) = self.find_hero(&hero_slug) {
                         self.local_player_hero = Some(id);
                         self.sync_local_player_target_role();
+                        self.sync_target_item_heroes_to_cache();
                     }
                 }
             }
@@ -853,6 +913,12 @@ impl AppSession {
                 if !self.draft.is_unavailable(hero_id) {
                     let _ = self.draft.toggle_ban(hero_id);
                 }
+            }
+            DraftEvent::InventoryUpdated { item_slugs } => {
+                self.owned_items = item_slugs
+                    .iter()
+                    .filter_map(|slug| self.item_repo.item_by_slug(slug).map(|e| e.id))
+                    .collect();
             }
             DraftEvent::DraftReset => {
                 self.reset_draft();
@@ -897,6 +963,7 @@ impl AppSession {
                 role: Role::ALL.get(dst).copied(),
             });
             self.rebalance_unlocked_side_roles(side);
+            self.sync_target_item_heroes_to_cache();
         }
     }
 
@@ -1045,6 +1112,15 @@ impl AppSession {
             if self.apply_runtime_health(worker.runtime_health()) {
                 changed = true;
             }
+            let next_strip = if capture_mode == VisionCaptureMode::Suppressed {
+                None
+            } else {
+                worker.capture_strip_rect()
+            };
+            if self.active_capture_strip_rect != next_strip {
+                self.active_capture_strip_rect = next_strip;
+                changed = true;
+            }
         }
         changed
     }
@@ -1104,6 +1180,8 @@ impl AppSession {
                 onboarding_dismissed: self.onboarding_dismissed,
                 stratz_api_token: self.stratz_api_token.clone(),
                 stratz_token_exp: self.stratz_token_exp,
+                overlay_mode: self.overlay_mode,
+                overlay_geometry: self.overlay_geometry,
             };
             if let Err(err) = save_ui_config_to_dir(dir, &cfg) {
                 self.last_sync_notice = Some(format!(
@@ -1113,6 +1191,543 @@ impl AppSession {
             }
         }
         Ok(())
+    }
+
+    /// Returns `true` when the bottom-left panel should display the post-draft item build bar.
+    pub fn is_post_draft_build_view(&self) -> bool {
+        self.post_draft_view_override.unwrap_or(matches!(
+            self.last_rules_state.as_deref(),
+            Some("DOTA_GAMERULES_STATE_PRE_GAME" | "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")
+        ))
+    }
+
+    /// Toggles between the post-draft item build view and the suggested picks view.
+    pub fn toggle_post_draft_build_view(&mut self) {
+        self.post_draft_view_override = Some(!self.is_post_draft_build_view());
+    }
+
+    /// Returns `true` when the active game patch differs from the embedded counter-trait table patch.
+    pub fn is_counter_table_patch_stale(&self) -> bool {
+        let patch = self.active_game_patch.trim();
+        !patch.is_empty() && patch != counter_trait_table_patch()
+    }
+
+    /// Resolves the active allied hero and role for item build recommendations.
+    pub fn active_build_hero(&self) -> Option<(HeroId, Role)> {
+        if let Some(local_id) = self.local_player_hero {
+            let role = self
+                .draft
+                .allies
+                .iter()
+                .enumerate()
+                .find_map(|(idx, slot)| {
+                    slot.filter(|p| p.hero_id == local_id)
+                        .map(|p| p.role.unwrap_or(Role::ALL[idx]))
+                })
+                .unwrap_or(self.draft.target_role);
+            return Some((local_id, role));
+        }
+        if let Some(pick) = self.draft.allies[self.draft.target_role.index()] {
+            return Some((pick.hero_id, pick.role.unwrap_or(self.draft.target_role)));
+        }
+        self.draft
+            .allies
+            .iter()
+            .enumerate()
+            .find_map(|(idx, slot)| slot.map(|p| (p.hero_id, p.role.unwrap_or(Role::ALL[idx]))))
+    }
+
+    /// Selects a variant item override keyed by the step's currently displayed primary item ID
+    /// within the active `(hero_id, role)` build context.
+    pub fn select_build_variant_for_item(
+        &mut self,
+        primary_item_id: ItemId,
+        variant_item_id: ItemId,
+    ) {
+        let Some((hero_id, role)) = self.active_build_hero() else {
+            return;
+        };
+
+        // If `primary_item_id` is currently the displayed variant of an existing override,
+        // update that original entry (or remove it when switching back to the original primary).
+        if let Some(pos) = self.selected_build_variants.iter().position(|entry| {
+            entry.hero_id == hero_id
+                && entry.role == role
+                && entry.variant_item_id == primary_item_id
+        }) {
+            if variant_item_id == self.selected_build_variants[pos].primary_item_id {
+                self.selected_build_variants.remove(pos);
+            } else {
+                self.selected_build_variants[pos].variant_item_id = variant_item_id;
+            }
+            return;
+        }
+
+        if let Some(pos) = self.selected_build_variants.iter().position(|entry| {
+            entry.hero_id == hero_id
+                && entry.role == role
+                && entry.primary_item_id == primary_item_id
+        }) {
+            if variant_item_id == primary_item_id {
+                self.selected_build_variants.remove(pos);
+            } else {
+                self.selected_build_variants[pos].variant_item_id = variant_item_id;
+            }
+        } else if variant_item_id != primary_item_id {
+            self.selected_build_variants.push(VariantSelection {
+                hero_id,
+                role,
+                primary_item_id,
+                variant_item_id,
+            });
+        }
+    }
+
+    /// Selects a variant item override for a given build progression step index by resolving
+    /// its current primary item ID and delegating to [`AppSession::select_build_variant_for_item`].
+    pub fn select_build_variant(&mut self, step_index: usize, variant_item_id: ItemId) {
+        if let Some(primary_item_id) = self
+            .compute_recommended_build()
+            .and_then(|build| build.steps.get(step_index).map(|s| s.item_id))
+        {
+            self.select_build_variant_for_item(primary_item_id, variant_item_id);
+        }
+    }
+
+    /// Computes the recommended item build for the active allied hero, applying any selected variant swaps.
+    pub fn compute_recommended_build(&self) -> Option<RecommendedBuild> {
+        let (hero_id, role) = self.active_build_hero()?;
+        let enemy_ids: [Option<HeroId>; TEAM_SIZE] =
+            self.draft.enemies.map(|slot| slot.map(|p| p.hero_id));
+        let mut build = recommend_item_build(
+            &self.item_repo,
+            hero_id,
+            role,
+            self.draft.bracket,
+            &enemy_ids,
+            &self.owned_items,
+            self.game_time_secs,
+        )
+        .ok()?;
+
+        for sel in self
+            .selected_build_variants
+            .iter()
+            .filter(|sel| sel.hero_id == hero_id && sel.role == role)
+        {
+            let Some(step) = build
+                .steps
+                .iter_mut()
+                .find(|s| s.item_id == sel.primary_item_id)
+            else {
+                continue;
+            };
+            let Some(var_pos) = step
+                .variants
+                .iter()
+                .position(|v| v.item_id == sel.variant_item_id)
+            else {
+                continue;
+            };
+            let chosen = step.variants.remove(var_pos);
+            let old_primary = BuildVariant {
+                item_id: step.item_id,
+                score: step.score,
+                avg_time_mins: step.avg_time_mins,
+                counter_trait: step.counter_trait,
+            };
+            step.item_id = chosen.item_id;
+            step.score = chosen.score;
+            step.avg_time_mins = chosen.avg_time_mins;
+            step.counter_trait = chosen.counter_trait;
+            step.owned = self.owned_items.contains(&chosen.item_id);
+            if let Some(entry) = self.item_repo.item_catalog(chosen.item_id) {
+                step.total_components = entry.components.len();
+                step.owned_components = entry
+                    .components
+                    .iter()
+                    .filter(|c| self.owned_items.contains(c))
+                    .count();
+            } else {
+                step.total_components = 0;
+                step.owned_components = 0;
+            }
+            step.variants.insert(var_pos, old_primary);
+        }
+
+        build.next_unowned_index = build.steps.iter().position(|s| !s.owned);
+        Some(build)
+    }
+
+    /// Computes the bottom Y coordinate of the Dota 2 top-bar portrait capture strip.
+    ///
+    /// When `dota_window_rect` `(x, y, w, h)` is known, uses `y + (h * 0.08).ceil().max(48.0)`.
+    /// Otherwise uses the monitor-level floor `(monitor_h * 0.08).ceil().max(96.0)`.
+    pub fn top_bar_capture_bottom_y(
+        monitor_h: f32,
+        dota_window_rect: Option<(f32, f32, f32, f32)>,
+    ) -> f32 {
+        match dota_window_rect {
+            Some((_, dota_y, _, dota_h)) => dota_y + (dota_h * 0.08).ceil().max(48.0),
+            None => (monitor_h * 0.08).ceil().max(96.0),
+        }
+    }
+
+    /// Synchronizes `cache_mgr` target item hero IDs with the active build hero and picked allies.
+    pub fn sync_target_item_heroes_to_cache(&mut self) {
+        let mut heroes = Vec::new();
+        if let Some((active_hero, _)) = self.active_build_hero() {
+            heroes.push(active_hero);
+        }
+        for pick in self.draft.allies.iter().flatten() {
+            if !heroes.contains(&pick.hero_id) {
+                heroes.push(pick.hero_id);
+            }
+        }
+        self.cache_mgr.set_target_item_heroes(heroes);
+    }
+
+    /// Sets the active monitor desktop bounds used for live overlay clamping.
+    pub fn set_active_monitor_rect(&mut self, monitor: Option<MonitorRect>) {
+        self.active_monitor_rect = monitor;
+    }
+
+    /// Sets the known desktop monitor bounds used when resolving the overlay's host monitor.
+    pub fn set_known_monitors(&mut self, monitors: Vec<MonitorRect>) {
+        self.known_monitors = monitors;
+    }
+
+    /// Queries native OS monitor bounds and updates `known_monitors` when available.
+    pub fn refresh_native_monitors(&mut self) {
+        let detected: Vec<MonitorRect> = truesight_adapters::vision::detect_native_monitor_rects()
+            .into_iter()
+            .map(|(x, y, w, h)| MonitorRect::new(x, y, w, h))
+            .collect();
+        if !detected.is_empty() {
+            self.known_monitors = detected;
+        }
+    }
+
+    /// Resolves the host monitor bounds for `geom` from `active_monitor_rect` or `known_monitors`.
+    /// Returns `None` when reliable native monitor bounds are unavailable.
+    pub fn resolve_monitor_for_overlay(&self, geom: OverlayGeometry) -> Option<MonitorRect> {
+        if let Some(mon) = self.active_monitor_rect {
+            return Some(mon);
+        }
+        if self.known_monitors.is_empty() {
+            return None;
+        }
+        let cx = geom.x + geom.width * 0.5;
+        let cy = geom.y + geom.height * 0.5;
+        if !cx.is_finite() || !cy.is_finite() {
+            return self.known_monitors.first().copied();
+        }
+        if let Some(containing) = self
+            .known_monitors
+            .iter()
+            .copied()
+            .find(|m| cx >= m.x && cx <= m.x + m.width && cy >= m.y && cy <= m.y + m.height)
+        {
+            return Some(containing);
+        }
+        self.known_monitors.iter().copied().min_by(|a, b| {
+            let da = monitor_squared_distance(*a, cx, cy);
+            let db = monitor_squared_distance(*b, cx, cy);
+            da.total_cmp(&db)
+        })
+    }
+
+    /// Sanitizes an `egui` `pixels_per_point` scale factor into a safe finite range `[0.5, 8.0]`.
+    pub fn sanitize_pixels_per_point(pixels_per_point: f32) -> f32 {
+        if pixels_per_point.is_finite() && pixels_per_point > 0.0 {
+            pixels_per_point.clamp(0.5, 8.0)
+        } else {
+            1.0
+        }
+    }
+
+    /// Resolves the effective viewport `pixels_per_point` (`native_pixels_per_point * zoom_factor`
+    /// when native DPI is reported, falling back to `context_pixels_per_point`).
+    pub fn resolve_effective_pixels_per_point(
+        vp_native_pixels_per_point: Option<f32>,
+        context_pixels_per_point: f32,
+        zoom_factor: f32,
+    ) -> f32 {
+        let zoom = Self::sanitize_pixels_per_point(zoom_factor);
+        let raw_ppp = match vp_native_pixels_per_point.filter(|n| n.is_finite() && *n > 0.0) {
+            Some(native_ppp) => native_ppp * zoom,
+            None => context_pixels_per_point,
+        };
+        Self::sanitize_pixels_per_point(raw_ppp)
+    }
+
+    /// Returns the persisted overlay geometry converted into physical desktop pixels
+    /// using `pixels_per_point`.
+    pub fn overlay_geometry_in_desktop_pixels(&self, pixels_per_point: f32) -> OverlayGeometry {
+        self.overlay_geometry
+            .scale_to_desktop_pixels(pixels_per_point)
+    }
+
+    /// Clamps overlay geometry against `monitor` when reliable bounds are available; otherwise
+    /// clamps dimensions and avoids `capture_strip_rect` without guessing a monitor origin.
+    pub fn clamp_overlay_geometry_with_optional_monitor(
+        geom: OverlayGeometry,
+        monitor: Option<MonitorRect>,
+        fallback_monitor_size: Option<(f32, f32)>,
+        capture_strip_rect: Option<(f32, f32, f32, f32)>,
+    ) -> OverlayGeometry {
+        Self::clamp_overlay_geometry_with_optional_monitor_scaled(
+            geom,
+            monitor,
+            fallback_monitor_size,
+            capture_strip_rect,
+            1.0,
+        )
+    }
+
+    /// Clamps physical desktop pixel `geom_px` against physical `monitor_px` (when available)
+    /// and physical `capture_strip_rect_px`, scaling logical point bounds (`280..520` x `160..360`)
+    /// by `pixels_per_point`.
+    pub fn clamp_overlay_geometry_with_optional_monitor_scaled(
+        mut geom_px: OverlayGeometry,
+        monitor_px: Option<MonitorRect>,
+        fallback_monitor_size_px: Option<(f32, f32)>,
+        capture_strip_rect_px: Option<(f32, f32, f32, f32)>,
+        pixels_per_point: f32,
+    ) -> OverlayGeometry {
+        let ppp = Self::sanitize_pixels_per_point(pixels_per_point);
+        if let Some(mon) = monitor_px {
+            return Self::clamp_overlay_geometry_in_monitor_scaled(
+                geom_px,
+                mon,
+                capture_strip_rect_px,
+                ppp,
+            );
+        }
+
+        let min_w_px = 280.0 * ppp;
+        let max_w_cap_px = 520.0 * ppp;
+        let min_h_px = 160.0 * ppp;
+        let max_h_cap_px = 360.0 * ppp;
+        let min_mon_w_px = 640.0 * ppp;
+        let min_mon_h_px = 480.0 * ppp;
+
+        let max_w = fallback_monitor_size_px
+            .map(|(w, _)| w)
+            .filter(|w| w.is_finite() && *w >= min_mon_w_px)
+            .unwrap_or(max_w_cap_px);
+        let max_h = fallback_monitor_size_px
+            .map(|(_, h)| h)
+            .filter(|h| h.is_finite() && *h >= min_mon_h_px)
+            .unwrap_or(max_h_cap_px);
+
+        let raw_w = if geom_px.width.is_finite() {
+            geom_px.width
+        } else {
+            380.0 * ppp
+        };
+        let raw_h = if geom_px.height.is_finite() {
+            geom_px.height
+        } else {
+            230.0 * ppp
+        };
+        geom_px.width = raw_w.clamp(min_w_px, max_w_cap_px.min(max_w.max(min_w_px)));
+        geom_px.height = raw_h.clamp(min_h_px, max_h_cap_px.min(max_h.max(min_h_px)));
+
+        if !geom_px.x.is_finite() {
+            geom_px.x = 24.0 * ppp;
+        }
+        if !geom_px.y.is_finite() {
+            geom_px.y = 96.0 * ppp;
+        }
+
+        if let Some((cx, cy, cw, ch)) = capture_strip_rect_px.filter(|&(cx, cy, cw, ch)| {
+            cx.is_finite()
+                && cy.is_finite()
+                && cw.is_finite()
+                && ch.is_finite()
+                && cw > 0.0
+                && ch > 0.0
+        }) {
+            let overlaps_x = geom_px.x < cx + cw && geom_px.x + geom_px.width > cx;
+            let overlaps_y = geom_px.y < cy + ch && geom_px.y + geom_px.height > cy;
+            if overlaps_x && overlaps_y {
+                let below_y = cy + ch;
+                let fits_below = fallback_monitor_size_px
+                    .map(|(_, h)| {
+                        !h.is_finite() || h < min_mon_h_px || below_y + geom_px.height <= h
+                    })
+                    .unwrap_or(true);
+                let above_y = cy - geom_px.height;
+                if fits_below || above_y < 0.0 {
+                    geom_px.y = below_y;
+                } else {
+                    geom_px.y = above_y;
+                }
+            }
+        }
+
+        geom_px
+    }
+
+    /// Sets the active Dota 2 top-bar capture strip rectangle `(x, y, w, h)` in desktop coordinates.
+    pub fn set_active_capture_strip_rect(&mut self, rect: Option<(f32, f32, f32, f32)>) {
+        self.active_capture_strip_rect = rect;
+    }
+
+    /// Clamps overlay geometry to safe monitor bounds while avoiding the Dota 2 top-bar capture strip.
+    pub fn clamp_overlay_geometry(
+        geom: OverlayGeometry,
+        monitor_w: f32,
+        monitor_h: f32,
+    ) -> OverlayGeometry {
+        Self::clamp_overlay_geometry_against_capture(geom, monitor_w, monitor_h, None)
+    }
+
+    /// Clamps overlay geometry to safe monitor bounds and pushes it below `capture_strip_rect`
+    /// `(cx, cy, cw, ch)` when horizontally overlapping, or below `(monitor_h * 0.08).ceil().max(96.0)`.
+    pub fn clamp_overlay_geometry_against_capture(
+        geom: OverlayGeometry,
+        monitor_w: f32,
+        monitor_h: f32,
+        capture_strip_rect: Option<(f32, f32, f32, f32)>,
+    ) -> OverlayGeometry {
+        Self::clamp_overlay_geometry_in_monitor(
+            geom,
+            MonitorRect::new(0.0, 0.0, monitor_w, monitor_h),
+            capture_strip_rect,
+        )
+    }
+
+    /// Clamps `OverlayGeometry` within `monitor` (preserving secondary monitor origins)
+    /// and prevents it from intersecting `capture_strip_rect` `(cx, cy, cw, ch)` (including
+    /// when Dota 2 runs in a window offset from the top of the monitor).
+    pub fn clamp_overlay_geometry_in_monitor(
+        geom: OverlayGeometry,
+        monitor: MonitorRect,
+        capture_strip_rect: Option<(f32, f32, f32, f32)>,
+    ) -> OverlayGeometry {
+        Self::clamp_overlay_geometry_in_monitor_scaled(geom, monitor, capture_strip_rect, 1.0)
+    }
+
+    /// Clamps physical desktop pixel `geom_px` within physical `monitor_px` (preserving secondary
+    /// monitor origins) and prevents it from intersecting physical `capture_strip_rect_px`,
+    /// scaling logical point bounds (`280..520` x `160..360`) by `pixels_per_point`.
+    pub fn clamp_overlay_geometry_in_monitor_scaled(
+        mut geom_px: OverlayGeometry,
+        monitor_px: MonitorRect,
+        capture_strip_rect_px: Option<(f32, f32, f32, f32)>,
+        pixels_per_point: f32,
+    ) -> OverlayGeometry {
+        let ppp = Self::sanitize_pixels_per_point(pixels_per_point);
+        let min_w_px = 280.0 * ppp;
+        let max_w_cap_px = 520.0 * ppp;
+        let min_h_px = 160.0 * ppp;
+        let max_h_cap_px = 360.0 * ppp;
+        let min_mon_w_px = 640.0 * ppp;
+        let min_mon_h_px = 480.0 * ppp;
+
+        let mon_x = if monitor_px.x.is_finite() {
+            monitor_px.x
+        } else {
+            0.0
+        };
+        let mon_y = if monitor_px.y.is_finite() {
+            monitor_px.y
+        } else {
+            0.0
+        };
+        let mon_w = if monitor_px.width.is_finite() && monitor_px.width >= min_mon_w_px {
+            monitor_px.width
+        } else {
+            1920.0 * ppp
+        };
+        let mon_h = if monitor_px.height.is_finite() && monitor_px.height >= min_mon_h_px {
+            monitor_px.height
+        } else {
+            1080.0 * ppp
+        };
+
+        let raw_w = if geom_px.width.is_finite() {
+            geom_px.width
+        } else {
+            380.0 * ppp
+        };
+        let raw_h = if geom_px.height.is_finite() {
+            geom_px.height
+        } else {
+            230.0 * ppp
+        };
+        geom_px.width = raw_w.clamp(min_w_px, max_w_cap_px.min(mon_w.max(min_w_px)));
+        geom_px.height = raw_h.clamp(min_h_px, max_h_cap_px.min(mon_h.max(min_h_px)));
+
+        let default_top_floor = (mon_h * 0.08).ceil().max(96.0 * ppp);
+        let raw_x = if geom_px.x.is_finite() {
+            geom_px.x
+        } else {
+            mon_x + 24.0 * ppp
+        };
+        let raw_y = if geom_px.y.is_finite() {
+            geom_px.y
+        } else {
+            mon_y + default_top_floor
+        };
+
+        let max_x = (mon_x + mon_w - geom_px.width).max(mon_x);
+        let max_y = (mon_y + mon_h - geom_px.height).max(mon_y);
+        geom_px.x = raw_x.clamp(mon_x, max_x);
+        geom_px.y = raw_y.clamp(mon_y, max_y);
+
+        if let Some((cx, cy, cw, ch)) = capture_strip_rect_px.filter(|&(cx, cy, cw, ch)| {
+            cx.is_finite()
+                && cy.is_finite()
+                && cw.is_finite()
+                && ch.is_finite()
+                && cw > 0.0
+                && ch > 0.0
+        }) {
+            let overlaps_x = geom_px.x < cx + cw && geom_px.x + geom_px.width > cx;
+            let overlaps_y = geom_px.y < cy + ch && geom_px.y + geom_px.height > cy;
+            if overlaps_x && overlaps_y {
+                let below_y = cy + ch;
+                let above_y = cy - geom_px.height;
+                if below_y <= max_y {
+                    geom_px.y = below_y.max(mon_y);
+                } else if above_y >= mon_y {
+                    geom_px.y = above_y.min(max_y);
+                } else {
+                    geom_px.y = max_y;
+                }
+            }
+        } else {
+            let min_y = (mon_y + default_top_floor).min(max_y);
+            if geom_px.y < min_y {
+                geom_px.y = min_y;
+            }
+        }
+
+        geom_px
+    }
+
+    /// Enables or disables compact overlay mode and persists the preference.
+    pub fn set_overlay_mode(&mut self, enabled: bool) {
+        self.overlay_mode = enabled;
+        if !enabled {
+            self.overlay_geometry.click_through = false;
+        }
+        let _ = self.persist_ui_config();
+    }
+
+    /// Enables or disables mouse click-through on the overlay window and persists the preference.
+    pub fn set_overlay_click_through(&mut self, click_through: bool) {
+        self.overlay_geometry.click_through = click_through;
+        let _ = self.persist_ui_config();
+    }
+
+    /// Updates and persists the overlay window geometry.
+    pub fn set_overlay_geometry(&mut self, geom: OverlayGeometry) {
+        self.overlay_geometry = geom;
+        let _ = self.persist_ui_config();
     }
 
     /// Persists the onboarding dismissal preference when config persistence is enabled.
@@ -1203,12 +1818,102 @@ pub struct StratzTokenInfo {
     pub days_remaining: u32,
 }
 
-/// Persisted UI onboarding and STRATZ token state stored in `ui_config.toml`.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+fn monitor_squared_distance(mon: MonitorRect, px: f32, py: f32) -> f32 {
+    let dx = if px < mon.x {
+        mon.x - px
+    } else if px > mon.x + mon.width {
+        px - (mon.x + mon.width)
+    } else {
+        0.0
+    };
+    let dy = if py < mon.y {
+        mon.y - py
+    } else if py > mon.y + mon.height {
+        py - (mon.y + mon.height)
+    } else {
+        0.0
+    };
+    dx * dx + dy * dy
+}
+
+/// Desktop-coordinate bounds of the monitor hosting the overlay or Dota 2 window.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MonitorRect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl MonitorRect {
+    /// Constructs a `MonitorRect` from origin `(x, y)` and dimensions `(width, height)`.
+    pub const fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OverlayGeometry {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub click_through: bool,
+}
+
+impl OverlayGeometry {
+    /// Converts logical `egui` viewport points (`x, y, width, height`) into physical desktop
+    /// pixels using the viewport's `pixels_per_point` scale factor.
+    pub fn scale_to_desktop_pixels(self, pixels_per_point: f32) -> Self {
+        let ppp = AppSession::sanitize_pixels_per_point(pixels_per_point);
+        Self {
+            x: self.x * ppp,
+            y: self.y * ppp,
+            width: self.width * ppp,
+            height: self.height * ppp,
+            click_through: self.click_through,
+        }
+    }
+
+    /// Converts physical desktop pixel geometry back into logical `egui` viewport points
+    /// using the viewport's `pixels_per_point` scale factor.
+    pub fn scale_to_egui_points(self, pixels_per_point: f32) -> Self {
+        let ppp = AppSession::sanitize_pixels_per_point(pixels_per_point);
+        Self {
+            x: self.x / ppp,
+            y: self.y / ppp,
+            width: self.width / ppp,
+            height: self.height / ppp,
+            click_through: self.click_through,
+        }
+    }
+}
+
+impl Default for OverlayGeometry {
+    fn default() -> Self {
+        Self {
+            x: 24.0,
+            y: 112.0,
+            width: 380.0,
+            height: 230.0,
+            click_through: false,
+        }
+    }
+}
+
+/// Persisted UI onboarding, overlay, and STRATZ token state stored in `ui_config.toml`.
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct UiConfig {
     pub onboarding_dismissed: bool,
     pub stratz_api_token: Option<String>,
     pub stratz_token_exp: Option<u64>,
+    pub overlay_mode: bool,
+    pub overlay_geometry: OverlayGeometry,
 }
 
 fn resolve_stratz_exp(token: Option<&str>, explicit_exp: Option<u64>) -> Option<u64> {
@@ -1343,6 +2048,28 @@ pub fn load_ui_config_from_dir(config_dir: &Path) -> UiConfig {
             "stratz_token_exp" => {
                 cfg.stratz_token_exp = val.parse::<u64>().ok();
             }
+            "overlay_mode" => cfg.overlay_mode = val == "true",
+            "overlay_x" => {
+                if let Ok(x) = val.parse::<f32>() {
+                    cfg.overlay_geometry.x = x;
+                }
+            }
+            "overlay_y" => {
+                if let Ok(y) = val.parse::<f32>() {
+                    cfg.overlay_geometry.y = y;
+                }
+            }
+            "overlay_width" => {
+                if let Ok(w) = val.parse::<f32>() {
+                    cfg.overlay_geometry.width = w;
+                }
+            }
+            "overlay_height" => {
+                if let Ok(h) = val.parse::<f32>() {
+                    cfg.overlay_geometry.height = h;
+                }
+            }
+            "overlay_click_through" => cfg.overlay_geometry.click_through = val == "true",
             _ => {}
         }
     }
@@ -1369,6 +2096,18 @@ pub fn save_ui_config_to_dir(config_dir: &Path, cfg: &UiConfig) -> Result<(), St
     ));
 
     let mut body = format!("onboarding_dismissed = {}\n", cfg.onboarding_dismissed);
+    body.push_str(&format!("overlay_mode = {}\n", cfg.overlay_mode));
+    body.push_str(&format!("overlay_x = {}\n", cfg.overlay_geometry.x));
+    body.push_str(&format!("overlay_y = {}\n", cfg.overlay_geometry.y));
+    body.push_str(&format!("overlay_width = {}\n", cfg.overlay_geometry.width));
+    body.push_str(&format!(
+        "overlay_height = {}\n",
+        cfg.overlay_geometry.height
+    ));
+    body.push_str(&format!(
+        "overlay_click_through = {}\n",
+        cfg.overlay_geometry.click_through
+    ));
     if let Some(token) = cfg.stratz_api_token.as_deref().filter(|t| !t.is_empty()) {
         let escaped = token.replace('"', "");
         body.push_str(&format!("stratz_api_token = \"{escaped}\"\n"));

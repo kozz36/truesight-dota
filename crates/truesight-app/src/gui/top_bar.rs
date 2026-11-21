@@ -556,6 +556,64 @@ impl TrueSightGuiApp {
                     });
 
                 ui.horizontal(|ui| {
+                    let overlay_lbl = if self.session.overlay_mode {
+                        "COMPACT OVERLAY: ON"
+                    } else {
+                        "COMPACT OVERLAY: OFF"
+                    };
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new(overlay_lbl).size(10.0).strong().color(
+                                    if self.session.overlay_mode {
+                                        P_GEM
+                                    } else {
+                                        P_GLINT
+                                    },
+                                ),
+                            )
+                            .fill(P_INDIGO_2)
+                            .stroke(Stroke::new(
+                                1.0_f32,
+                                if self.session.overlay_mode {
+                                    P_GEM
+                                } else {
+                                    P_LINE
+                                },
+                            )),
+                        )
+                        .on_hover_text("Toggle compact always-on-top overlay window (F8)")
+                        .clicked()
+                    {
+                        let next = !self.session.overlay_mode;
+                        self.session.set_overlay_mode(next);
+                    }
+
+                    let ct_lbl = if self.session.overlay_geometry.click_through {
+                        "CLICK-THROUGH: ON"
+                    } else {
+                        "CLICK-THROUGH: OFF"
+                    };
+                    if ui
+                        .add(
+                            egui::Button::new(RichText::new(ct_lbl).size(10.0).color(
+                                if self.session.overlay_geometry.click_through {
+                                    P_NEUTRAL
+                                } else {
+                                    P_MUTED
+                                },
+                            ))
+                            .fill(P_INDIGO_2)
+                            .stroke(Stroke::new(1.0_f32, P_LINE)),
+                        )
+                        .clicked()
+                    {
+                        let next = !self.session.overlay_geometry.click_through;
+                        self.session.set_overlay_click_through(next);
+                    }
+                });
+
+                ui.horizontal(|ui| {
                     let demo_resp = ui.add(
                         egui::Button::new(
                             RichText::new("DEMO 5V5").size(10.5).strong().color(P_GEM),

@@ -1552,3 +1552,722 @@ fn encode_b64url_for_test(input: &[u8]) -> String {
     }
     out
 }
+
+#[test]
+fn gui_build_bar_and_overlay_preserve_win_parity_and_render_variants() {
+    let mut session = AppSession::new().unwrap();
+    assert!(execute_command(&mut session, "ally 1 anti-mage").unwrap());
+    assert!(execute_command(&mut session, "enemy 1 phantom assassin").unwrap());
+    session.draft.target_role = Role::Mid;
+
+    let (analysis, recs) = session.evaluate();
+    let summary = super::viewmodel::compute_overlay_summary(&session);
+    assert!(!summary.is_post_draft);
+    assert!(
+        (summary.projected_ally_win_pct - analysis.ally_win_probability * 100.0).abs() < 1e-4,
+        "overlay win% must match main window analysis exactly"
+    );
+    assert_eq!(summary.top_suggestions.len(), 3);
+    for (idx, (id, _, win_pct)) in summary.top_suggestions.iter().enumerate() {
+        assert_eq!(*id, recs[idx].hero_id);
+        assert!((*win_pct - recs[idx].projected_win_probability * 100.0).abs() < 1e-4);
+    }
+
+    let mut app = TrueSightGuiApp::new(session, None, None);
+    let ctx = egui::Context::default();
+
+    // Render overlay in draft phase
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                pos2(0.0, 0.0),
+                egui::vec2(380.0, 230.0),
+            )),
+            ..Default::default()
+        },
+        |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let r = app.render_overlay_panel(ui);
+                assert!(r.width() > 0.0 && r.height() > 0.0);
+            });
+        },
+    );
+
+    // Transition to post-draft and render both build bar card and overlay post-draft panel
+    app.session
+        .apply_event(truesight_core::ports::DraftEvent::GameRulesStateChanged {
+            state_name: "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS".into(),
+            game_time_secs: 600,
+        });
+    let summary_post = super::viewmodel::compute_overlay_summary(&app.session);
+    assert!(summary_post.is_post_draft);
+    assert!(summary_post.build.is_some());
+
+    let mut suggested_rect = egui::Rect::NOTHING;
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                pos2(0.0, 0.0),
+                egui::vec2(1180.0, 700.0),
+            )),
+            ..Default::default()
+        },
+        |ctx| {
+            let rects = app.render_frame(ctx);
+            suggested_rect = rects.suggested;
+        },
+    );
+    assert!(suggested_rect.width() > 0.0 && suggested_rect.height() > 0.0);
+
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                pos2(0.0, 0.0),
+                egui::vec2(380.0, 230.0),
+            )),
+            ..Default::default()
+        },
+        |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let r = app.render_overlay_panel(ui);
+                assert!(r.width() > 0.0 && r.height() > 0.0);
+            });
+        },
+    );
+}
+
+fn collect_painted_texts(shape: &egui::epaint::Shape, out: &mut Vec<String>) {
+    match shape {
+        egui::epaint::Shape::Text(text_shape) => {
+            out.push(text_shape.galley.text().to_string());
+        }
+        egui::epaint::Shape::Vec(shapes) => {
+            for inner in shapes {
+                collect_painted_texts(inner, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn gui_overlay_syncs_and_clamps_live_viewport_geometry() {
+    let mut session = AppSession::new().unwrap();
+    session.overlay_mode = true;
+    session.set_known_monitors(vec![crate::session::MonitorRect::new(
+        0.0, 0.0, 2560.0, 1440.0,
+    )]);
+    session.overlay_geometry = crate::session::OverlayGeometry {
+        x: 120.0,
+        y: 130.0,
+        width: 380.0,
+        height: 230.0,
+        click_through: false,
+    };
+    let mut app = TrueSightGuiApp::new(session, None, None);
+    let ctx = egui::Context::default();
+
+    let mut raw_input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            pos2(0.0, 0.0),
+            egui::vec2(380.0, 230.0),
+        )),
+        ..Default::default()
+    };
+    raw_input.viewports.insert(
+        egui::ViewportId::ROOT,
+        egui::ViewportInfo {
+            monitor_size: Some(egui::vec2(2560.0, 1440.0)),
+            outer_rect: Some(egui::Rect::from_min_size(
+                pos2(240.0, 40.0),
+                egui::vec2(380.0, 230.0),
+            )),
+            inner_rect: Some(egui::Rect::from_min_size(
+                pos2(240.0, 40.0),
+                egui::vec2(380.0, 230.0),
+            )),
+            ..Default::default()
+        },
+    );
+
+    let full_output = ctx.run(raw_input, |vctx| {
+        app.sync_live_overlay_viewport_geometry(vctx);
+    });
+
+    assert_eq!(app.session.overlay_geometry.x, 240.0);
+    assert_eq!(
+        app.session.overlay_geometry.y, 116.0,
+        "live viewport sync must clamp y >= 116.0 on 1440p monitor"
+    );
+    let root_cmds = &full_output
+        .viewport_output
+        .get(&egui::ViewportId::ROOT)
+        .expect("root viewport output must exist")
+        .commands;
+    assert!(
+        root_cmds.iter().any(|cmd| matches!(
+            cmd,
+            egui::ViewportCommand::OuterPosition(p) if (p.x - 240.0).abs() < 0.5 && (p.y - 116.0).abs() < 0.5
+        )),
+        "must emit ViewportCommand::OuterPosition to enforce clamp at runtime, got: {root_cmds:?}"
+    );
+}
+
+#[test]
+fn gui_overlay_keeps_next_badge_visible_for_fifth_step() {
+    use truesight_core::ports::ItemMetaRepository;
+
+    let mut session = AppSession::new().unwrap();
+    assert!(execute_command(&mut session, "ally 1 anti-mage").unwrap());
+    assert!(execute_command(&mut session, "enemy 1 phantom assassin").unwrap());
+    session.apply_event(truesight_core::ports::DraftEvent::GameRulesStateChanged {
+        state_name: "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS".into(),
+        game_time_secs: 1800,
+    });
+
+    let initial_build = session
+        .compute_recommended_build()
+        .expect("picked ally must produce a build");
+    assert!(
+        initial_build.steps.len() >= 5,
+        "build must have at least 5 steps"
+    );
+
+    // Mark the first 4 items as owned so [NEXT] moves to the 5th step (index 4).
+    session.owned_items = initial_build.steps[..4].iter().map(|s| s.item_id).collect();
+    let build_with_fifth_next = session.compute_recommended_build().unwrap();
+    assert_eq!(build_with_fifth_next.next_unowned_index, Some(4));
+    let fifth_item_name = session
+        .item_repo
+        .item_catalog(build_with_fifth_next.steps[4].item_id)
+        .map(|e| e.display_name)
+        .unwrap();
+
+    let mut app = TrueSightGuiApp::new(session, None, None);
+    let ctx = egui::Context::default();
+    let full_output = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                pos2(0.0, 0.0),
+                egui::vec2(380.0, 230.0),
+            )),
+            ..Default::default()
+        },
+        |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let _ = app.render_overlay_panel(ui);
+            });
+        },
+    );
+
+    let mut texts = Vec::new();
+    for clipped in &full_output.shapes {
+        collect_painted_texts(&clipped.shape, &mut texts);
+    }
+    assert!(
+        texts.iter().any(|t| t.contains("[NEXT]")),
+        "overlay must render [NEXT] badge even when next_unowned_index is 4; painted texts: {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|t| t.contains(&fifth_item_name)),
+        "overlay must render 5th step '{fifth_item_name}'; painted texts: {texts:?}"
+    );
+}
+
+#[test]
+fn live_overlay_viewport_geometry_preserves_secondary_monitor_and_avoids_offset_capture_strip() {
+    let mut session = AppSession::new().unwrap();
+    session.overlay_mode = true;
+    session.set_known_monitors(vec![
+        crate::session::MonitorRect::new(0.0, 0.0, 1920.0, 1080.0),
+        crate::session::MonitorRect::new(1920.0, 0.0, 1920.0, 1080.0),
+    ]);
+    session.overlay_geometry = crate::session::OverlayGeometry {
+        x: 2200.0,
+        y: 120.0,
+        width: 380.0,
+        height: 230.0,
+        click_through: false,
+    };
+    let mut app = TrueSightGuiApp::new(session, None, None);
+    let ctx = egui::Context::default();
+
+    // Pass 1: Secondary monitor at (1920, 0) with size 1920x1080 and overlay placed at (2200, 30).
+    let mut raw_input_secondary = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            pos2(0.0, 0.0),
+            egui::vec2(380.0, 230.0),
+        )),
+        ..Default::default()
+    };
+    raw_input_secondary.viewports.insert(
+        egui::ViewportId::ROOT,
+        egui::ViewportInfo {
+            monitor_size: Some(egui::vec2(1920.0, 1080.0)),
+            outer_rect: Some(egui::Rect::from_min_size(
+                pos2(2200.0, 30.0),
+                egui::vec2(380.0, 230.0),
+            )),
+            inner_rect: Some(egui::Rect::from_min_size(
+                pos2(2200.0, 30.0),
+                egui::vec2(380.0, 230.0),
+            )),
+            ..Default::default()
+        },
+    );
+
+    let secondary_output = ctx.run(raw_input_secondary, |vctx| {
+        app.sync_live_overlay_viewport_geometry(vctx);
+    });
+    assert_eq!(
+        app.session.overlay_geometry.x, 2200.0,
+        "secondary monitor X coordinate must not be forced back to 0..1920"
+    );
+    assert_eq!(app.session.overlay_geometry.y, 96.0);
+    let secondary_cmds = &secondary_output
+        .viewport_output
+        .get(&egui::ViewportId::ROOT)
+        .expect("root viewport output must exist")
+        .commands;
+    assert!(secondary_cmds.iter().any(|cmd| matches!(
+        cmd,
+        egui::ViewportCommand::OuterPosition(p) if (p.x - 2200.0).abs() < 0.5 && (p.y - 96.0).abs() < 0.5
+    )));
+
+    // Pass 2: Offset windowed Dota capture strip at (200, 180, 1600, 72) on primary monitor.
+    app.session
+        .set_active_capture_strip_rect(Some((200.0, 180.0, 1600.0, 72.0)));
+    let mut raw_input_strip = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            pos2(0.0, 0.0),
+            egui::vec2(380.0, 230.0),
+        )),
+        ..Default::default()
+    };
+    raw_input_strip.viewports.insert(
+        egui::ViewportId::ROOT,
+        egui::ViewportInfo {
+            monitor_size: Some(egui::vec2(1920.0, 1080.0)),
+            outer_rect: Some(egui::Rect::from_min_size(
+                pos2(240.0, 160.0),
+                egui::vec2(380.0, 230.0),
+            )),
+            inner_rect: Some(egui::Rect::from_min_size(
+                pos2(240.0, 160.0),
+                egui::vec2(380.0, 230.0),
+            )),
+            ..Default::default()
+        },
+    );
+
+    let strip_output = ctx.run(raw_input_strip, |vctx| {
+        app.sync_live_overlay_viewport_geometry(vctx);
+    });
+    assert_eq!(app.session.overlay_geometry.x, 240.0);
+    assert_eq!(
+        app.session.overlay_geometry.y, 252.0,
+        "overlay overlapping offset capture strip must be pushed below y=252.0"
+    );
+    let strip_cmds = &strip_output
+        .viewport_output
+        .get(&egui::ViewportId::ROOT)
+        .expect("root viewport output must exist")
+        .commands;
+    assert!(strip_cmds.iter().any(|cmd| matches!(
+        cmd,
+        egui::ViewportCommand::OuterPosition(p) if (p.x - 240.0).abs() < 0.5 && (p.y - 252.0).abs() < 0.5
+    )));
+}
+
+#[test]
+fn live_overlay_viewport_geometry_handles_heterogeneous_monitors_and_unavailable_bounds_fallback() {
+    // 1. Heterogeneous dual-monitor setup: 1920x1080 primary at (0, 0) + 1280x720 secondary at (1920, 0).
+    let mut session = AppSession::new().unwrap();
+    session.overlay_mode = true;
+    session.set_known_monitors(vec![
+        crate::session::MonitorRect::new(0.0, 0.0, 1920.0, 1080.0),
+        crate::session::MonitorRect::new(1920.0, 0.0, 1280.0, 720.0),
+    ]);
+    session.overlay_geometry = crate::session::OverlayGeometry {
+        x: 2450.0,
+        y: 140.0,
+        width: 380.0,
+        height: 230.0,
+        click_through: false,
+    };
+    let mut app = TrueSightGuiApp::new(session, None, None);
+    let ctx = egui::Context::default();
+
+    let make_input = |x: f32, y: f32| {
+        let mut raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                pos2(0.0, 0.0),
+                egui::vec2(380.0, 230.0),
+            )),
+            ..Default::default()
+        };
+        raw.viewports.insert(
+            egui::ViewportId::ROOT,
+            egui::ViewportInfo {
+                monitor_size: Some(egui::vec2(1280.0, 720.0)),
+                outer_rect: Some(egui::Rect::from_min_size(
+                    pos2(x, y),
+                    egui::vec2(380.0, 230.0),
+                )),
+                inner_rect: Some(egui::Rect::from_min_size(
+                    pos2(x, y),
+                    egui::vec2(380.0, 230.0),
+                )),
+                ..Default::default()
+            },
+        );
+        raw
+    };
+
+    let _ = ctx.run(make_input(2450.0, 140.0), |vctx| {
+        app.sync_live_overlay_viewport_geometry(vctx);
+    });
+    assert_eq!(
+        app.session.overlay_geometry.x, 2450.0,
+        "valid 380pt overlay at x=2450 on 1280pt secondary monitor (1920..3200) must not be moved to 2180"
+    );
+    assert_eq!(app.session.overlay_geometry.y, 140.0);
+
+    // Dragging past the right edge of the 1280pt secondary monitor (x=3000) clamps to 1920 + 1280 - 380 = 2820.
+    let _ = ctx.run(make_input(3000.0, 140.0), |vctx| {
+        app.sync_live_overlay_viewport_geometry(vctx);
+    });
+    assert_eq!(app.session.overlay_geometry.x, 2820.0);
+
+    // 2. Reliable native monitor bounds unavailable: must NOT reposition x=2450 based on a guessed origin.
+    let mut fallback_session = AppSession::new().unwrap();
+    fallback_session.overlay_mode = true;
+    fallback_session.overlay_geometry = crate::session::OverlayGeometry {
+        x: 2450.0,
+        y: 140.0,
+        width: 380.0,
+        height: 230.0,
+        click_through: false,
+    };
+    let mut fallback_app = TrueSightGuiApp::new(fallback_session, None, None);
+    fallback_app.native_monitors_probed = true;
+    let _ = ctx.run(make_input(2450.0, 140.0), |vctx| {
+        fallback_app.sync_live_overlay_viewport_geometry(vctx);
+    });
+    assert_eq!(
+        fallback_app.session.overlay_geometry.x, 2450.0,
+        "when native monitor bounds are unavailable, x=2450 must not be moved to guessed 2180"
+    );
+    assert_eq!(fallback_app.session.overlay_geometry.y, 140.0);
+}
+
+#[test]
+fn live_overlay_avoids_offset_capture_strip_from_bounded_vision_worker_production_path() {
+    use truesight_adapters::vision::{BoundedVisionWorker, RgbFrame, ScreenFrameSource};
+    use truesight_core::ports::PortError;
+
+    struct OffsetWindowSource;
+    impl ScreenFrameSource for OffsetWindowSource {
+        fn capture_frame(&mut self) -> Result<Option<RgbFrame>, PortError> {
+            Ok(Some(
+                RgbFrame::with_source_height(1600, 72, 900, vec![0; 1600 * 72 * 3])
+                    .with_capture_strip_rect((200.0, 180.0, 1600.0, 72.0)),
+            ))
+        }
+    }
+
+    let worker = BoundedVisionWorker::spawn_with_source(OffsetWindowSource)
+        .expect("vision worker must spawn");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while worker.capture_strip_rect().is_none() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(
+        worker.capture_strip_rect(),
+        Some((200.0, 180.0, 1600.0, 72.0))
+    );
+
+    let mut session = AppSession::new().unwrap();
+    session.overlay_mode = true;
+    session.set_known_monitors(vec![crate::session::MonitorRect::new(
+        0.0, 0.0, 1920.0, 1080.0,
+    )]);
+    session.overlay_geometry = crate::session::OverlayGeometry {
+        x: 240.0,
+        y: 160.0,
+        width: 380.0,
+        height: 230.0,
+        click_through: false,
+    };
+
+    let mut app = TrueSightGuiApp::new(session, None, Some(worker));
+    let ctx = egui::Context::default();
+    let mut raw_input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            pos2(0.0, 0.0),
+            egui::vec2(1280.0, 800.0),
+        )),
+        ..Default::default()
+    };
+    let overlay_id = egui::ViewportId::from_hash_of("truesight_compact_overlay");
+    raw_input.viewports.insert(
+        overlay_id,
+        egui::ViewportInfo {
+            monitor_size: Some(egui::vec2(1920.0, 1080.0)),
+            outer_rect: Some(egui::Rect::from_min_size(
+                pos2(240.0, 160.0),
+                egui::vec2(380.0, 230.0),
+            )),
+            inner_rect: Some(egui::Rect::from_min_size(
+                pos2(240.0, 160.0),
+                egui::vec2(380.0, 230.0),
+            )),
+            ..Default::default()
+        },
+    );
+
+    let _ = ctx.run(raw_input, |ctx| {
+        let _ = app.render_frame(ctx);
+    });
+
+    assert_eq!(
+        app.session.active_capture_strip_rect,
+        Some((200.0, 180.0, 1600.0, 72.0)),
+        "production render_frame -> poll_live_sources must populate active_capture_strip_rect from BoundedVisionWorker"
+    );
+    assert_eq!(
+        app.session.overlay_geometry.y, 252.0,
+        "overlay overlapping live worker's offset capture strip (y=180..252) must be clamped to y=252.0"
+    );
+}
+
+#[test]
+fn live_overlay_viewport_geometry_normalizes_mixed_dpi_secondary_monitor_and_capture_strip() {
+    use truesight_adapters::vision::{BoundedVisionWorker, RgbFrame, ScreenFrameSource};
+    use truesight_core::ports::PortError;
+
+    // Physical Dota capture strip on secondary 150%-DPI monitor (origin 1920, 0):
+    // physical rect = (2100, 180, 1600, 72) -> y = 180..252 physical px.
+    struct SecondaryMonitorDotaSource;
+    impl ScreenFrameSource for SecondaryMonitorDotaSource {
+        fn capture_frame(&mut self) -> Result<Option<RgbFrame>, PortError> {
+            Ok(Some(
+                RgbFrame::with_source_height(1600, 72, 1440, vec![0; 1600 * 72 * 3])
+                    .with_capture_strip_rect((2100.0, 180.0, 1600.0, 72.0)),
+            ))
+        }
+    }
+
+    let worker = BoundedVisionWorker::spawn_with_source(SecondaryMonitorDotaSource)
+        .expect("vision worker must spawn");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while worker.capture_strip_rect().is_none() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(
+        worker.capture_strip_rect(),
+        Some((2100.0, 180.0, 1600.0, 72.0))
+    );
+
+    let mut session = AppSession::new().unwrap();
+    session.overlay_mode = true;
+    // Mixed-DPI desktop: 100% primary (1920x1080 at 0,0) + 150% secondary (2560x1440 at 1920,0) in physical pixels.
+    session.set_known_monitors(vec![
+        crate::session::MonitorRect::new(0.0, 0.0, 1920.0, 1080.0),
+        crate::session::MonitorRect::new(1920.0, 0.0, 2560.0, 1440.0),
+    ]);
+    // Overlay physically at (2100, 180, 570, 345) on 150% monitor -> logical egui points (1400, 120, 380, 230).
+    // Without DPI normalization, x=1400 looks inside primary (0..1920) and misses the physical strip at (2100, 180).
+    session.overlay_geometry = crate::session::OverlayGeometry {
+        x: 1400.0,
+        y: 120.0,
+        width: 380.0,
+        height: 230.0,
+        click_through: false,
+    };
+
+    let mut app = TrueSightGuiApp::new(session, None, Some(worker));
+    let ctx = egui::Context::default();
+    let overlay_id = egui::ViewportId::from_hash_of("truesight_compact_overlay");
+
+    let make_input = |x_pts: f32, y_pts: f32| {
+        let vp_info = egui::ViewportInfo {
+            native_pixels_per_point: Some(1.5),
+            monitor_size: Some(egui::vec2(2560.0 / 1.5, 1440.0 / 1.5)),
+            outer_rect: Some(egui::Rect::from_min_size(
+                pos2(x_pts, y_pts),
+                egui::vec2(380.0, 230.0),
+            )),
+            inner_rect: Some(egui::Rect::from_min_size(
+                pos2(x_pts, y_pts),
+                egui::vec2(380.0, 230.0),
+            )),
+            ..Default::default()
+        };
+        let mut raw_input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                pos2(0.0, 0.0),
+                egui::vec2(1280.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        raw_input
+            .viewports
+            .insert(egui::ViewportId::ROOT, vp_info.clone());
+        raw_input.viewports.insert(overlay_id, vp_info);
+        raw_input
+    };
+
+    let _ = ctx.run(make_input(1400.0, 120.0), |ctx| {
+        let _ = app.render_frame(ctx);
+    });
+
+    assert_eq!(
+        app.session.overlay_geometry.x, 1400.0,
+        "150%-DPI secondary monitor overlay at physical x=2100 (1400pt) must stay on secondary monitor"
+    );
+    assert_eq!(
+        app.session.overlay_geometry.y, 168.0,
+        "150%-DPI overlay overlapping physical strip (y=180..252) must be pushed to physical y=252 (168pt)"
+    );
+    assert!(
+        (app.session.overlay_geometry.width - 380.0).abs() < 1e-4,
+        "width should stay ~380.0, got {}",
+        app.session.overlay_geometry.width
+    );
+    assert!(
+        (app.session.overlay_geometry.height - 230.0).abs() < 1e-4,
+        "height should stay ~230.0, got {}",
+        app.session.overlay_geometry.height
+    );
+
+    // Dragging past right edge of 150% secondary monitor (1920 + 2560 - 570 = 3910px = 2606.6667pt)
+    let _ = ctx.run(make_input(2800.0, 168.0), |ctx| {
+        let _ = app.render_frame(ctx);
+    });
+    assert!(
+        (app.session.overlay_geometry.x - (3910.0 / 1.5)).abs() < 0.1,
+        "dragging past right edge on 150%-DPI secondary monitor must clamp to physical max_x / 1.5, got {}",
+        app.session.overlay_geometry.x
+    );
+}
+
+#[test]
+fn live_overlay_viewport_geometry_honors_effective_scale_with_native_dpi_and_app_zoom() {
+    use truesight_adapters::vision::{BoundedVisionWorker, RgbFrame, ScreenFrameSource};
+    use truesight_core::ports::PortError;
+
+    // Physical Dota capture strip on secondary 150%-DPI monitor (origin 1920, 0):
+    // physical rect = (2160, 180, 1600, 72) -> y = 180..252 physical px.
+    struct SecondaryMonitorZoomedDotaSource;
+    impl ScreenFrameSource for SecondaryMonitorZoomedDotaSource {
+        fn capture_frame(&mut self) -> Result<Option<RgbFrame>, PortError> {
+            Ok(Some(
+                RgbFrame::with_source_height(1600, 72, 1440, vec![0; 1600 * 72 * 3])
+                    .with_capture_strip_rect((2160.0, 180.0, 1600.0, 72.0)),
+            ))
+        }
+    }
+
+    let worker = BoundedVisionWorker::spawn_with_source(SecondaryMonitorZoomedDotaSource)
+        .expect("vision worker must spawn");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while worker.capture_strip_rect().is_none() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(
+        worker.capture_strip_rect(),
+        Some((2160.0, 180.0, 1600.0, 72.0))
+    );
+
+    let mut session = AppSession::new().unwrap();
+    session.overlay_mode = true;
+    // Mixed-DPI desktop: 100% primary (1920x1080 at 0,0) + 150% secondary (2560x1440 at 1920,0) in physical pixels.
+    session.set_known_monitors(vec![
+        crate::session::MonitorRect::new(0.0, 0.0, 1920.0, 1080.0),
+        crate::session::MonitorRect::new(1920.0, 0.0, 2560.0, 1440.0),
+    ]);
+    // With native_pixels_per_point = 1.5 and app zoom_factor = 1.2, effective ppp = 1.8.
+    // Logical (1200, 100, 380, 230) -> physical (2160, 180, 684, 414) on secondary monitor.
+    // Using raw native 1.5 instead of effective 1.8 would map x=1200 to 1800px (wrong primary monitor!).
+    session.overlay_geometry = crate::session::OverlayGeometry {
+        x: 1200.0,
+        y: 100.0,
+        width: 380.0,
+        height: 230.0,
+        click_through: false,
+    };
+
+    let mut app = TrueSightGuiApp::new(session, None, Some(worker));
+    let ctx = egui::Context::default();
+    ctx.set_zoom_factor(1.2);
+    // `Context::set_zoom_factor` takes effect at the end of a pass for the following pass.
+    let _ = ctx.run(egui::RawInput::default(), |_| {});
+    assert!((ctx.zoom_factor() - 1.2).abs() < 1e-5);
+    let overlay_id = egui::ViewportId::from_hash_of("truesight_compact_overlay");
+
+    let make_input = |x_pts: f32, y_pts: f32| {
+        let effective_ppp = 1.5 * 1.2;
+        let vp_info = egui::ViewportInfo {
+            native_pixels_per_point: Some(1.5),
+            monitor_size: Some(egui::vec2(2560.0 / effective_ppp, 1440.0 / effective_ppp)),
+            outer_rect: Some(egui::Rect::from_min_size(
+                pos2(x_pts, y_pts),
+                egui::vec2(380.0, 230.0),
+            )),
+            inner_rect: Some(egui::Rect::from_min_size(
+                pos2(x_pts, y_pts),
+                egui::vec2(380.0, 230.0),
+            )),
+            ..Default::default()
+        };
+        let mut raw_input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                pos2(0.0, 0.0),
+                egui::vec2(1280.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        raw_input
+            .viewports
+            .insert(egui::ViewportId::ROOT, vp_info.clone());
+        raw_input.viewports.insert(overlay_id, vp_info);
+        raw_input
+    };
+
+    let _ = ctx.run(make_input(1200.0, 100.0), |ctx| {
+        let _ = app.render_frame(ctx);
+    });
+
+    assert!(
+        (app.session.overlay_geometry.x - 1200.0).abs() < 0.1,
+        "150%-DPI + 1.2x zoom overlay at physical x=2160 (1200pt) must stay on secondary monitor, got {}",
+        app.session.overlay_geometry.x
+    );
+    assert!(
+        (app.session.overlay_geometry.y - (252.0 / 1.8)).abs() < 0.1,
+        "150%-DPI + 1.2x zoom overlay overlapping physical strip (y=180..252) must be pushed to physical y=252 (140pt), got {}",
+        app.session.overlay_geometry.y
+    );
+    assert!(
+        (app.session.overlay_geometry.width - 380.0).abs() < 1e-4,
+        "width should stay ~380.0, got {}",
+        app.session.overlay_geometry.width
+    );
+    assert!(
+        (app.session.overlay_geometry.height - 230.0).abs() < 1e-4,
+        "height should stay ~230.0, got {}",
+        app.session.overlay_geometry.height
+    );
+
+    // Dragging past right edge of 150% secondary monitor with 1.2x zoom:
+    // physical max_x = 1920 + 2560 - (380 * 1.8) = 4480 - 684 = 3796px -> 3796 / 1.8 = 2108.8889pt.
+    let _ = ctx.run(make_input(2500.0, 140.0), |ctx| {
+        let _ = app.render_frame(ctx);
+    });
+    assert!(
+        (app.session.overlay_geometry.x - (3796.0 / 1.8)).abs() < 0.1,
+        "dragging past right edge on 150%-DPI + 1.2x zoom secondary monitor must clamp to physical max_x / 1.8, got {}",
+        app.session.overlay_geometry.x
+    );
+}

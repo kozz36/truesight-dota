@@ -110,6 +110,7 @@ pub struct VisionCaptureAdapter<S: ScreenFrameSource> {
     last_dire: [Option<HeroId>; 5],
     pending_radiant: [Option<(HeroId, u8)>; 5],
     pending_dire: [Option<(HeroId, u8)>; 5],
+    last_capture_strip_rect: Option<(f32, f32, f32, f32)>,
 }
 
 impl<S: ScreenFrameSource> VisionCaptureAdapter<S> {
@@ -125,6 +126,7 @@ impl<S: ScreenFrameSource> VisionCaptureAdapter<S> {
             last_dire: [None; 5],
             pending_radiant: [None; 5],
             pending_dire: [None; 5],
+            last_capture_strip_rect: None,
         }
     }
 
@@ -146,6 +148,11 @@ impl<S: ScreenFrameSource> VisionCaptureAdapter<S> {
         self.capture_mode = mode;
     }
 
+    /// Returns the desktop-coordinate top-bar capture strip rectangle from the latest frame.
+    pub fn last_capture_strip_rect(&self) -> Option<(f32, f32, f32, f32)> {
+        self.last_capture_strip_rect
+    }
+
     /// Clears cached per-slot state so stationary portraits re-emit on the next poll.
     pub fn reset_state(&mut self) {
         self.replay_radiant = [false; 5];
@@ -154,6 +161,7 @@ impl<S: ScreenFrameSource> VisionCaptureAdapter<S> {
         self.last_dire = [None; 5];
         self.pending_radiant = [None; 5];
         self.pending_dire = [None; 5];
+        self.last_capture_strip_rect = None;
     }
 
     fn evaluate_side_slots(
@@ -322,19 +330,23 @@ impl<S: ScreenFrameSource> VisionCaptureAdapter<S> {
     ) -> Result<(Option<FrameCandidates>, CaptureRuntimeHealth), PortError> {
         if self.capture_mode == VisionCaptureMode::Suppressed {
             self.clear_pending_slots();
+            self.last_capture_strip_rect = None;
             return Ok((None, CaptureRuntimeHealth::Suppressed));
         }
         let frame = match self.source.capture_frame() {
             Ok(Some(frame)) => frame,
             Ok(None) => {
                 self.clear_pending_slots();
+                self.last_capture_strip_rect = None;
                 return Ok((None, CaptureRuntimeHealth::WaitingForGame));
             }
             Err(err) => {
                 self.clear_pending_slots();
+                self.last_capture_strip_rect = None;
                 return Err(err);
             }
         };
+        self.last_capture_strip_rect = frame.capture_strip_rect;
 
         let virtual_h = frame.source_height.unwrap_or_else(|| {
             if frame.height * 4 < frame.width {
@@ -417,11 +429,14 @@ struct VisionControl {
     pending_reset: Option<VisionReset>,
 }
 
+type SharedCaptureStripRect = Arc<Mutex<Option<(f32, f32, f32, f32)>>>;
+
 /// Bounded background worker polling Dota 2 top-bar frames at ~1 Hz.
 pub struct BoundedVisionWorker {
     queue: Arc<BoundedDraftQueue>,
     control: Arc<Mutex<VisionControl>>,
     runtime_health: Arc<Mutex<CaptureRuntimeHealth>>,
+    capture_strip_rect: SharedCaptureStripRect,
     shutdown: Arc<AtomicBool>,
     shutdown_sync: Arc<(Mutex<bool>, Condvar)>,
     worker: Option<JoinHandle<()>>,
@@ -451,10 +466,12 @@ impl BoundedVisionWorker {
             pending_reset: None,
         }));
         let runtime_health = Arc::new(Mutex::new(CaptureRuntimeHealth::WaitingForGame));
+        let capture_strip_rect = Arc::new(Mutex::new(None));
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_sync = Arc::new((Mutex::new(false), Condvar::new()));
         let control_ref = Arc::clone(&control);
         let health_ref = Arc::clone(&runtime_health);
+        let strip_ref = Arc::clone(&capture_strip_rect);
         let shutdown_ref = Arc::clone(&shutdown);
         let sync_ref = Arc::clone(&shutdown_sync);
 
@@ -467,6 +484,7 @@ impl BoundedVisionWorker {
                     queue_ref,
                     control_ref,
                     health_ref,
+                    strip_ref,
                     shutdown_ref,
                     sync_ref,
                 )
@@ -477,6 +495,7 @@ impl BoundedVisionWorker {
             queue,
             control,
             runtime_health,
+            capture_strip_rect,
             shutdown,
             shutdown_sync,
             worker: Some(worker),
@@ -489,6 +508,14 @@ impl BoundedVisionWorker {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    /// Returns the most recent Dota 2 top-bar capture strip rectangle `(x, y, w, h)` in desktop coordinates.
+    pub fn capture_strip_rect(&self) -> Option<(f32, f32, f32, f32)> {
+        *self
+            .capture_strip_rect
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     /// Invalidates queued and in-flight relative-side picks when the user's faction changes.
@@ -584,6 +611,7 @@ fn run_vision_loop<S: ScreenFrameSource>(
     queue: Arc<BoundedDraftQueue>,
     control: Arc<Mutex<VisionControl>>,
     runtime_health: Arc<Mutex<CaptureRuntimeHealth>>,
+    capture_strip_rect: SharedCaptureStripRect,
     shutdown: Arc<AtomicBool>,
     shutdown_sync: Arc<(Mutex<bool>, Condvar)>,
 ) {
@@ -631,10 +659,21 @@ fn run_vision_loop<S: ScreenFrameSource>(
                 Err(err) => CaptureRuntimeHealth::CaptureError(err.to_string()),
             }
         };
+        let next_strip = if next_health == CaptureRuntimeHealth::Suppressed {
+            None
+        } else {
+            adapter.last_capture_strip_rect()
+        };
         {
             let mut guard = runtime_health.lock().unwrap_or_else(|e| e.into_inner());
             if *guard != next_health {
                 *guard = next_health;
+            }
+        }
+        {
+            let mut guard = capture_strip_rect.lock().unwrap_or_else(|e| e.into_inner());
+            if *guard != next_strip {
+                *guard = next_strip;
             }
         }
 
