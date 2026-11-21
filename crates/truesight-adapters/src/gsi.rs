@@ -939,6 +939,7 @@ fn run_accept_loop(
 }
 
 fn handle_gsi_connection(mut stream: TcpStream, queue: &BoundedDraftQueue) {
+    let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
     let _ = stream.set_write_timeout(Some(Duration::from_millis(250)));
 
@@ -946,6 +947,7 @@ fn handle_gsi_connection(mut stream: TcpStream, queue: &BoundedDraftQueue) {
     let mut chunk = [0_u8; 4096];
     let mut header_end: Option<usize> = None;
     let mut expected_total: Option<usize> = None;
+    let deadline = std::time::Instant::now() + Duration::from_millis(250);
 
     loop {
         let cap = expected_total.unwrap_or(MAX_GSI_HEADER_BYTES + MAX_GSI_PAYLOAD_BYTES);
@@ -987,6 +989,13 @@ fn handle_gsi_connection(mut stream: TcpStream, queue: &BoundedDraftQueue) {
                         break;
                     }
                 }
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(ref e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    && std::time::Instant::now() < deadline =>
+            {
+                thread::sleep(Duration::from_millis(5));
             }
             Err(_) => break,
         }

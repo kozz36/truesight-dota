@@ -5754,3 +5754,44 @@ fn bounded_vision_worker_propagates_and_clears_capture_strip_rect() {
     std::thread::sleep(Duration::from_millis(100));
     assert_eq!(worker.capture_strip_rect(), None);
 }
+
+#[test]
+fn bounded_gsi_listener_waits_for_fragmented_body_after_connect_on_blocking_stream() {
+    use std::io::Read;
+
+    let mut listener = BoundedGsiListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr();
+    let body = r#"{"map":{"game_state":"DOTA_GAMERULES_STATE_HERO_SELECTION","clock_time":-15}}"#;
+    let headers = format!(
+        "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+
+    let mut stream = TcpStream::connect(addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+    // Simulate a bursty/delayed client on Windows where accept() completes before the payload arrives
+    thread::sleep(Duration::from_millis(45));
+    stream.write_all(headers.as_bytes()).unwrap();
+    stream.flush().unwrap();
+    thread::sleep(Duration::from_millis(45));
+    stream.write_all(body.as_bytes()).unwrap();
+    stream.flush().unwrap();
+
+    let mut resp = String::new();
+    let _ = stream.read_to_string(&mut resp);
+    assert!(
+        resp.starts_with("HTTP/1.1 200"),
+        "Fragmented/delayed POST must receive 200 OK instead of premature WouldBlock 400: {resp}"
+    );
+
+    let events = listener.poll_events().unwrap();
+    assert_eq!(
+        events,
+        vec![DraftEvent::GameRulesStateChanged {
+            state_name: "DOTA_GAMERULES_STATE_HERO_SELECTION".into(),
+            game_time_secs: -15,
+        }]
+    );
+}
