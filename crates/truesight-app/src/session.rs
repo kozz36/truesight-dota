@@ -1,12 +1,12 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
     mpsc::{self, Receiver, TryRecvError},
 };
 use truesight_adapters::gsi::BoundedGsiListener;
 use truesight_adapters::sync::{
-    BracketConfig, LocalCacheManager, config_file_path, load_app_config, load_app_config_from,
-    save_bracket_config_to,
+    AccountLinkConfig, BracketConfig, LocalCacheManager, config_file_path, load_app_config,
+    load_app_config_from, normalize_steam32_id, save_account_config_to, save_bracket_config_to,
 };
 use truesight_adapters::vision::{BoundedVisionWorker, CaptureAvailability, VisionCaptureMode};
 use truesight_core::domain::{
@@ -57,6 +57,10 @@ pub struct AppSession {
     vision_reset_pending: bool,
     vision_slots: [[Option<HeroId>; TEAM_SIZE]; 2],
     vision_owned: Vec<(Side, HeroId)>,
+    pub onboarding_dismissed: bool,
+    pub stratz_api_token: Option<String>,
+    pub stratz_token_exp: Option<u64>,
+    pub pending_stratz_steam32_link: Option<u64>,
 }
 
 impl Drop for AppSession {
@@ -124,7 +128,7 @@ impl AppSession {
     }
 
     fn from_cache_and_config(
-        cache_mgr: LocalCacheManager,
+        mut cache_mgr: LocalCacheManager,
         read_config_path: Option<PathBuf>,
         write_config_path: Option<PathBuf>,
     ) -> Result<Self, String> {
@@ -142,7 +146,19 @@ impl AppSession {
         let matrix = repo
             .load_matrix(initial_bracket)
             .map_err(|e| e.to_string())?;
-        let db_status = cache_mgr.freshness_badge(LocalCacheManager::now_unix());
+        let ui_cfg = read_config_path
+            .as_deref()
+            .and_then(Path::parent)
+            .map(load_ui_config_from_dir)
+            .unwrap_or_default();
+        let now = LocalCacheManager::now_unix();
+        let resolved_exp =
+            resolve_stratz_exp(ui_cfg.stratz_api_token.as_deref(), ui_cfg.stratz_token_exp);
+        if !is_stratz_exp_expired(resolved_exp, now) {
+            cache_mgr.stratz_api_token = ui_cfg.stratz_api_token.clone();
+            cache_mgr.stratz_token_exp = resolved_exp;
+        }
+        let db_status = cache_mgr.freshness_badge(now);
         Ok(Self {
             draft: DraftState {
                 bracket: initial_bracket,
@@ -177,12 +193,36 @@ impl AppSession {
             vision_reset_pending: false,
             vision_slots: [[None; TEAM_SIZE]; 2],
             vision_owned: Vec::new(),
+            onboarding_dismissed: ui_cfg.onboarding_dismissed,
+            stratz_api_token: ui_cfg.stratz_api_token,
+            stratz_token_exp: resolved_exp,
+            pending_stratz_steam32_link: None,
         })
     }
 
-    /// Enables saving manual bracket changes to the OS `config.toml` path for interactive runs.
+    /// Enables saving manual bracket and UI config changes to the OS config directory.
     pub fn enable_default_config_persistence(&mut self) {
-        self.config_path = Some(config_file_path());
+        self.enable_config_persistence_for_path(config_file_path());
+    }
+
+    pub(crate) fn enable_config_persistence_for_path(&mut self, cfg_path: PathBuf) {
+        if let Some(dir) = cfg_path.parent() {
+            let ui_cfg = load_ui_config_from_dir(dir);
+            let now = LocalCacheManager::now_unix();
+            let resolved_exp =
+                resolve_stratz_exp(ui_cfg.stratz_api_token.as_deref(), ui_cfg.stratz_token_exp);
+            self.onboarding_dismissed = ui_cfg.onboarding_dismissed;
+            self.stratz_api_token = ui_cfg.stratz_api_token;
+            self.stratz_token_exp = resolved_exp;
+            if is_stratz_exp_expired(resolved_exp, now) {
+                self.cache_mgr.stratz_api_token = None;
+                self.cache_mgr.stratz_token_exp = None;
+            } else {
+                self.cache_mgr.stratz_api_token = self.stratz_api_token.clone();
+                self.cache_mgr.stratz_token_exp = resolved_exp;
+            }
+        }
+        self.config_path = Some(cfg_path);
     }
 
     #[cfg(test)]
@@ -1057,4 +1097,320 @@ impl AppSession {
         let recs = recommend_heroes(&self.draft, &self.matrix, &self.weights, 6);
         (analysis, recs)
     }
+
+    fn persist_ui_config(&mut self) -> Result<(), String> {
+        if let Some(dir) = self.config_path.as_deref().and_then(Path::parent) {
+            let cfg = UiConfig {
+                onboarding_dismissed: self.onboarding_dismissed,
+                stratz_api_token: self.stratz_api_token.clone(),
+                stratz_token_exp: self.stratz_token_exp,
+            };
+            if let Err(err) = save_ui_config_to_dir(dir, &cfg) {
+                self.last_sync_notice = Some(format!(
+                    "Warning: failed to save ui_config.toml ({err}); changes apply to this session only."
+                ));
+                return Err(err);
+            }
+        }
+        Ok(())
+    }
+
+    /// Persists the onboarding dismissal preference when config persistence is enabled.
+    pub fn set_onboarding_dismissed(&mut self, dismissed: bool) -> Result<(), String> {
+        self.onboarding_dismissed = dismissed;
+        self.persist_ui_config()
+    }
+
+    /// Returns whole days remaining before the persisted STRATZ token expires at `now_unix_secs`,
+    /// or `None` when no token is set or the token is already expired.
+    pub fn stratz_token_days_remaining_at(&self, now_unix_secs: u64) -> Option<u32> {
+        self.stratz_api_token.as_ref()?;
+        let exp = resolve_stratz_exp(self.stratz_api_token.as_deref(), self.stratz_token_exp)?;
+        if exp > now_unix_secs {
+            Some(((exp - now_unix_secs) / 86_400) as u32)
+        } else {
+            None
+        }
+    }
+
+    /// Returns `true` when a STRATZ token is present and its expiry timestamp has passed.
+    pub fn is_stratz_token_expired_at(&self, now_unix_secs: u64) -> bool {
+        if self.stratz_api_token.is_none() {
+            return false;
+        }
+        let exp = resolve_stratz_exp(self.stratz_api_token.as_deref(), self.stratz_token_exp);
+        is_stratz_exp_expired(exp, now_unix_secs)
+    }
+
+    /// Validates a STRATZ JWT, persists it privately, wires it into `LocalCacheManager`,
+    /// and links `SteamId` when no different explicit Steam account is already configured.
+    pub fn apply_stratz_token(
+        &mut self,
+        token: &str,
+        now_unix_secs: u64,
+    ) -> Result<StratzTokenInfo, String> {
+        let info = parse_stratz_jwt_claims(token, now_unix_secs)?;
+        let cleaned = token.trim().to_string();
+        self.stratz_api_token = Some(cleaned.clone());
+        self.cache_mgr.stratz_api_token = Some(cleaned);
+        self.stratz_token_exp = Some(info.exp);
+        self.cache_mgr.stratz_token_exp = Some(info.exp);
+        let _ = self.persist_ui_config();
+        if let Some(steam32) = info.steam32_id {
+            let has_different_explicit = self.cache_mgr.explicit_override
+                && self
+                    .cache_mgr
+                    .player_account_id
+                    .is_some_and(|existing| existing != steam32);
+            if has_different_explicit {
+                self.pending_stratz_steam32_link = Some(steam32);
+            } else {
+                self.pending_stratz_steam32_link = None;
+                self.set_account_id(Some(steam32), true);
+                if let Some(path) = self.config_path.as_deref() {
+                    let _ = save_account_config_to(path, AccountLinkConfig::Explicit(steam32));
+                }
+            }
+        } else {
+            self.pending_stratz_steam32_link = None;
+        }
+        Ok(info)
+    }
+
+    /// Confirms replacing the current Steam account with the pending STRATZ JWT `SteamId`.
+    pub fn confirm_pending_stratz_steam_link(&mut self) -> Option<u64> {
+        let steam32 = self.pending_stratz_steam32_link.take()?;
+        self.set_account_id(Some(steam32), true);
+        if let Some(path) = self.config_path.as_deref() {
+            let _ = save_account_config_to(path, AccountLinkConfig::Explicit(steam32));
+        }
+        Some(steam32)
+    }
+
+    /// Dismisses the pending STRATZ JWT `SteamId` prompt and keeps the current explicit account.
+    pub fn dismiss_pending_stratz_steam_link(&mut self) {
+        self.pending_stratz_steam32_link = None;
+    }
+}
+
+/// Decoded claims from a STRATZ GraphQL API JWT bearer token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StratzTokenInfo {
+    pub steam_id64: Option<u64>,
+    pub steam32_id: Option<u64>,
+    pub exp: u64,
+    pub iat: Option<u64>,
+    pub days_remaining: u32,
+}
+
+/// Persisted UI onboarding and STRATZ token state stored in `ui_config.toml`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct UiConfig {
+    pub onboarding_dismissed: bool,
+    pub stratz_api_token: Option<String>,
+    pub stratz_token_exp: Option<u64>,
+}
+
+fn resolve_stratz_exp(token: Option<&str>, explicit_exp: Option<u64>) -> Option<u64> {
+    explicit_exp.or_else(|| token.and_then(|t| parse_stratz_jwt_claims(t, 0).ok().map(|i| i.exp)))
+}
+
+fn is_stratz_exp_expired(exp: Option<u64>, now_unix_secs: u64) -> bool {
+    exp.is_some_and(|e| e <= now_unix_secs)
+}
+
+fn decode_base64url(input: &str) -> Result<Vec<u8>, String> {
+    let clean = input.trim_end_matches('=');
+    if clean.len() % 4 == 1 {
+        return Err("invalid base64url segment length".into());
+    }
+    let mut out = Vec::with_capacity((clean.len() * 3) / 4);
+    let mut buf: u32 = 0;
+    let mut bits: u8 = 0;
+    for byte in clean.bytes() {
+        let val: u32 = match byte {
+            b'A'..=b'Z' => u32::from(byte - b'A'),
+            b'a'..=b'z' => u32::from(byte - b'a') + 26,
+            b'0'..=b'9' => u32::from(byte - b'0') + 52,
+            b'-' | b'+' => 62,
+            b'_' | b'/' => 63,
+            _ => return Err("invalid base64url character".into()),
+        };
+        buf = (buf << 6) | val;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((buf >> bits) & 0xFF) as u8);
+        }
+    }
+    Ok(out)
+}
+
+fn find_json_field<'a>(json: &'a str, key: &str) -> Option<&'a str> {
+    let needle = format!("\"{key}\"");
+    let pos = json.find(&needle)?;
+    let rest = &json[pos + needle.len()..];
+    let colon = rest.find(':')?;
+    Some(rest[colon + 1..].trim_start())
+}
+
+fn extract_json_string(json: &str, key: &str) -> Option<String> {
+    let rest = find_json_field(json, key)?;
+    let inner = rest.strip_prefix('"')?;
+    let end = inner.find('"')?;
+    Some(inner[..end].to_string())
+}
+
+fn extract_json_u64(json: &str, key: &str) -> Option<u64> {
+    let rest = find_json_field(json, key)?;
+    if let Some(inner) = rest.strip_prefix('"') {
+        let end = inner.find('"')?;
+        return inner[..end].trim().parse::<u64>().ok();
+    }
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        None
+    } else {
+        digits.parse::<u64>().ok()
+    }
+}
+
+/// Decodes and validates a 3-segment STRATZ JWT payload in pure Rust without external crates.
+pub fn parse_stratz_jwt_claims(token: &str, now_unix_secs: u64) -> Result<StratzTokenInfo, String> {
+    let trimmed = token.trim();
+    let mut parts = trimmed.split('.');
+    let hdr = parts.next().unwrap_or("");
+    let payload_b64 = parts.next().unwrap_or("");
+    let sig = parts.next().unwrap_or("");
+    if hdr.is_empty() || payload_b64.is_empty() || sig.is_empty() || parts.next().is_some() {
+        return Err("STRATZ token must be a 3-segment JWT".into());
+    }
+
+    let payload_bytes = decode_base64url(payload_b64)?;
+    let payload = std::str::from_utf8(&payload_bytes)
+        .map_err(|_| "STRATZ JWT payload is not valid UTF-8".to_string())?;
+
+    let iss = extract_json_string(payload, "iss")
+        .ok_or_else(|| "STRATZ JWT missing 'iss' claim".to_string())?;
+    if !iss.contains("stratz.com") {
+        return Err("STRATZ JWT 'iss' claim must contain 'stratz.com'".into());
+    }
+
+    let exp = extract_json_u64(payload, "exp")
+        .ok_or_else(|| "STRATZ JWT missing numeric 'exp' claim".to_string())?;
+    if exp <= now_unix_secs {
+        return Err("STRATZ token is expired".into());
+    }
+    let iat = extract_json_u64(payload, "iat");
+    let steam_id64 = extract_json_u64(payload, "SteamId");
+    let steam32_id = steam_id64.and_then(normalize_steam32_id);
+    let days_remaining = ((exp - now_unix_secs) / 86_400) as u32;
+
+    Ok(StratzTokenInfo {
+        steam_id64,
+        steam32_id,
+        exp,
+        iat,
+        days_remaining,
+    })
+}
+
+/// Loads `ui_config.toml` from `config_dir` (returns defaults if missing or unreadable).
+pub fn load_ui_config_from_dir(config_dir: &Path) -> UiConfig {
+    let path = config_dir.join("ui_config.toml");
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return UiConfig::default();
+    };
+    let mut cfg = UiConfig::default();
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        let key = k.trim();
+        let val = v.trim();
+        match key {
+            "onboarding_dismissed" => cfg.onboarding_dismissed = val == "true",
+            "stratz_api_token" => {
+                let s = val.trim_matches('"').trim();
+                if !s.is_empty() {
+                    cfg.stratz_api_token = Some(s.to_string());
+                }
+            }
+            "stratz_token_exp" => {
+                cfg.stratz_token_exp = val.parse::<u64>().ok();
+            }
+            _ => {}
+        }
+    }
+    if cfg.stratz_token_exp.is_none() {
+        cfg.stratz_token_exp = resolve_stratz_exp(cfg.stratz_api_token.as_deref(), None);
+    }
+    cfg
+}
+
+/// Persists `ui_config.toml` atomically into `config_dir`, creating an owner-only (`0600`) file on Unix before writing.
+pub fn save_ui_config_to_dir(config_dir: &Path, cfg: &UiConfig) -> Result<(), String> {
+    use std::io::Write;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    std::fs::create_dir_all(config_dir).map_err(|e| e.to_string())?;
+    let target_path = config_dir.join("ui_config.toml");
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let tmp_path = config_dir.join(format!(
+        ".ui_config.toml.tmp.{}.{nanos}",
+        std::process::id()
+    ));
+
+    let mut body = format!("onboarding_dismissed = {}\n", cfg.onboarding_dismissed);
+    if let Some(token) = cfg.stratz_api_token.as_deref().filter(|t| !t.is_empty()) {
+        let escaped = token.replace('"', "");
+        body.push_str(&format!("stratz_api_token = \"{escaped}\"\n"));
+    }
+    if let Some(exp) = cfg.stratz_token_exp {
+        body.push_str(&format!("stratz_token_exp = {exp}\n"));
+    }
+
+    let write_res: Result<(), std::io::Error> = (|| {
+        #[cfg(unix)]
+        let mut file = {
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            let f = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp_path)?;
+            f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            f
+        };
+        #[cfg(not(unix))]
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp_path)?;
+
+        file.write_all(body.as_bytes())?;
+        file.flush()?;
+        file.sync_all()?;
+        Ok(())
+    })();
+
+    if let Err(err) = write_res {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(err.to_string());
+    }
+
+    if let Err(err) = std::fs::rename(&tmp_path, &target_path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(err.to_string());
+    }
+    Ok(())
 }

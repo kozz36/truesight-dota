@@ -65,6 +65,7 @@ quit                    # Exit session
 ## Documentation & Governance
 
 - [`AGENTS.md`](AGENTS.md) — Engineering, hexagonal architecture, statistical invariants, and Red-Green TDD testing policy.
+- [`docs/compliance.md`](docs/compliance.md) — Valve / Dota 2 compliance boundaries, 6 non-negotiable red lines, and tournament disclaimer.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — Local build prerequisites, TDD guidelines, privacy rules, and PR verification matrix.
 - [`SECURITY.md`](SECURITY.md) — Security architecture (`#![forbid(unsafe_code)]`, loopback GSI bounds) and vulnerability reporting process.
 - [`skills/truesight-dota-domain/SKILL.md`](skills/truesight-dota-domain/SKILL.md) — Product domain skill and invariant reference for AI agents and contributors.
@@ -78,3 +79,4 @@ quit                    # Exit session
 - Source code in this repository is licensed under the [Apache License, Version 2.0](LICENSE) (`Apache-2.0`).
 - **Third-Party Game Assets**: Embedded hero portrait textures and icons ([`hero_atlas.bin`](crates/truesight-adapters/assets/hero_atlas.bin): 127 base `64x36` portraits + Gem icon; [`hero_alt_atlas.bin`](crates/truesight-adapters/assets/hero_alt_atlas.bin): 49 VPK Arcana & Persona portraits across 30 heroes), the Gem artwork, and Dota 2 hero names/identifiers/GSI schema are the intellectual property of **Valve Corporation** and are **not** covered by the repository's `Apache-2.0` license. TrueSight Dota is an independent open-source project and is not affiliated with or endorsed by Valve Corporation (see [`docs/platforms-and-assets.md`](docs/platforms-and-assets.md)).
 - **Third-Party Matchup Data**: Embedded and synced hero matchup/player statistics are sourced from the public **OpenDota** API (and optionally **STRATZ** GraphQL API when `STRATZ_API_TOKEN` is configured by the user).
+- **Fair Play & Tournament Disclaimer**: TrueSight Dota is a read-only external draft companion using official local-player GSI, visible top-bar hero portraits, and public aggregate stats (no memory reading, no enemy profile lookup, no input automation). See [`docs/compliance.md`](docs/compliance.md) for the full Valve compliance policy; do not use in competitive tournaments or leagues unless explicitly permitted by the organizer.

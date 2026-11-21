@@ -51,6 +51,7 @@ Every change to `truesight-core::math` or `truesight-adapters` MUST preserve the
 - [ ] **Dual Feature Matrix**: Both `cargo test --workspace --all-features` (GUI + CLI) and `cargo test --workspace --no-default-features` (headless zero-dependency CLI) pass.
 - [ ] **Desktop Binary Installation**: When updating `truesight-app` or embedded snapshots, install the release binary atomically via `install -m 755 target/release/truesight-dota ~/.local/bin/truesight-dota` (never raw `cp`, which fails with `Text file busy` if the GUI is running).
 - [ ] **Conventional Commits**: Commit reviewable work units (`feat:`, `fix:`, `docs:`, `test:`) without AI attribution footers.
+- [ ] **Valve / Dota 2 Compliance Gate**: Every new feature or adapter change MUST be checked against [`docs/compliance.md`](docs/compliance.md) (no enemy profile/history lookup during draft, no memory/DLL/graphics hooks, no input automation, no hidden-state OCR).
 
 ---
 

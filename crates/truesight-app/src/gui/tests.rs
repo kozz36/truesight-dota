@@ -1269,3 +1269,286 @@ fn suggested_vs_enemies_cells_align_and_pick_column_follows_row_stripes() {
         }
     }
 }
+
+#[test]
+fn top_bar_renders_compact_vector_gear_and_info_button_without_overlap() {
+    let mut app = TrueSightGuiApp::new(AppSession::new().unwrap(), None, None);
+    app.onboarding_open = false;
+    app.onboarding_dismissed = true;
+    let ctx = egui::Context::default();
+
+    for viewport in [vec2(960.0, 680.0), vec2(1180.0, 700.0)] {
+        let r = render_at_viewport(&mut app, &ctx, viewport);
+        assert!(
+            (38.0..=44.0).contains(&r.options_button.width()),
+            "viewport={viewport:?} gear button width must be compact (38..44px), got {}",
+            r.options_button.width()
+        );
+        assert!(
+            (20.0..=24.0).contains(&r.info_button.width()),
+            "viewport={viewport:?} info button width must be ~22px, got {}",
+            r.info_button.width()
+        );
+        assert!(r.top_bar.contains_rect(r.options_button));
+        assert!(r.top_bar.contains_rect(r.info_button));
+        assert!(!r.options_button.intersects(r.info_button));
+        assert!(!r.info_button.intersects(r.reset_button));
+        assert!(!r.info_button.intersects(r.bracket_bar));
+    }
+
+    let viewport = vec2(1180.0, 700.0);
+    let r = render_at_viewport(&mut app, &ctx, viewport);
+    let click_pos = r.info_button.center();
+    app.onboarding_step = 2;
+    for pressed in [true, false] {
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), viewport)),
+            events: vec![
+                egui::Event::PointerMoved(click_pos),
+                egui::Event::PointerButton {
+                    pos: click_pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            app.render_frame(ctx);
+        });
+    }
+    assert!(
+        app.onboarding_open,
+        "clicking top-bar `i` button must reopen onboarding guide even after dismissal"
+    );
+    assert_eq!(app.onboarding_step, 0);
+}
+
+#[test]
+fn onboarding_guide_navigates_steps_and_handles_clipboard_stratz_token() {
+    let mut app = TrueSightGuiApp::new(AppSession::new().unwrap(), None, None);
+    app.onboarding_open = true;
+    app.onboarding_step = 0;
+    let ctx = egui::Context::default();
+    let r = render_at_viewport(&mut app, &ctx, vec2(1180.0, 700.0));
+    assert!(
+        r.onboarding_window.is_some(),
+        "onboarding guide window must render when onboarding_open is true"
+    );
+
+    // Simulate active 90s clipboard watcher detecting a valid STRATZ JWT
+    let now = 1_700_000_000_u64;
+    app.stratz_clipboard_watch_until = Some(now + 90);
+    let exp = now + 365 * 86_400;
+    let payload = format!(
+        r#"{{"iss":"https://api.stratz.com","SteamId":"76561198087521469","iat":{now},"exp":{exp}}}"#
+    );
+    let hdr_b64 = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9";
+    let pay_b64 = encode_b64url_for_test(payload.as_bytes());
+    let jwt = format!("{hdr_b64}.{pay_b64}.c2ln");
+
+    assert!(app.process_stratz_clipboard_text(&jwt, now));
+    assert!(app.stratz_clipboard_watch_until.is_none());
+    assert_eq!(app.session.cache_mgr.player_account_id, Some(127_255_741));
+    assert!(
+        app.status_banner
+            .contains("STRATZ token connected (365d remaining)"),
+        "unexpected status_banner: {}",
+        app.status_banner
+    );
+}
+
+#[test]
+fn pending_stratz_steam_link_preserves_explicit_account_in_gui_until_confirmed() {
+    let mut session = AppSession::new().unwrap();
+    session.set_account_id(Some(111_222_333), true);
+    let mut app = TrueSightGuiApp::new(session, None, None);
+    app.onboarding_open = true;
+    app.onboarding_step = 2;
+
+    let now = truesight_adapters::sync::LocalCacheManager::now_unix();
+    let exp = now + 365 * 86_400;
+    let payload = format!(
+        r#"{{"iss":"https://api.stratz.com","SteamId":"76561198087521469","iat":{now},"exp":{exp}}}"#
+    );
+    let hdr_b64 = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9";
+    let pay_b64 = encode_b64url_for_test(payload.as_bytes());
+    let jwt = format!("{hdr_b64}.{pay_b64}.c2ln");
+
+    assert!(app.apply_stratz_token_ui(&jwt, now));
+    assert_eq!(app.session.cache_mgr.player_account_id, Some(111_222_333));
+    assert_eq!(app.session.pending_stratz_steam32_link, Some(127_255_741));
+
+    let ctx = egui::Context::default();
+    let r = render_at_viewport(&mut app, &ctx, vec2(1180.0, 700.0));
+    assert!(r.onboarding_window.is_some());
+}
+
+#[test]
+fn connect_stratz_ignores_initial_clipboard_baseline_until_new_token_copied() {
+    let mut app = TrueSightGuiApp::new(AppSession::new().unwrap(), None, None);
+    let now = truesight_adapters::sync::LocalCacheManager::now_unix();
+    let exp = now + 365 * 86_400;
+    let hdr_b64 = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9";
+
+    let payload_a = format!(
+        r#"{{"iss":"https://api.stratz.com","SteamId":"76561198087521469","iat":{now},"exp":{exp}}}"#
+    );
+    let token_a = format!(
+        "{hdr_b64}.{}.c2ln",
+        encode_b64url_for_test(payload_a.as_bytes())
+    );
+
+    let payload_b = format!(
+        r#"{{"iss":"https://api.stratz.com","SteamId":"76561198087521470","iat":{now},"exp":{exp}}}"#
+    );
+    let token_b = format!(
+        "{hdr_b64}.{}.c2ln",
+        encode_b64url_for_test(payload_b.as_bytes())
+    );
+
+    // Pre-existing valid token_a on the clipboard before clicking CONNECT STRATZ.
+    app.test_clipboard_override = Some(token_a.clone());
+    app.start_stratz_clipboard_watch(now);
+    app.poll_stratz_clipboard_watcher();
+
+    assert!(
+        app.is_watching_stratz_clipboard(now),
+        "watcher must stay active when clipboard still holds the initial baseline token"
+    );
+    assert_eq!(
+        app.session.stratz_api_token, None,
+        "initial baseline token_a must NOT be applied"
+    );
+
+    // User later copies a new valid token_b onto the clipboard.
+    app.test_clipboard_override = Some(token_b.clone());
+    app.poll_stratz_clipboard_watcher();
+
+    assert!(
+        !app.is_watching_stratz_clipboard(now),
+        "watcher must stop after applying new token_b"
+    );
+    assert_eq!(
+        app.session.stratz_api_token.as_deref(),
+        Some(token_b.as_str()),
+        "new token_b must be applied once clipboard changes from baseline"
+    );
+}
+
+#[test]
+fn paste_stratz_token_reads_current_clipboard_not_stale_snapshot() {
+    let mut app = TrueSightGuiApp::new(AppSession::new().unwrap(), None, None);
+    let now = truesight_adapters::sync::LocalCacheManager::now_unix();
+    let exp = now + 365 * 86_400;
+    let hdr_b64 = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9";
+
+    let payload_c = format!(
+        r#"{{"iss":"https://api.stratz.com","SteamId":"76561198087521471","iat":{now},"exp":{exp}}}"#
+    );
+    let token_c = format!(
+        "{hdr_b64}.{}.c2ln",
+        encode_b64url_for_test(payload_c.as_bytes())
+    );
+
+    // Even with no watcher active, clicking PASTE TOKEN reads the current clipboard value.
+    app.test_clipboard_override = Some(token_c.clone());
+    app.try_paste_stratz_token();
+
+    assert_eq!(
+        app.session.stratz_api_token.as_deref(),
+        Some(token_c.as_str()),
+        "PASTE TOKEN must apply the current clipboard token_c"
+    );
+    assert!(!app.stratz_paste_open);
+
+    // Simulate a subsequent clipboard change to token_d and click PASTE TOKEN again.
+    let payload_d = format!(
+        r#"{{"iss":"https://api.stratz.com","SteamId":"76561198087521472","iat":{now},"exp":{exp}}}"#
+    );
+    let token_d = format!(
+        "{hdr_b64}.{}.c2ln",
+        encode_b64url_for_test(payload_d.as_bytes())
+    );
+    app.test_clipboard_override = Some(token_d.clone());
+    app.try_paste_stratz_token();
+
+    assert_eq!(
+        app.session.stratz_api_token.as_deref(),
+        Some(token_d.as_str()),
+        "PASTE TOKEN must read fresh clipboard value token_d instead of any stale snapshot"
+    );
+}
+
+#[test]
+fn clipboard_watcher_retries_delivery_when_single_slot_queue_is_full() {
+    use std::sync::mpsc;
+
+    let (tx, rx) = mpsc::sync_channel::<String>(1);
+    let mut last_seen: Option<String> = Some("baseline_text".into());
+
+    // First sample fills the 1-slot channel.
+    assert!(
+        super::onboarding::try_deliver_clipboard_sample(
+            &tx,
+            &mut last_seen,
+            "unrelated_copied_url".into()
+        ),
+        "first sample should enter the empty 1-slot queue"
+    );
+    assert_eq!(last_seen.as_deref(), Some("unrelated_copied_url"));
+
+    // Second sample (the new STRATZ token) arrives while the 1-slot queue is still full.
+    let now = truesight_adapters::sync::LocalCacheManager::now_unix();
+    let exp = now + 365 * 86_400;
+    let hdr_b64 = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9";
+    let payload = format!(
+        r#"{{"iss":"https://api.stratz.com","SteamId":"76561198087521479","iat":{now},"exp":{exp}}}"#
+    );
+    let token = format!(
+        "{hdr_b64}.{}.c2ln",
+        encode_b64url_for_test(payload.as_bytes())
+    );
+
+    assert!(
+        !super::onboarding::try_deliver_clipboard_sample(&tx, &mut last_seen, token.clone()),
+        "send must report full queue without advancing last_seen"
+    );
+    assert_eq!(
+        last_seen.as_deref(),
+        Some("unrelated_copied_url"),
+        "last_seen must NOT advance when try_send fails on a full queue"
+    );
+
+    // Consumer drains the first sample; next watcher poll retries the same clipboard token and succeeds.
+    assert_eq!(rx.try_recv().ok().as_deref(), Some("unrelated_copied_url"));
+    assert!(
+        super::onboarding::try_deliver_clipboard_sample(&tx, &mut last_seen, token.clone()),
+        "watcher must retry and deliver the token once the queue slot frees up"
+    );
+    assert_eq!(last_seen.as_deref(), Some(token.as_str()));
+    assert_eq!(rx.try_recv().ok().as_deref(), Some(token.as_str()));
+}
+
+fn encode_b64url_for_test(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::new();
+    let mut i = 0;
+    while i < input.len() {
+        let b0 = input[i];
+        let b1 = if i + 1 < input.len() { input[i + 1] } else { 0 };
+        let b2 = if i + 2 < input.len() { input[i + 2] } else { 0 };
+        let triple = (u32::from(b0) << 16) | (u32::from(b1) << 8) | u32::from(b2);
+        out.push(TABLE[((triple >> 18) & 0x3F) as usize] as char);
+        out.push(TABLE[((triple >> 12) & 0x3F) as usize] as char);
+        if i + 1 < input.len() {
+            out.push(TABLE[((triple >> 6) & 0x3F) as usize] as char);
+        }
+        if i + 2 < input.len() {
+            out.push(TABLE[(triple & 0x3F) as usize] as char);
+        }
+        i += 3;
+    }
+    out
+}

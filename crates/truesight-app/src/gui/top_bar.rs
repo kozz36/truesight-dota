@@ -11,6 +11,7 @@ const TOP_BTN_H: f32 = 22.0;
 pub(super) struct TopBarRenderOutput {
     pub(super) bar: Rect,
     pub(super) options_button: Rect,
+    pub(super) info_button: Rect,
     pub(super) reset_button: Rect,
     pub(super) bracket_bar: Rect,
 }
@@ -145,7 +146,7 @@ impl TrueSightGuiApp {
     fn render_options_button(&mut self, ui: &mut egui::Ui, compact: bool) -> Rect {
         let dot_col = self.vision_status_color();
         let active = self.options_open;
-        let btn_w = if compact { 76.0 } else { 82.0 };
+        let btn_w = if compact { 38.0 } else { 42.0 };
         let (rect, resp) = ui.allocate_exact_size(vec2(btn_w, TOP_BTN_H), Sense::click());
         let bg = if active {
             P_GEM
@@ -170,23 +171,37 @@ impl TrueSightGuiApp {
             StrokeKind::Inside,
         );
 
-        // Paint status dot cleanly to the left of the label so it never overlaps text.
+        // Paint status dot on the left and a crisp vector gear icon on the right (zero tofu glyphs).
         let dot_rect = Rect::from_center_size(
             pos2(
-                rect.min.x + if compact { 10.0 } else { 11.0 },
+                rect.min.x + if compact { 9.0 } else { 10.0 },
                 rect.center().y,
             ),
             vec2(6.0, 6.0),
         );
         painter.rect_filled(dot_rect, 0.0, if active { P_VOID } else { dot_col });
 
-        painter.text(
-            pos2(dot_rect.max.x + 5.0, rect.center().y),
-            Align2::LEFT_CENTER,
-            "OPTIONS",
-            egui::FontId::proportional(if compact { 10.0 } else { 10.5 }),
-            fg,
+        let gear_center = pos2(
+            rect.max.x - if compact { 11.5 } else { 12.5 },
+            rect.center().y,
         );
+        let outer_r = if compact { 4.2 } else { 4.6 };
+        let tooth_r = outer_r + 1.8;
+        painter.circle_stroke(gear_center, outer_r, Stroke::new(1.4_f32, fg));
+        for i in 0..8 {
+            let angle = (i as f32) * std::f32::consts::FRAC_PI_4;
+            let (sin_a, cos_a) = angle.sin_cos();
+            let p0 = pos2(
+                gear_center.x + cos_a * (outer_r - 0.3),
+                gear_center.y + sin_a * (outer_r - 0.3),
+            );
+            let p1 = pos2(
+                gear_center.x + cos_a * tooth_r,
+                gear_center.y + sin_a * tooth_r,
+            );
+            painter.line_segment([p0, p1], Stroke::new(1.4_f32, fg));
+        }
+        painter.circle_filled(gear_center, 1.7, fg);
 
         let resp = resp.on_hover_text(format!(
             "Open dev & telemetry options\nGSI · {}\nCapture · {}\n{}",
@@ -194,6 +209,47 @@ impl TrueSightGuiApp {
         ));
         if resp.clicked() {
             self.options_open = !self.options_open;
+        }
+        rect
+    }
+
+    fn render_info_button(&mut self, ui: &mut egui::Ui) -> Rect {
+        let active = self.onboarding_open;
+        let (rect, resp) = ui.allocate_exact_size(vec2(TOP_BTN_H, TOP_BTN_H), Sense::click());
+        let bg = if active {
+            P_GEM
+        } else if resp.hovered() {
+            P_INDIGO_3
+        } else {
+            P_INDIGO_2
+        };
+        let border = if active || resp.hovered() {
+            P_GEM
+        } else {
+            P_LINE
+        };
+        let fg = if active { P_VOID } else { P_GLINT };
+
+        let painter = ui.painter();
+        painter.rect_filled(rect, CornerRadius::same(2), bg);
+        painter.rect_stroke(
+            rect,
+            CornerRadius::same(2),
+            Stroke::new(1.0_f32, border),
+            StrokeKind::Inside,
+        );
+        painter.text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            "i",
+            egui::FontId::proportional(12.0),
+            fg,
+        );
+
+        let resp = resp.on_hover_text("Open TrueSight Quick Guide");
+        if resp.clicked() {
+            self.onboarding_open = true;
+            self.onboarding_step = 0;
         }
         rect
     }
@@ -230,6 +286,7 @@ impl TrueSightGuiApp {
     /// Renders the user-facing top bar and returns bounds for alignment verification.
     pub(super) fn render_top_bar(&mut self, ui: &mut egui::Ui) -> TopBarRenderOutput {
         let mut options_btn_rect = Rect::NOTHING;
+        let mut info_btn_rect = Rect::NOTHING;
         let mut reset_btn_rect = Rect::NOTHING;
         let mut bracket_bar_rect = Rect::NOTHING;
         let bar_rect = hud_card(ui, |ui| {
@@ -248,6 +305,7 @@ impl TrueSightGuiApp {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = if compact { 4.0 } else { 6.0 };
                         reset_btn_rect = self.render_reset_button(ui, compact);
+                        info_btn_rect = self.render_info_button(ui);
                         options_btn_rect = self.render_options_button(ui, compact);
                         ui.add_space(if compact { 2.0 } else { 6.0 });
                         Self::paint_top_bar_separator(ui);
@@ -264,6 +322,7 @@ impl TrueSightGuiApp {
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             ui.spacing_mut().item_spacing.x = 5.0;
                             reset_btn_rect = self.render_reset_button(ui, true);
+                            info_btn_rect = self.render_info_button(ui);
                             options_btn_rect = self.render_options_button(ui, true);
                             Self::paint_top_bar_separator(ui);
                             self.render_faction_button(ui, true);
@@ -278,6 +337,7 @@ impl TrueSightGuiApp {
         TopBarRenderOutput {
             bar: bar_rect,
             options_button: options_btn_rect,
+            info_button: info_btn_rect,
             reset_button: reset_btn_rect,
             bracket_bar: bracket_bar_rect,
         }
@@ -430,6 +490,69 @@ impl TrueSightGuiApp {
                                     .unwrap_or_default();
                             }
                         });
+                        ui.add_space(4.0);
+                        let now = truesight_adapters::sync::LocalCacheManager::now_unix();
+                        let days_opt = self.session.stratz_token_days_remaining_at(now);
+                        let expired = self.session.is_stratz_token_expired_at(now);
+                        let (stratz_label, stratz_col) = if expired {
+                            (
+                                "STRATZ: Token expired (reconnect)".to_string(),
+                                super::theme::P_NEUTRAL,
+                            )
+                        } else if let Some(days) = days_opt {
+                            (format!("STRATZ · Connected ({days}d remaining)"), P_GEM)
+                        } else {
+                            ("STRATZ · Not connected (optional)".to_string(), P_MUTED)
+                        };
+                        ui.label(RichText::new(stratz_label).size(9.5).color(stratz_col));
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new("CONNECT STRATZ (1-CLICK)")
+                                            .size(10.0)
+                                            .strong()
+                                            .color(P_GEM),
+                                    )
+                                    .fill(P_INDIGO_1)
+                                    .stroke(Stroke::new(1.0_f32, P_GEM_DEEP)),
+                                )
+                                .clicked()
+                            {
+                                self.start_stratz_one_click_connect(ctx);
+                            }
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new("PASTE TOKEN").size(10.0).color(P_GLINT),
+                                    )
+                                    .fill(P_INDIGO_1),
+                                )
+                                .clicked()
+                            {
+                                self.try_paste_stratz_token();
+                            }
+                        });
+                        self.render_stratz_pending_link_prompt(ui);
+                        if self.stratz_paste_open {
+                            ui.add_space(2.0);
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.stratz_token_input)
+                                        .desired_width(175.0)
+                                        .hint_text("Paste STRATZ JWT..."),
+                                );
+                                if ui.button("SAVE").clicked() {
+                                    let tok = self.stratz_token_input.clone();
+                                    let now =
+                                        truesight_adapters::sync::LocalCacheManager::now_unix();
+                                    if self.apply_stratz_token_ui(&tok, now) {
+                                        self.stratz_token_input.clear();
+                                        self.stratz_paste_open = false;
+                                    }
+                                }
+                            });
+                        }
                     });
 
                 ui.horizontal(|ui| {

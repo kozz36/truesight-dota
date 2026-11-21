@@ -37,6 +37,7 @@ pub fn run_app() {
     }
 
     if args.iter().any(|a| a == "--sync") {
+        session.enable_default_config_persistence();
         match session.sync_db(true) {
             Ok(msg) => {
                 let _ = writeln!(io::stdout(), "{msg} ({})", session.db_status);
