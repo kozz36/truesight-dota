@@ -749,12 +749,14 @@ fn vision_capture_adapter_recognizes_topbar_10_slots_and_maps_radiant_dire_sides
                 width: w1,
                 height: h1,
                 source_height: None,
+                capture_strip_rect: None,
                 rgb: rgb1,
             }),
             Some(RgbFrame {
                 width: w2,
                 height: h2,
                 source_height: None,
+                capture_strip_rect: None,
                 rgb: rgb2,
             }),
         ]),
@@ -1013,6 +1015,7 @@ fn vision_catalog_matches_pickphase_upper_crop_and_rejects_flat_medal_slots() {
         width: frame_w,
         height: frame_h,
         source_height: None,
+        capture_strip_rect: None,
         rgb: pick_rgb,
     }]));
     let mut adapter = VisionCaptureAdapter::new(source, catalog);
@@ -1132,30 +1135,35 @@ fn vision_guard_rejects_non_dota_wm_class_single_slot_noise_and_dead_hero_overwr
             width: frame_w,
             height: frame_h,
             source_height: None,
+            capture_strip_rect: None,
             rgb: single_slot_rgb,
         },
         RgbFrame {
             width: frame_w,
             height: frame_h,
             source_height: None,
+            capture_strip_rect: None,
             rgb: valid_rgb,
         },
         RgbFrame {
             width: frame_w,
             height: frame_h,
             source_height: None,
+            capture_strip_rect: None,
             rgb: dead_overwrite_rgb,
         },
         RgbFrame {
             width: frame_w,
             height: frame_h,
             source_height: None,
+            capture_strip_rect: None,
             rgb: swap_rgb.clone(),
         },
         RgbFrame {
             width: frame_w,
             height: frame_h,
             source_height: None,
+            capture_strip_rect: None,
             rgb: swap_rgb,
         },
     ]));
@@ -1465,6 +1473,7 @@ fn vision_reset_clears_detector_state_drains_stale_queue_and_repopulates_station
         width: w,
         height: h,
         source_height: None,
+        capture_strip_rect: None,
         rgb,
     };
 
@@ -1826,6 +1835,7 @@ fn event_queues_coalesce_under_saturation_preserve_resets_and_recover_stationary
             width: w,
             height: h,
             source_height: None,
+            capture_strip_rect: None,
             rgb,
         }),
         8,
@@ -2010,24 +2020,28 @@ fn vision_rejects_empty_pickphase_slots_and_dark_gradient_bars_that_matched_dark
             width: w1,
             height: h1,
             source_height: None,
+            capture_strip_rect: None,
             rgb: dark_gradient,
         },
         RgbFrame {
             width: w2,
             height: h2,
             source_height: None,
+            capture_strip_rect: None,
             rgb: empty_pick,
         },
         RgbFrame {
             width: w3,
             height: h3,
             source_height: None,
+            capture_strip_rect: None,
             rgb: gray_ui,
         },
         RgbFrame {
             width: w4,
             height: h4,
             source_height: None,
+            capture_strip_rect: None,
             rgb: valid_ingame_1280,
         },
     ]));
@@ -2243,6 +2257,7 @@ fn vision_catalog_matches_all_arcana_and_persona_portraits_across_layouts() {
             width: w,
             height: h,
             source_height: None,
+            capture_strip_rect: None,
             rgb: frame_rgb,
         }));
         let mut adapter = VisionCaptureAdapter::new(source, catalog);
@@ -2397,6 +2412,7 @@ fn vision_pickphase_and_ingame_adapter_detect_all_49_arcana_and_persona_variants
                     width: fw,
                     height: fh,
                     source_height: None,
+                    capture_strip_rect: None,
                     rgb: frame_rgb,
                 })),
                 catalog.clone(),
@@ -2583,6 +2599,7 @@ fn vision_recalls_dark_low_contrast_heroes_and_rejects_empty_slots_across_resolu
                 width: w,
                 height: fh,
                 source_height: None,
+                capture_strip_rect: None,
                 rgb,
             })),
             catalog.clone(),
@@ -3538,6 +3555,7 @@ fn vision_ingame_excludes_player_color_strip_and_spectator_borders() {
             width: w,
             height: h,
             source_height: None,
+            capture_strip_rect: None,
             rgb: frame_rgb,
         })),
         catalog,
@@ -5641,4 +5659,98 @@ fn sync_from_sources_with_accumulates_multiple_target_item_heroes() {
     assert!(invoker_stats.iter().any(|s| s.item_id == ItemId(65)));
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn compute_top_bar_capture_strip_rect_matches_window_offset_and_top_8_percent() {
+    use crate::vision::compute_top_bar_capture_strip_rect;
+
+    assert_eq!(compute_top_bar_capture_strip_rect(0, 0, 0, 1080), None);
+    assert_eq!(compute_top_bar_capture_strip_rect(0, 0, 1920, 0), None);
+    assert_eq!(
+        compute_top_bar_capture_strip_rect(200, 180, 1600, 900),
+        Some((200.0, 180.0, 1600.0, 72.0))
+    );
+    assert_eq!(
+        compute_top_bar_capture_strip_rect(-1920, 0, 1920, 1080),
+        Some((-1920.0, 0.0, 1920.0, 87.0))
+    );
+}
+
+#[test]
+fn parse_xrandr_listmonitors_handles_heterogeneous_and_negative_offsets() {
+    use crate::vision::parse_xrandr_listmonitors;
+
+    let sample = "\
+Monitors: 3
+ 0: +*DP-1 1920/510x1080/290+0+0  DP-1
+ 1: +HDMI-1 1280/340x720/190+1920+0  HDMI-1
+ 2: +DP-2 1920/527x1080/296-1920+120  DP-2
+";
+    assert_eq!(
+        parse_xrandr_listmonitors(sample),
+        vec![
+            (0.0, 0.0, 1920.0, 1080.0),
+            (1920.0, 0.0, 1280.0, 720.0),
+            (-1920.0, 120.0, 1920.0, 1080.0),
+        ]
+    );
+}
+
+#[test]
+fn bounded_vision_worker_propagates_and_clears_capture_strip_rect() {
+    use crate::vision::{BoundedVisionWorker, RgbFrame, ScreenFrameSource, VisionCaptureMode};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    use std::time::{Duration, Instant};
+
+    struct ToggleSource {
+        emit_frame: Arc<AtomicBool>,
+    }
+
+    impl ScreenFrameSource for ToggleSource {
+        fn capture_frame(&mut self) -> Result<Option<RgbFrame>, truesight_core::ports::PortError> {
+            if self.emit_frame.load(Ordering::Acquire) {
+                Ok(Some(
+                    RgbFrame::with_source_height(1600, 72, 900, vec![0; 1600 * 72 * 3])
+                        .with_capture_strip_rect((200.0, 180.0, 1600.0, 72.0)),
+                ))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+
+    let emit_frame = Arc::new(AtomicBool::new(true));
+    let worker = BoundedVisionWorker::spawn_with_source(ToggleSource {
+        emit_frame: Arc::clone(&emit_frame),
+    })
+    .expect("worker must spawn");
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while worker.capture_strip_rect().is_none() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        worker.capture_strip_rect(),
+        Some((200.0, 180.0, 1600.0, 72.0))
+    );
+
+    worker.set_capture_mode(VisionCaptureMode::Suppressed);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while worker.capture_strip_rect().is_some() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        worker.capture_strip_rect(),
+        None,
+        "Suppressed mode must clear capture_strip_rect"
+    );
+
+    emit_frame.store(false, Ordering::Release);
+    worker.set_capture_mode(VisionCaptureMode::Any);
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(worker.capture_strip_rect(), None);
 }

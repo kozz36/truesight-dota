@@ -85,6 +85,7 @@ pub struct AppSession {
     pub overlay_mode: bool,
     pub overlay_geometry: OverlayGeometry,
     pub active_monitor_rect: Option<MonitorRect>,
+    pub known_monitors: Vec<MonitorRect>,
     pub active_capture_strip_rect: Option<(f32, f32, f32, f32)>,
 }
 
@@ -235,6 +236,7 @@ impl AppSession {
             overlay_mode: ui_cfg.overlay_mode,
             overlay_geometry: ui_cfg.overlay_geometry,
             active_monitor_rect: None,
+            known_monitors: Vec::new(),
             active_capture_strip_rect: None,
         })
     }
@@ -1110,6 +1112,15 @@ impl AppSession {
             if self.apply_runtime_health(worker.runtime_health()) {
                 changed = true;
             }
+            let next_strip = if capture_mode == VisionCaptureMode::Suppressed {
+                None
+            } else {
+                worker.capture_strip_rect()
+            };
+            if self.active_capture_strip_rect != next_strip {
+                self.active_capture_strip_rect = next_strip;
+                changed = true;
+            }
         }
         changed
     }
@@ -1381,6 +1392,119 @@ impl AppSession {
         self.active_monitor_rect = monitor;
     }
 
+    /// Sets the known desktop monitor bounds used when resolving the overlay's host monitor.
+    pub fn set_known_monitors(&mut self, monitors: Vec<MonitorRect>) {
+        self.known_monitors = monitors;
+    }
+
+    /// Queries native OS monitor bounds and updates `known_monitors` when available.
+    pub fn refresh_native_monitors(&mut self) {
+        let detected: Vec<MonitorRect> = truesight_adapters::vision::detect_native_monitor_rects()
+            .into_iter()
+            .map(|(x, y, w, h)| MonitorRect::new(x, y, w, h))
+            .collect();
+        if !detected.is_empty() {
+            self.known_monitors = detected;
+        }
+    }
+
+    /// Resolves the host monitor bounds for `geom` from `active_monitor_rect` or `known_monitors`.
+    /// Returns `None` when reliable native monitor bounds are unavailable.
+    pub fn resolve_monitor_for_overlay(&self, geom: OverlayGeometry) -> Option<MonitorRect> {
+        if let Some(mon) = self.active_monitor_rect {
+            return Some(mon);
+        }
+        if self.known_monitors.is_empty() {
+            return None;
+        }
+        let cx = geom.x + geom.width * 0.5;
+        let cy = geom.y + geom.height * 0.5;
+        if !cx.is_finite() || !cy.is_finite() {
+            return self.known_monitors.first().copied();
+        }
+        if let Some(containing) = self
+            .known_monitors
+            .iter()
+            .copied()
+            .find(|m| cx >= m.x && cx <= m.x + m.width && cy >= m.y && cy <= m.y + m.height)
+        {
+            return Some(containing);
+        }
+        self.known_monitors.iter().copied().min_by(|a, b| {
+            let da = monitor_squared_distance(*a, cx, cy);
+            let db = monitor_squared_distance(*b, cx, cy);
+            da.total_cmp(&db)
+        })
+    }
+
+    /// Clamps overlay geometry against `monitor` when reliable bounds are available; otherwise
+    /// clamps dimensions and avoids `capture_strip_rect` without guessing a monitor origin.
+    pub fn clamp_overlay_geometry_with_optional_monitor(
+        mut geom: OverlayGeometry,
+        monitor: Option<MonitorRect>,
+        fallback_monitor_size: Option<(f32, f32)>,
+        capture_strip_rect: Option<(f32, f32, f32, f32)>,
+    ) -> OverlayGeometry {
+        if let Some(mon) = monitor {
+            return Self::clamp_overlay_geometry_in_monitor(geom, mon, capture_strip_rect);
+        }
+
+        let max_w = fallback_monitor_size
+            .map(|(w, _)| w)
+            .filter(|w| w.is_finite() && *w >= 640.0)
+            .unwrap_or(520.0);
+        let max_h = fallback_monitor_size
+            .map(|(_, h)| h)
+            .filter(|h| h.is_finite() && *h >= 480.0)
+            .unwrap_or(360.0);
+
+        let raw_w = if geom.width.is_finite() {
+            geom.width
+        } else {
+            380.0
+        };
+        let raw_h = if geom.height.is_finite() {
+            geom.height
+        } else {
+            230.0
+        };
+        geom.width = raw_w.clamp(280.0, 520.0_f32.min(max_w.max(280.0)));
+        geom.height = raw_h.clamp(160.0, 360.0_f32.min(max_h.max(160.0)));
+
+        if !geom.x.is_finite() {
+            geom.x = 24.0;
+        }
+        if !geom.y.is_finite() {
+            geom.y = 96.0;
+        }
+
+        if let Some((cx, cy, cw, ch)) = capture_strip_rect.filter(|&(cx, cy, cw, ch)| {
+            cx.is_finite()
+                && cy.is_finite()
+                && cw.is_finite()
+                && ch.is_finite()
+                && cw > 0.0
+                && ch > 0.0
+        }) {
+            let overlaps_x = geom.x < cx + cw && geom.x + geom.width > cx;
+            let overlaps_y = geom.y < cy + ch && geom.y + geom.height > cy;
+            if overlaps_x && overlaps_y {
+                let below_y = cy + ch;
+                let fits_below = fallback_monitor_size
+                    .map(|(_, h)| !h.is_finite() || h < 480.0 || below_y + geom.height <= h)
+                    .unwrap_or(true);
+                let above_y = cy - geom.height;
+                if fits_below || above_y < 0.0 {
+                    geom.y = below_y;
+                } else {
+                    geom.y = above_y;
+                }
+            }
+        }
+
+        geom
+    }
+
     /// Sets the active Dota 2 top-bar capture strip rectangle `(x, y, w, h)` in desktop coordinates.
     pub fn set_active_capture_strip_rect(&mut self, rect: Option<(f32, f32, f32, f32)>) {
         self.active_capture_strip_rect = rect;
@@ -1609,25 +1733,22 @@ pub struct StratzTokenInfo {
     pub days_remaining: u32,
 }
 
-/// Persisted geometry and passthrough state for the compact always-on-top overlay window.
-fn infer_axis_origin(pos: f32, size: f32, mon_len: f32) -> f32 {
-    if !pos.is_finite() {
-        return 0.0;
-    }
-    if pos >= 0.0 {
-        return (pos / mon_len).floor() * mon_len;
-    }
-    let safe_size = if size.is_finite() && size > 0.0 {
-        size
+fn monitor_squared_distance(mon: MonitorRect, px: f32, py: f32) -> f32 {
+    let dx = if px < mon.x {
+        mon.x - px
+    } else if px > mon.x + mon.width {
+        px - (mon.x + mon.width)
     } else {
         0.0
     };
-    let anchor = pos + safe_size * 0.5;
-    if anchor >= 0.0 {
-        0.0
+    let dy = if py < mon.y {
+        mon.y - py
+    } else if py > mon.y + mon.height {
+        py - (mon.y + mon.height)
     } else {
-        (anchor / mon_len).floor() * mon_len
-    }
+        0.0
+    };
+    dx * dx + dy * dy
 }
 
 /// Desktop-coordinate bounds of the monitor hosting the overlay or Dota 2 window.
@@ -1647,35 +1768,6 @@ impl MonitorRect {
             y,
             width,
             height,
-        }
-    }
-
-    /// Infers the active monitor's desktop origin and bounds from a window outer rect
-    /// `(win_x, win_y, win_w, win_h)` and reported `monitor_size` `(mon_w, mon_h)` when
-    /// the windowing backend reports monitor size without explicit monitor origin.
-    pub fn infer_from_window_and_size(
-        win_x: f32,
-        win_y: f32,
-        win_w: f32,
-        win_h: f32,
-        mon_w: f32,
-        mon_h: f32,
-    ) -> Self {
-        let safe_w = if mon_w.is_finite() && mon_w >= 640.0 {
-            mon_w
-        } else {
-            1920.0
-        };
-        let safe_h = if mon_h.is_finite() && mon_h >= 480.0 {
-            mon_h
-        } else {
-            1080.0
-        };
-        Self {
-            x: infer_axis_origin(win_x, win_w, safe_w),
-            y: infer_axis_origin(win_y, win_h, safe_h),
-            width: safe_w,
-            height: safe_h,
         }
     }
 }

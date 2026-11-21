@@ -430,6 +430,7 @@ fn draft_reset_and_new_match_transition_reset_vision_worker_without_mid_draft_wi
         width: w,
         height: h,
         source_height: None,
+        capture_strip_rect: None,
         rgb,
     }))
     .unwrap();
@@ -1661,6 +1662,7 @@ fn session_suppresses_vision_during_wait_for_players_and_resumes_in_hero_selecti
         width: w,
         height: h,
         source_height: None,
+        capture_strip_rect: None,
         rgb,
     }))
     .unwrap();
@@ -1787,6 +1789,7 @@ fn live_gsi_init_and_custom_setup_suppress_vision_and_restore_across_match_trans
         width: w,
         height: h,
         source_height: None,
+        capture_strip_rect: None,
         rgb,
     }))
     .unwrap();
@@ -3596,4 +3599,52 @@ fn picking_allied_hero_updates_cache_manager_target_item_heroes() {
             .contains(&HeroId(74)),
         "picking allied hero 74 must update cache_mgr.effective_target_item_heroes()"
     );
+}
+
+#[test]
+fn resolve_monitor_and_optional_clamp_respect_heterogeneous_monitors_and_unavailable_fallback() {
+    let mut session = AppSession::new().unwrap();
+    session.set_known_monitors(vec![
+        crate::session::MonitorRect::new(0.0, 0.0, 1920.0, 1080.0),
+        crate::session::MonitorRect::new(1920.0, 0.0, 1280.0, 720.0),
+    ]);
+
+    let on_secondary = crate::session::OverlayGeometry {
+        x: 2450.0,
+        y: 140.0,
+        width: 380.0,
+        height: 230.0,
+        click_through: false,
+    };
+    let resolved = session.resolve_monitor_for_overlay(on_secondary);
+    assert_eq!(
+        resolved,
+        Some(crate::session::MonitorRect::new(1920.0, 0.0, 1280.0, 720.0))
+    );
+    let clamped = AppSession::clamp_overlay_geometry_with_optional_monitor(
+        on_secondary,
+        resolved,
+        Some((1280.0, 720.0)),
+        None,
+    );
+    assert_eq!(clamped.x, 2450.0);
+    assert_eq!(clamped.y, 140.0);
+
+    // Without known_monitors or active_monitor_rect, x=2450 is preserved and offset capture strip is still avoided.
+    session.set_known_monitors(Vec::new());
+    assert_eq!(session.resolve_monitor_for_overlay(on_secondary), None);
+    let fallback_clamped = AppSession::clamp_overlay_geometry_with_optional_monitor(
+        crate::session::OverlayGeometry {
+            x: 2450.0,
+            y: 160.0,
+            width: 380.0,
+            height: 230.0,
+            click_through: false,
+        },
+        None,
+        Some((1280.0, 720.0)),
+        Some((2000.0, 180.0, 1200.0, 72.0)),
+    );
+    assert_eq!(fallback_clamped.x, 2450.0);
+    assert_eq!(fallback_clamped.y, 252.0);
 }

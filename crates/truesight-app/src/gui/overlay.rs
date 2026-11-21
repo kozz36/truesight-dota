@@ -34,6 +34,14 @@ impl TrueSightGuiApp {
     /// the active monitor and top-bar capture strip, enforces any correction via viewport commands,
     /// and persists updated geometry to `ui_config.toml`.
     pub(super) fn sync_live_overlay_viewport_geometry(&mut self, vctx: &egui::Context) {
+        if !self.native_monitors_probed
+            && self.session.known_monitors.is_empty()
+            && self.session.active_monitor_rect.is_none()
+        {
+            self.session.refresh_native_monitors();
+            self.native_monitors_probed = true;
+        }
+
         let (vp_monitor_size, vp_outer_rect, vp_inner_rect, screen_rect) = vctx.input(|i| {
             let vp = i.viewport();
             (
@@ -44,15 +52,15 @@ impl TrueSightGuiApp {
             )
         });
 
-        let (monitor_w, monitor_h) = vp_monitor_size
+        let fallback_monitor_size = vp_monitor_size
             .map(|s| (s.x, s.y))
             .filter(|(w, h)| *w > 0.0 && *h > 0.0)
-            .unwrap_or_else(|| {
+            .or_else(|| {
                 let s = screen_rect.size();
                 if s.x > 0.0 && s.y > 0.0 {
-                    (s.x, s.y)
+                    Some((s.x, s.y))
                 } else {
-                    (1920.0, 1080.0)
+                    None
                 }
             });
 
@@ -79,14 +87,11 @@ impl TrueSightGuiApp {
             height,
             click_through: self.session.overlay_geometry.click_through,
         };
-        let monitor_rect = self.session.active_monitor_rect.unwrap_or_else(|| {
-            crate::session::MonitorRect::infer_from_window_and_size(
-                x, y, width, height, monitor_w, monitor_h,
-            )
-        });
-        let clamped = crate::session::AppSession::clamp_overlay_geometry_in_monitor(
+        let monitor_rect = self.session.resolve_monitor_for_overlay(candidate);
+        let clamped = crate::session::AppSession::clamp_overlay_geometry_with_optional_monitor(
             candidate,
             monitor_rect,
+            fallback_monitor_size,
             self.session.active_capture_strip_rect,
         );
 

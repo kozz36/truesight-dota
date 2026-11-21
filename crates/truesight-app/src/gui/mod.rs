@@ -80,6 +80,7 @@ pub struct TrueSightGuiApp {
     pub(super) test_clipboard_override: Option<String>,
     pub(super) stratz_paste_open: bool,
     pub(super) stratz_token_input: String,
+    pub(super) native_monitors_probed: bool,
 }
 
 impl Drop for TrueSightGuiApp {
@@ -139,6 +140,7 @@ impl TrueSightGuiApp {
             test_clipboard_override: None,
             stratz_paste_open: false,
             stratz_token_input: String::new(),
+            native_monitors_probed: false,
         }
     }
 

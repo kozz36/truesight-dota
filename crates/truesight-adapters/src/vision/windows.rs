@@ -268,7 +268,17 @@ impl ScreenFrameSource for WindowsTopBarFrameSource {
             self.cached_window = None;
             return Ok(None);
         }
+        let strip_rect = match (win.x().ok(), win.y().ok()) {
+            (Some(wx), Some(wy)) => {
+                super::compute_top_bar_capture_strip_rect(wx, wy, width as u32, height as u32)
+            }
+            _ => None,
+        };
         rgba_to_topbar_rgb_frame(img.as_raw(), width, height)
+            .map(|f| match strip_rect {
+                Some(rect) => f.with_capture_strip_rect(rect),
+                None => f,
+            })
             .map(Some)
             .ok_or_else(|| {
                 PortError("Windows capture returned an invalid RGBA frame buffer.".into())
