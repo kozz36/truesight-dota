@@ -84,6 +84,8 @@ pub struct AppSession {
     pub active_game_patch: String,
     pub overlay_mode: bool,
     pub overlay_geometry: OverlayGeometry,
+    pub active_monitor_rect: Option<MonitorRect>,
+    pub active_capture_strip_rect: Option<(f32, f32, f32, f32)>,
 }
 
 impl Drop for AppSession {
@@ -232,6 +234,8 @@ impl AppSession {
             active_game_patch,
             overlay_mode: ui_cfg.overlay_mode,
             overlay_geometry: ui_cfg.overlay_geometry,
+            active_monitor_rect: None,
+            active_capture_strip_rect: None,
         })
     }
 
@@ -419,6 +423,7 @@ impl AppSession {
         if self.sync_in_flight {
             return false;
         }
+        self.sync_target_item_heroes_to_cache();
         self.reap_finished_sync_workers();
         let (generation, _) = self.cache_mgr.begin_sync_generation();
         self.sync_generation = generation;
@@ -535,6 +540,7 @@ impl AppSession {
     }
 
     pub fn sync_db(&mut self, force: bool) -> Result<String, String> {
+        self.sync_target_item_heroes_to_cache();
         let (generation, _) = self.cache_mgr.begin_sync_generation();
         self.sync_generation = generation;
         let msg = self
@@ -654,6 +660,7 @@ impl AppSession {
         self.owned_items.clear();
         self.selected_build_variants.clear();
         self.post_draft_view_override = None;
+        self.sync_target_item_heroes_to_cache();
     }
 
     fn side_picks(&self, side: Side) -> &[Option<DraftPick>; TEAM_SIZE] {
@@ -810,6 +817,7 @@ impl AppSession {
         self.side_picks_mut(side)[slot] = pick;
         self.side_locked_mut(side)[slot] = true;
         self.sync_local_player_target_role();
+        self.sync_target_item_heroes_to_cache();
     }
 
     /// Clears `(side, slot)`, unlocks the slot, and suppresses vision re-adding that hero until reset.
@@ -827,6 +835,7 @@ impl AppSession {
                 self.local_player_hero = None;
             }
         }
+        self.sync_target_item_heroes_to_cache();
     }
 
     pub fn apply_event(&mut self, event: DraftEvent) {
@@ -872,6 +881,7 @@ impl AppSession {
                     self.local_player_hero = Some(id);
                     self.apply_side_pick(Side::Allies, 0, id, None);
                     self.sync_local_player_target_role();
+                    self.sync_target_item_heroes_to_cache();
                 }
             }
             DraftEvent::PlayerHeroMapped {
@@ -884,6 +894,7 @@ impl AppSession {
                     if let Some(id) = self.find_hero(&hero_slug) {
                         self.local_player_hero = Some(id);
                         self.sync_local_player_target_role();
+                        self.sync_target_item_heroes_to_cache();
                     }
                 }
             }
@@ -950,6 +961,7 @@ impl AppSession {
                 role: Role::ALL.get(dst).copied(),
             });
             self.rebalance_unlocked_side_roles(side);
+            self.sync_target_item_heroes_to_cache();
         }
     }
 
@@ -1350,6 +1362,30 @@ impl AppSession {
         }
     }
 
+    /// Synchronizes `cache_mgr` target item hero IDs with the active build hero and picked allies.
+    pub fn sync_target_item_heroes_to_cache(&mut self) {
+        let mut heroes = Vec::new();
+        if let Some((active_hero, _)) = self.active_build_hero() {
+            heroes.push(active_hero);
+        }
+        for pick in self.draft.allies.iter().flatten() {
+            if !heroes.contains(&pick.hero_id) {
+                heroes.push(pick.hero_id);
+            }
+        }
+        self.cache_mgr.set_target_item_heroes(heroes);
+    }
+
+    /// Sets the active monitor desktop bounds used for live overlay clamping.
+    pub fn set_active_monitor_rect(&mut self, monitor: Option<MonitorRect>) {
+        self.active_monitor_rect = monitor;
+    }
+
+    /// Sets the active Dota 2 top-bar capture strip rectangle `(x, y, w, h)` in desktop coordinates.
+    pub fn set_active_capture_strip_rect(&mut self, rect: Option<(f32, f32, f32, f32)>) {
+        self.active_capture_strip_rect = rect;
+    }
+
     /// Clamps overlay geometry to safe monitor bounds while avoiding the Dota 2 top-bar capture strip.
     pub fn clamp_overlay_geometry(
         geom: OverlayGeometry,
@@ -1362,27 +1398,105 @@ impl AppSession {
     /// Clamps overlay geometry to safe monitor bounds and pushes it below `capture_strip_rect`
     /// `(cx, cy, cw, ch)` when horizontally overlapping, or below `(monitor_h * 0.08).ceil().max(96.0)`.
     pub fn clamp_overlay_geometry_against_capture(
-        mut geom: OverlayGeometry,
+        geom: OverlayGeometry,
         monitor_w: f32,
         monitor_h: f32,
         capture_strip_rect: Option<(f32, f32, f32, f32)>,
     ) -> OverlayGeometry {
-        geom.width = geom.width.clamp(280.0, 520.0).min(monitor_w.max(280.0));
-        geom.height = geom.height.clamp(160.0, 360.0).min(monitor_h.max(160.0));
-        geom.x = geom.x.clamp(0.0, (monitor_w - geom.width).max(0.0));
+        Self::clamp_overlay_geometry_in_monitor(
+            geom,
+            MonitorRect::new(0.0, 0.0, monitor_w, monitor_h),
+            capture_strip_rect,
+        )
+    }
 
-        let monitor_top_floor = (monitor_h * 0.08).ceil().max(96.0);
-        let min_safe_y = match capture_strip_rect {
-            Some((cx, cy, cw, ch))
-                if cw > 0.0 && ch > 0.0 && geom.x < cx + cw && geom.x + geom.width > cx =>
-            {
-                (cy + ch).max(monitor_top_floor)
-            }
-            _ => monitor_top_floor,
+    /// Clamps `OverlayGeometry` within `monitor` (preserving secondary monitor origins)
+    /// and prevents it from intersecting `capture_strip_rect` `(cx, cy, cw, ch)` (including
+    /// when Dota 2 runs in a window offset from the top of the monitor).
+    pub fn clamp_overlay_geometry_in_monitor(
+        mut geom: OverlayGeometry,
+        monitor: MonitorRect,
+        capture_strip_rect: Option<(f32, f32, f32, f32)>,
+    ) -> OverlayGeometry {
+        let mon_x = if monitor.x.is_finite() {
+            monitor.x
+        } else {
+            0.0
         };
-        geom.y = geom
-            .y
-            .clamp(min_safe_y, (monitor_h - geom.height).max(min_safe_y));
+        let mon_y = if monitor.y.is_finite() {
+            monitor.y
+        } else {
+            0.0
+        };
+        let mon_w = if monitor.width.is_finite() && monitor.width >= 640.0 {
+            monitor.width
+        } else {
+            1920.0
+        };
+        let mon_h = if monitor.height.is_finite() && monitor.height >= 480.0 {
+            monitor.height
+        } else {
+            1080.0
+        };
+
+        let raw_w = if geom.width.is_finite() {
+            geom.width
+        } else {
+            380.0
+        };
+        let raw_h = if geom.height.is_finite() {
+            geom.height
+        } else {
+            230.0
+        };
+        geom.width = raw_w.clamp(280.0, 520.0_f32.min(mon_w.max(280.0)));
+        geom.height = raw_h.clamp(160.0, 360.0_f32.min(mon_h.max(160.0)));
+
+        let default_top_floor = (mon_h * 0.08).ceil().max(96.0);
+        let raw_x = if geom.x.is_finite() {
+            geom.x
+        } else {
+            mon_x + 24.0
+        };
+        let raw_y = if geom.y.is_finite() {
+            geom.y
+        } else {
+            mon_y + default_top_floor
+        };
+
+        let max_x = (mon_x + mon_w - geom.width).max(mon_x);
+        let max_y = (mon_y + mon_h - geom.height).max(mon_y);
+        geom.x = raw_x.clamp(mon_x, max_x);
+        geom.y = raw_y.clamp(mon_y, max_y);
+
+        if let Some((cx, cy, cw, ch)) = capture_strip_rect.filter(|&(cx, cy, cw, ch)| {
+            cx.is_finite()
+                && cy.is_finite()
+                && cw.is_finite()
+                && ch.is_finite()
+                && cw > 0.0
+                && ch > 0.0
+        }) {
+            let overlaps_x = geom.x < cx + cw && geom.x + geom.width > cx;
+            let overlaps_y = geom.y < cy + ch && geom.y + geom.height > cy;
+            if overlaps_x && overlaps_y {
+                let below_y = cy + ch;
+                let above_y = cy - geom.height;
+                if below_y <= max_y {
+                    geom.y = below_y.max(mon_y);
+                } else if above_y >= mon_y {
+                    geom.y = above_y.min(max_y);
+                } else {
+                    geom.y = max_y;
+                }
+            }
+        } else {
+            let min_y = (mon_y + default_top_floor).min(max_y);
+            if geom.y < min_y {
+                geom.y = min_y;
+            }
+        }
+
         geom
     }
 
@@ -1496,6 +1610,76 @@ pub struct StratzTokenInfo {
 }
 
 /// Persisted geometry and passthrough state for the compact always-on-top overlay window.
+fn infer_axis_origin(pos: f32, size: f32, mon_len: f32) -> f32 {
+    if !pos.is_finite() {
+        return 0.0;
+    }
+    if pos >= 0.0 {
+        return (pos / mon_len).floor() * mon_len;
+    }
+    let safe_size = if size.is_finite() && size > 0.0 {
+        size
+    } else {
+        0.0
+    };
+    let anchor = pos + safe_size * 0.5;
+    if anchor >= 0.0 {
+        0.0
+    } else {
+        (anchor / mon_len).floor() * mon_len
+    }
+}
+
+/// Desktop-coordinate bounds of the monitor hosting the overlay or Dota 2 window.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MonitorRect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl MonitorRect {
+    /// Constructs a `MonitorRect` from origin `(x, y)` and dimensions `(width, height)`.
+    pub const fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    /// Infers the active monitor's desktop origin and bounds from a window outer rect
+    /// `(win_x, win_y, win_w, win_h)` and reported `monitor_size` `(mon_w, mon_h)` when
+    /// the windowing backend reports monitor size without explicit monitor origin.
+    pub fn infer_from_window_and_size(
+        win_x: f32,
+        win_y: f32,
+        win_w: f32,
+        win_h: f32,
+        mon_w: f32,
+        mon_h: f32,
+    ) -> Self {
+        let safe_w = if mon_w.is_finite() && mon_w >= 640.0 {
+            mon_w
+        } else {
+            1920.0
+        };
+        let safe_h = if mon_h.is_finite() && mon_h >= 480.0 {
+            mon_h
+        } else {
+            1080.0
+        };
+        Self {
+            x: infer_axis_origin(win_x, win_w, safe_w),
+            y: infer_axis_origin(win_y, win_h, safe_h),
+            width: safe_w,
+            height: safe_h,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OverlayGeometry {
     pub x: f32,

@@ -1770,3 +1770,104 @@ fn gui_overlay_keeps_next_badge_visible_for_fifth_step() {
         "overlay must render 5th step '{fifth_item_name}'; painted texts: {texts:?}"
     );
 }
+
+#[test]
+fn live_overlay_viewport_geometry_preserves_secondary_monitor_and_avoids_offset_capture_strip() {
+    let mut session = AppSession::new().unwrap();
+    session.overlay_mode = true;
+    session.overlay_geometry = crate::session::OverlayGeometry {
+        x: 2200.0,
+        y: 120.0,
+        width: 380.0,
+        height: 230.0,
+        click_through: false,
+    };
+    let mut app = TrueSightGuiApp::new(session, None, None);
+    let ctx = egui::Context::default();
+
+    // Pass 1: Secondary monitor at (1920, 0) with size 1920x1080 and overlay placed at (2200, 30).
+    let mut raw_input_secondary = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            pos2(0.0, 0.0),
+            egui::vec2(380.0, 230.0),
+        )),
+        ..Default::default()
+    };
+    raw_input_secondary.viewports.insert(
+        egui::ViewportId::ROOT,
+        egui::ViewportInfo {
+            monitor_size: Some(egui::vec2(1920.0, 1080.0)),
+            outer_rect: Some(egui::Rect::from_min_size(
+                pos2(2200.0, 30.0),
+                egui::vec2(380.0, 230.0),
+            )),
+            inner_rect: Some(egui::Rect::from_min_size(
+                pos2(2200.0, 30.0),
+                egui::vec2(380.0, 230.0),
+            )),
+            ..Default::default()
+        },
+    );
+
+    let secondary_output = ctx.run(raw_input_secondary, |vctx| {
+        app.sync_live_overlay_viewport_geometry(vctx);
+    });
+    assert_eq!(
+        app.session.overlay_geometry.x, 2200.0,
+        "secondary monitor X coordinate must not be forced back to 0..1920"
+    );
+    assert_eq!(app.session.overlay_geometry.y, 96.0);
+    let secondary_cmds = &secondary_output
+        .viewport_output
+        .get(&egui::ViewportId::ROOT)
+        .expect("root viewport output must exist")
+        .commands;
+    assert!(secondary_cmds.iter().any(|cmd| matches!(
+        cmd,
+        egui::ViewportCommand::OuterPosition(p) if (p.x - 2200.0).abs() < 0.5 && (p.y - 96.0).abs() < 0.5
+    )));
+
+    // Pass 2: Offset windowed Dota capture strip at (200, 180, 1600, 72) on primary monitor.
+    app.session
+        .set_active_capture_strip_rect(Some((200.0, 180.0, 1600.0, 72.0)));
+    let mut raw_input_strip = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            pos2(0.0, 0.0),
+            egui::vec2(380.0, 230.0),
+        )),
+        ..Default::default()
+    };
+    raw_input_strip.viewports.insert(
+        egui::ViewportId::ROOT,
+        egui::ViewportInfo {
+            monitor_size: Some(egui::vec2(1920.0, 1080.0)),
+            outer_rect: Some(egui::Rect::from_min_size(
+                pos2(240.0, 160.0),
+                egui::vec2(380.0, 230.0),
+            )),
+            inner_rect: Some(egui::Rect::from_min_size(
+                pos2(240.0, 160.0),
+                egui::vec2(380.0, 230.0),
+            )),
+            ..Default::default()
+        },
+    );
+
+    let strip_output = ctx.run(raw_input_strip, |vctx| {
+        app.sync_live_overlay_viewport_geometry(vctx);
+    });
+    assert_eq!(app.session.overlay_geometry.x, 240.0);
+    assert_eq!(
+        app.session.overlay_geometry.y, 252.0,
+        "overlay overlapping offset capture strip must be pushed below y=252.0"
+    );
+    let strip_cmds = &strip_output
+        .viewport_output
+        .get(&egui::ViewportId::ROOT)
+        .expect("root viewport output must exist")
+        .commands;
+    assert!(strip_cmds.iter().any(|cmd| matches!(
+        cmd,
+        egui::ViewportCommand::OuterPosition(p) if (p.x - 240.0).abs() < 0.5 && (p.y - 252.0).abs() < 0.5
+    )));
+}

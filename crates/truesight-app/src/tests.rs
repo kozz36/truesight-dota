@@ -3508,3 +3508,92 @@ fn variant_selection_persists_across_step_reorder_by_original_item_id() {
     let restored = session.compute_recommended_build().unwrap();
     assert_eq!(restored.steps[new_idx].item_id, orig_primary_id);
 }
+
+#[test]
+fn clamp_overlay_geometry_in_monitor_preserves_secondary_monitor_coordinates() {
+    let right_monitor = crate::session::MonitorRect::new(1920.0, 0.0, 2560.0, 1440.0);
+    let clamped_right = AppSession::clamp_overlay_geometry_in_monitor(
+        crate::session::OverlayGeometry {
+            x: 2200.0,
+            y: 30.0,
+            width: 380.0,
+            height: 230.0,
+            click_through: false,
+        },
+        right_monitor,
+        None,
+    );
+    assert_eq!(clamped_right.x, 2200.0);
+    assert!(
+        clamped_right.y >= 116.0,
+        "1440p secondary monitor must clamp below 8% top-bar strip (y >= 116.0), got {}",
+        clamped_right.y
+    );
+
+    let clamped_right_overflow = AppSession::clamp_overlay_geometry_in_monitor(
+        crate::session::OverlayGeometry {
+            x: 5000.0,
+            y: 1600.0,
+            width: 380.0,
+            height: 230.0,
+            click_through: false,
+        },
+        right_monitor,
+        None,
+    );
+    assert_eq!(clamped_right_overflow.x, 1920.0 + 2560.0 - 380.0);
+    assert_eq!(clamped_right_overflow.y, 1440.0 - 230.0);
+
+    let left_monitor = crate::session::MonitorRect::new(-1920.0, 0.0, 1920.0, 1080.0);
+    let clamped_left = AppSession::clamp_overlay_geometry_in_monitor(
+        crate::session::OverlayGeometry {
+            x: -1600.0,
+            y: 40.0,
+            width: 380.0,
+            height: 230.0,
+            click_through: true,
+        },
+        left_monitor,
+        None,
+    );
+    assert_eq!(clamped_left.x, -1600.0);
+    assert_eq!(clamped_left.y, 96.0);
+    assert!(clamped_left.click_through);
+}
+
+#[test]
+fn clamp_overlay_geometry_in_monitor_avoids_offset_windowed_dota_capture_strip() {
+    let primary_monitor = crate::session::MonitorRect::new(0.0, 0.0, 1920.0, 1080.0);
+    // Dota 2 running in an offset window whose top-bar capture strip spans y = 180..252.
+    let offset_strip = Some((200.0, 180.0, 1600.0, 72.0));
+    let clamped = AppSession::clamp_overlay_geometry_in_monitor(
+        crate::session::OverlayGeometry {
+            x: 240.0,
+            y: 160.0,
+            width: 380.0,
+            height: 230.0,
+            click_through: false,
+        },
+        primary_monitor,
+        offset_strip,
+    );
+    assert_eq!(clamped.x, 240.0);
+    assert_eq!(
+        clamped.y, 252.0,
+        "overlay overlapping offset capture strip (y=180..252) must be pushed below it to y=252.0"
+    );
+}
+
+#[test]
+fn picking_allied_hero_updates_cache_manager_target_item_heroes() {
+    use truesight_core::domain::{HeroId, Side};
+    let mut session = AppSession::new().unwrap();
+    session.set_slot_manual(Side::Allies, 0, HeroId(74));
+    assert!(
+        session
+            .cache_mgr
+            .effective_target_item_heroes()
+            .contains(&HeroId(74)),
+        "picking allied hero 74 must update cache_mgr.effective_target_item_heroes()"
+    );
+}

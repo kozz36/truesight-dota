@@ -79,8 +79,16 @@ impl TrueSightGuiApp {
             height,
             click_through: self.session.overlay_geometry.click_through,
         };
-        let clamped =
-            crate::session::AppSession::clamp_overlay_geometry(candidate, monitor_w, monitor_h);
+        let monitor_rect = self.session.active_monitor_rect.unwrap_or_else(|| {
+            crate::session::MonitorRect::infer_from_window_and_size(
+                x, y, width, height, monitor_w, monitor_h,
+            )
+        });
+        let clamped = crate::session::AppSession::clamp_overlay_geometry_in_monitor(
+            candidate,
+            monitor_rect,
+            self.session.active_capture_strip_rect,
+        );
 
         if (clamped.x - candidate.x).abs() > 0.5 || (clamped.y - candidate.y).abs() > 0.5 {
             vctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
