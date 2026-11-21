@@ -1635,3 +1635,138 @@ fn gui_build_bar_and_overlay_preserve_win_parity_and_render_variants() {
         },
     );
 }
+
+fn collect_painted_texts(shape: &egui::epaint::Shape, out: &mut Vec<String>) {
+    match shape {
+        egui::epaint::Shape::Text(text_shape) => {
+            out.push(text_shape.galley.text().to_string());
+        }
+        egui::epaint::Shape::Vec(shapes) => {
+            for inner in shapes {
+                collect_painted_texts(inner, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn gui_overlay_syncs_and_clamps_live_viewport_geometry() {
+    let mut session = AppSession::new().unwrap();
+    session.overlay_mode = true;
+    session.overlay_geometry = crate::session::OverlayGeometry {
+        x: 120.0,
+        y: 130.0,
+        width: 380.0,
+        height: 230.0,
+        click_through: false,
+    };
+    let mut app = TrueSightGuiApp::new(session, None, None);
+    let ctx = egui::Context::default();
+
+    let mut raw_input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            pos2(0.0, 0.0),
+            egui::vec2(380.0, 230.0),
+        )),
+        ..Default::default()
+    };
+    raw_input.viewports.insert(
+        egui::ViewportId::ROOT,
+        egui::ViewportInfo {
+            monitor_size: Some(egui::vec2(2560.0, 1440.0)),
+            outer_rect: Some(egui::Rect::from_min_size(
+                pos2(240.0, 40.0),
+                egui::vec2(380.0, 230.0),
+            )),
+            inner_rect: Some(egui::Rect::from_min_size(
+                pos2(240.0, 40.0),
+                egui::vec2(380.0, 230.0),
+            )),
+            ..Default::default()
+        },
+    );
+
+    let full_output = ctx.run(raw_input, |vctx| {
+        app.sync_live_overlay_viewport_geometry(vctx);
+    });
+
+    assert_eq!(app.session.overlay_geometry.x, 240.0);
+    assert_eq!(
+        app.session.overlay_geometry.y, 116.0,
+        "live viewport sync must clamp y >= 116.0 on 1440p monitor"
+    );
+    let root_cmds = &full_output
+        .viewport_output
+        .get(&egui::ViewportId::ROOT)
+        .expect("root viewport output must exist")
+        .commands;
+    assert!(
+        root_cmds.iter().any(|cmd| matches!(
+            cmd,
+            egui::ViewportCommand::OuterPosition(p) if (p.x - 240.0).abs() < 0.5 && (p.y - 116.0).abs() < 0.5
+        )),
+        "must emit ViewportCommand::OuterPosition to enforce clamp at runtime, got: {root_cmds:?}"
+    );
+}
+
+#[test]
+fn gui_overlay_keeps_next_badge_visible_for_fifth_step() {
+    use truesight_core::ports::ItemMetaRepository;
+
+    let mut session = AppSession::new().unwrap();
+    assert!(execute_command(&mut session, "ally 1 anti-mage").unwrap());
+    assert!(execute_command(&mut session, "enemy 1 phantom assassin").unwrap());
+    session.apply_event(truesight_core::ports::DraftEvent::GameRulesStateChanged {
+        state_name: "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS".into(),
+        game_time_secs: 1800,
+    });
+
+    let initial_build = session
+        .compute_recommended_build()
+        .expect("picked ally must produce a build");
+    assert!(
+        initial_build.steps.len() >= 5,
+        "build must have at least 5 steps"
+    );
+
+    // Mark the first 4 items as owned so [NEXT] moves to the 5th step (index 4).
+    session.owned_items = initial_build.steps[..4].iter().map(|s| s.item_id).collect();
+    let build_with_fifth_next = session.compute_recommended_build().unwrap();
+    assert_eq!(build_with_fifth_next.next_unowned_index, Some(4));
+    let fifth_item_name = session
+        .item_repo
+        .item_catalog(build_with_fifth_next.steps[4].item_id)
+        .map(|e| e.display_name)
+        .unwrap();
+
+    let mut app = TrueSightGuiApp::new(session, None, None);
+    let ctx = egui::Context::default();
+    let full_output = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                pos2(0.0, 0.0),
+                egui::vec2(380.0, 230.0),
+            )),
+            ..Default::default()
+        },
+        |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let _ = app.render_overlay_panel(ui);
+            });
+        },
+    );
+
+    let mut texts = Vec::new();
+    for clipped in &full_output.shapes {
+        collect_painted_texts(&clipped.shape, &mut texts);
+    }
+    assert!(
+        texts.iter().any(|t| t.contains("[NEXT]")),
+        "overlay must render [NEXT] badge even when next_unowned_index is 4; painted texts: {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|t| t.contains(&fifth_item_name)),
+        "overlay must render 5th step '{fifth_item_name}'; painted texts: {texts:?}"
+    );
+}

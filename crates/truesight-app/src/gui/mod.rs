@@ -500,6 +500,7 @@ impl TrueSightGuiApp {
             let builder = overlay::build_overlay_viewport_builder(self.session.overlay_geometry);
             let click_through = self.session.overlay_geometry.click_through;
             ctx.show_viewport_immediate(overlay_id, builder, |vctx, _class| {
+                self.sync_live_overlay_viewport_geometry(vctx);
                 vctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(click_through));
                 egui::CentralPanel::default()
                     .frame(egui::Frame::NONE)

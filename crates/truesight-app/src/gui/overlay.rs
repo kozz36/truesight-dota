@@ -30,6 +30,82 @@ pub(super) fn build_overlay_viewport_builder(geom: OverlayGeometry) -> egui::Vie
 }
 
 impl TrueSightGuiApp {
+    /// Reads live overlay viewport position, size, and monitor bounds, clamps them against
+    /// the active monitor and top-bar capture strip, enforces any correction via viewport commands,
+    /// and persists updated geometry to `ui_config.toml`.
+    pub(super) fn sync_live_overlay_viewport_geometry(&mut self, vctx: &egui::Context) {
+        let (vp_monitor_size, vp_outer_rect, vp_inner_rect, screen_rect) = vctx.input(|i| {
+            let vp = i.viewport();
+            (
+                vp.monitor_size,
+                vp.outer_rect,
+                vp.inner_rect,
+                i.screen_rect(),
+            )
+        });
+
+        let (monitor_w, monitor_h) = vp_monitor_size
+            .map(|s| (s.x, s.y))
+            .filter(|(w, h)| *w > 0.0 && *h > 0.0)
+            .unwrap_or_else(|| {
+                let s = screen_rect.size();
+                if s.x > 0.0 && s.y > 0.0 {
+                    (s.x, s.y)
+                } else {
+                    (1920.0, 1080.0)
+                }
+            });
+
+        let (x, y) = vp_outer_rect
+            .or(vp_inner_rect)
+            .map(|r| (r.min.x, r.min.y))
+            .unwrap_or((
+                self.session.overlay_geometry.x,
+                self.session.overlay_geometry.y,
+            ));
+
+        let (width, height) = vp_inner_rect
+            .or(vp_outer_rect)
+            .map(|r| (r.width(), r.height()))
+            .unwrap_or((
+                self.session.overlay_geometry.width,
+                self.session.overlay_geometry.height,
+            ));
+
+        let candidate = OverlayGeometry {
+            x,
+            y,
+            width,
+            height,
+            click_through: self.session.overlay_geometry.click_through,
+        };
+        let clamped =
+            crate::session::AppSession::clamp_overlay_geometry(candidate, monitor_w, monitor_h);
+
+        if (clamped.x - candidate.x).abs() > 0.5 || (clamped.y - candidate.y).abs() > 0.5 {
+            vctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
+                clamped.x, clamped.y,
+            )));
+        }
+        if (clamped.width - candidate.width).abs() > 0.5
+            || (clamped.height - candidate.height).abs() > 0.5
+        {
+            vctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+                clamped.width,
+                clamped.height,
+            )));
+        }
+
+        let prev = self.session.overlay_geometry;
+        if (clamped.x - prev.x).abs() > 0.5
+            || (clamped.y - prev.y).abs() > 0.5
+            || (clamped.width - prev.width).abs() > 0.5
+            || (clamped.height - prev.height).abs() > 0.5
+        {
+            self.session.set_overlay_geometry(clamped);
+        }
+    }
+
     /// Renders the compact overlay panel for both draft-phase and post-draft item build views.
     pub(super) fn render_overlay_panel(&mut self, ui: &mut egui::Ui) -> Rect {
         let summary = compute_overlay_summary(&self.session);
@@ -37,7 +113,7 @@ impl TrueSightGuiApp {
         let mut toggle_build_view = false;
         let mut toggle_click_through = false;
         let mut exit_overlay = false;
-        let mut clicked_variant: Option<(usize, ItemId)> = None;
+        let mut clicked_variant: Option<(ItemId, ItemId)> = None;
 
         let panel_resp = egui::Frame::NONE
             .fill(P_VOID.gamma_multiply(0.92))
@@ -236,7 +312,7 @@ impl TrueSightGuiApp {
                             .show(ui, |ui| {
                                 ui.horizontal_top(|ui| {
                                     ui.spacing_mut().item_spacing.x = 4.0;
-                                    for (idx, step) in build.steps.iter().take(4).enumerate() {
+                                    for (idx, step) in build.steps.iter().enumerate() {
                                         if idx > 0 {
                                             ui.label(
                                                 RichText::new(">").size(11.0).strong().color(P_GEM),
@@ -256,59 +332,67 @@ impl TrueSightGuiApp {
                                         } else {
                                             ""
                                         };
-                                        ui.vertical(|ui| {
-                                            ui.spacing_mut().item_spacing.y = 2.0;
-                                            egui::Frame::NONE
-                                                .fill(P_INDIGO_2)
-                                                .stroke(Stroke::new(
-                                                    1.0_f32,
-                                                    if is_next { P_GEM } else { P_LINE },
-                                                ))
-                                                .inner_margin(Margin::symmetric(5, 3))
-                                                .show(ui, |ui| {
-                                                    if !badge.is_empty() {
+                                        let step_resp = ui
+                                            .vertical(|ui| {
+                                                ui.spacing_mut().item_spacing.y = 2.0;
+                                                egui::Frame::NONE
+                                                    .fill(P_INDIGO_2)
+                                                    .stroke(Stroke::new(
+                                                        1.0_f32,
+                                                        if is_next { P_GEM } else { P_LINE },
+                                                    ))
+                                                    .inner_margin(Margin::symmetric(5, 3))
+                                                    .show(ui, |ui| {
+                                                        if !badge.is_empty() {
+                                                            ui.label(
+                                                                RichText::new(badge)
+                                                                    .size(8.5)
+                                                                    .strong()
+                                                                    .color(P_GEM),
+                                                            );
+                                                        }
                                                         ui.label(
-                                                            RichText::new(badge)
-                                                                .size(8.5)
+                                                            RichText::new(name)
+                                                                .size(9.5)
                                                                 .strong()
-                                                                .color(P_GEM),
+                                                                .color(if step.owned {
+                                                                    P_MUTED
+                                                                } else {
+                                                                    P_GLINT
+                                                                }),
                                                         );
-                                                    }
-                                                    ui.label(
-                                                        RichText::new(name)
-                                                            .size(9.5)
-                                                            .strong()
-                                                            .color(if step.owned {
-                                                                P_MUTED
-                                                            } else {
-                                                                P_GLINT
-                                                            }),
-                                                    );
-                                                });
-                                            for var in step.variants.iter().take(2) {
-                                                let vname = self
-                                                    .session
-                                                    .item_repo
-                                                    .item_catalog(var.item_id)
-                                                    .map(|e| e.display_name)
-                                                    .unwrap_or_else(|| {
-                                                        format!("#{}", var.item_id.0)
                                                     });
-                                                if ui
-                                                    .add(
-                                                        egui::Button::new(
-                                                            RichText::new(format!("[v] {vname}"))
+                                                for var in step.variants.iter().take(2) {
+                                                    let vname = self
+                                                        .session
+                                                        .item_repo
+                                                        .item_catalog(var.item_id)
+                                                        .map(|e| e.display_name)
+                                                        .unwrap_or_else(|| {
+                                                            format!("#{}", var.item_id.0)
+                                                        });
+                                                    if ui
+                                                        .add(
+                                                            egui::Button::new(
+                                                                RichText::new(format!(
+                                                                    "[v] {vname}"
+                                                                ))
                                                                 .size(8.5)
                                                                 .color(P_SILVER),
+                                                            )
+                                                            .fill(P_INDIGO_1),
                                                         )
-                                                        .fill(P_INDIGO_1),
-                                                    )
-                                                    .clicked()
-                                                {
-                                                    clicked_variant = Some((idx, var.item_id));
+                                                        .clicked()
+                                                    {
+                                                        clicked_variant =
+                                                            Some((step.item_id, var.item_id));
+                                                    }
                                                 }
-                                            }
-                                        });
+                                            })
+                                            .response;
+                                        if is_next {
+                                            step_resp.scroll_to_me(Some(Align::Center));
+                                        }
                                     }
                                 });
                             });
@@ -335,8 +419,9 @@ impl TrueSightGuiApp {
         if exit_overlay {
             self.session.set_overlay_mode(false);
         }
-        if let Some((step_idx, var_id)) = clicked_variant {
-            self.session.select_build_variant(step_idx, var_id);
+        if let Some((primary_id, var_id)) = clicked_variant {
+            self.session
+                .select_build_variant_for_item(primary_id, var_id);
         }
 
         let _ = TEAM_SIZE;

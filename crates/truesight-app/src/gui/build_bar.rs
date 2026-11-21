@@ -31,7 +31,10 @@ fn phase_label(phase: ItemPhase) -> &'static str {
 
 impl TrueSightGuiApp {
     pub(super) fn render_item_build_card(&mut self, ui: &mut egui::Ui) -> BuildBarRenderOutput {
-        let mut clicked_variant: Option<(usize, truesight_core::domain::ItemId)> = None;
+        let mut clicked_variant: Option<(
+            truesight_core::domain::ItemId,
+            truesight_core::domain::ItemId,
+        )> = None;
         let mut switch_to_picks = false;
 
         let card_rect = hud_card_fill(ui, |ui| {
@@ -293,7 +296,8 @@ impl TrueSightGuiApp {
                                                 ))
                                                 .clicked()
                                             {
-                                                clicked_variant = Some((idx, var.item_id));
+                                                clicked_variant =
+                                                    Some((step.item_id, var.item_id));
                                             }
                                         }
                                     });
@@ -307,8 +311,9 @@ impl TrueSightGuiApp {
         if switch_to_picks {
             self.session.toggle_post_draft_build_view();
         }
-        if let Some((step_idx, var_id)) = clicked_variant {
-            self.session.select_build_variant(step_idx, var_id);
+        if let Some((primary_id, var_id)) = clicked_variant {
+            self.session
+                .select_build_variant_for_item(primary_id, var_id);
         }
 
         BuildBarRenderOutput { card: card_rect }

@@ -3366,3 +3366,145 @@ fn overlay_geometry_clamps_to_monitor_and_avoids_topbar_capture_strip() {
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+#[test]
+fn overlay_geometry_clamps_against_dynamic_monitor_and_capture_strip() {
+    assert_eq!(AppSession::top_bar_capture_bottom_y(1080.0, None), 96.0);
+    assert_eq!(AppSession::top_bar_capture_bottom_y(1440.0, None), 116.0);
+    assert_eq!(AppSession::top_bar_capture_bottom_y(2160.0, None), 173.0);
+    assert_eq!(
+        AppSession::top_bar_capture_bottom_y(1440.0, Some((100.0, 200.0, 1280.0, 720.0))),
+        258.0
+    );
+
+    let clamped_1440 = AppSession::clamp_overlay_geometry(
+        crate::session::OverlayGeometry {
+            x: 200.0,
+            y: 50.0,
+            width: 380.0,
+            height: 230.0,
+            click_through: false,
+        },
+        2560.0,
+        1440.0,
+    );
+    assert!(
+        clamped_1440.y >= 116.0,
+        "1440p monitor must clamp overlay below 8% top-bar strip (y >= 116.0), got {}",
+        clamped_1440.y
+    );
+
+    // Overlapping a custom Dota 2 capture strip pushes overlay below cy + ch.
+    let clamped_capture = AppSession::clamp_overlay_geometry_against_capture(
+        crate::session::OverlayGeometry {
+            x: 150.0,
+            y: 210.0,
+            width: 380.0,
+            height: 230.0,
+            click_through: false,
+        },
+        2560.0,
+        1440.0,
+        Some((100.0, 200.0, 1280.0, 58.0)),
+    );
+    assert!(
+        clamped_capture.y >= 258.0,
+        "overlapping capture strip must push overlay below cy + ch (258.0), got {}",
+        clamped_capture.y
+    );
+
+    // Non-overlapping horizontal span only clamps against monitor top-bar floor (116.0).
+    let clamped_outside = AppSession::clamp_overlay_geometry_against_capture(
+        crate::session::OverlayGeometry {
+            x: 1500.0,
+            y: 120.0,
+            width: 380.0,
+            height: 230.0,
+            click_through: false,
+        },
+        2560.0,
+        1440.0,
+        Some((100.0, 200.0, 1280.0, 58.0)),
+    );
+    assert_eq!(clamped_outside.y, 120.0);
+}
+
+#[test]
+fn variant_selection_persists_across_step_reorder_by_original_item_id() {
+    use truesight_core::ports::{DraftEvent, ItemMetaRepository};
+
+    let mut session = AppSession::new().unwrap();
+    assert!(execute_command(&mut session, "ally 1 anti-mage").unwrap());
+    assert!(execute_command(&mut session, "enemy 1 phantom assassin").unwrap());
+    session.apply_event(DraftEvent::GameRulesStateChanged {
+        state_name: "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS".into(),
+        game_time_secs: 900,
+    });
+
+    let build_before = session
+        .compute_recommended_build()
+        .expect("picked ally must produce a build");
+
+    // Pick step 1 (which has a variant), then own step 0, step 0's variant, and step 1's original
+    // primary item so all three are kept in `steps`, shifting step 1 from index 1 to index 2.
+    let (orig_idx, orig_primary_id, var_id) = build_before
+        .steps
+        .iter()
+        .enumerate()
+        .skip(1)
+        .take(1)
+        .find_map(|(idx, s)| s.variants.first().map(|v| (idx, s.item_id, v.item_id)))
+        .expect("expected step 1 to have a variant");
+
+    let earlier_variant_id = build_before.steps[0]
+        .variants
+        .first()
+        .map(|v| v.item_id)
+        .expect("expected first step to have a variant");
+    let mut owned_slugs = Vec::new();
+    for item_id in [
+        build_before.steps[0].item_id,
+        earlier_variant_id,
+        orig_primary_id,
+    ] {
+        let slug = session
+            .item_repo
+            .item_catalog(item_id)
+            .expect("earlier item must exist in catalog")
+            .slug;
+        owned_slugs.push(format!("item_{slug}"));
+    }
+
+    // Select the variant on `orig_primary_id`.
+    session.select_build_variant_for_item(orig_primary_id, var_id);
+    let swapped = session.compute_recommended_build().unwrap();
+    assert_eq!(swapped.steps[orig_idx].item_id, var_id);
+
+    // Owning the first two steps plus the first step's variant shifts `orig_idx` to a new index.
+    session.apply_event(DraftEvent::InventoryUpdated {
+        item_slugs: owned_slugs,
+    });
+
+    let reordered = session.compute_recommended_build().unwrap();
+    let new_idx = reordered
+        .steps
+        .iter()
+        .position(|s| s.item_id == var_id)
+        .expect("selected variant must remain present after step reorder");
+    assert_ne!(
+        new_idx, orig_idx,
+        "owning earlier items must reorder step away from index {orig_idx}"
+    );
+    assert!(
+        reordered.steps[new_idx]
+            .variants
+            .iter()
+            .any(|v| v.item_id == orig_primary_id),
+        "original primary item must remain in variants at the new index {new_idx}"
+    );
+
+    // Clicking the original primary item back removes the override and restores `orig_primary_id`.
+    session.select_build_variant_for_item(var_id, orig_primary_id);
+    let restored = session.compute_recommended_build().unwrap();
+    assert_eq!(restored.steps[new_idx].item_id, orig_primary_id);
+}

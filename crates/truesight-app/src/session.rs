@@ -29,6 +29,19 @@ pub(crate) struct SyncCompletion {
 type BackgroundSyncRunner =
     Arc<dyn Fn(LocalCacheManager, bool) -> Result<String, String> + Send + Sync>;
 
+/// User-selected item variant override keyed by `(hero_id, role, primary_item_id)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VariantSelection {
+    /// Hero for which this build variant override was chosen.
+    pub hero_id: HeroId,
+    /// Role for which this build variant override was chosen.
+    pub role: Role,
+    /// Original primary item ID of the build step before swapping.
+    pub primary_item_id: ItemId,
+    /// Currently selected variant item ID replacing `primary_item_id`.
+    pub variant_item_id: ItemId,
+}
+
 pub struct AppSession {
     pub draft: DraftState,
     pub matrix: MatchupMatrix,
@@ -66,7 +79,7 @@ pub struct AppSession {
     pub item_repo: SeededItemMetaRepository,
     pub game_time_secs: i32,
     pub owned_items: Vec<ItemId>,
-    pub selected_build_variants: Vec<(usize, ItemId)>,
+    pub selected_build_variants: Vec<VariantSelection>,
     pub post_draft_view_override: Option<bool>,
     pub active_game_patch: String,
     pub overlay_mode: bool,
@@ -1201,17 +1214,60 @@ impl AppSession {
             .find_map(|(idx, slot)| slot.map(|p| (p.hero_id, p.role.unwrap_or(Role::ALL[idx]))))
     }
 
-    /// Selects a variant item override for a given build progression step index.
+    /// Selects a variant item override keyed by the step's currently displayed primary item ID
+    /// within the active `(hero_id, role)` build context.
+    pub fn select_build_variant_for_item(
+        &mut self,
+        primary_item_id: ItemId,
+        variant_item_id: ItemId,
+    ) {
+        let Some((hero_id, role)) = self.active_build_hero() else {
+            return;
+        };
+
+        // If `primary_item_id` is currently the displayed variant of an existing override,
+        // update that original entry (or remove it when switching back to the original primary).
+        if let Some(pos) = self.selected_build_variants.iter().position(|entry| {
+            entry.hero_id == hero_id
+                && entry.role == role
+                && entry.variant_item_id == primary_item_id
+        }) {
+            if variant_item_id == self.selected_build_variants[pos].primary_item_id {
+                self.selected_build_variants.remove(pos);
+            } else {
+                self.selected_build_variants[pos].variant_item_id = variant_item_id;
+            }
+            return;
+        }
+
+        if let Some(pos) = self.selected_build_variants.iter().position(|entry| {
+            entry.hero_id == hero_id
+                && entry.role == role
+                && entry.primary_item_id == primary_item_id
+        }) {
+            if variant_item_id == primary_item_id {
+                self.selected_build_variants.remove(pos);
+            } else {
+                self.selected_build_variants[pos].variant_item_id = variant_item_id;
+            }
+        } else if variant_item_id != primary_item_id {
+            self.selected_build_variants.push(VariantSelection {
+                hero_id,
+                role,
+                primary_item_id,
+                variant_item_id,
+            });
+        }
+    }
+
+    /// Selects a variant item override for a given build progression step index by resolving
+    /// its current primary item ID and delegating to [`AppSession::select_build_variant_for_item`].
     pub fn select_build_variant(&mut self, step_index: usize, variant_item_id: ItemId) {
-        if let Some(entry) = self
-            .selected_build_variants
-            .iter_mut()
-            .find(|(idx, _)| *idx == step_index)
+        if let Some(primary_item_id) = self
+            .compute_recommended_build()
+            .and_then(|build| build.steps.get(step_index).map(|s| s.item_id))
         {
-            entry.1 = variant_item_id;
-        } else {
-            self.selected_build_variants
-                .push((step_index, variant_item_id));
+            self.select_build_variant_for_item(primary_item_id, variant_item_id);
         }
     }
 
@@ -1231,11 +1287,23 @@ impl AppSession {
         )
         .ok()?;
 
-        for &(step_idx, chosen_id) in &self.selected_build_variants {
-            let Some(step) = build.steps.get_mut(step_idx) else {
+        for sel in self
+            .selected_build_variants
+            .iter()
+            .filter(|sel| sel.hero_id == hero_id && sel.role == role)
+        {
+            let Some(step) = build
+                .steps
+                .iter_mut()
+                .find(|s| s.item_id == sel.primary_item_id)
+            else {
                 continue;
             };
-            let Some(var_pos) = step.variants.iter().position(|v| v.item_id == chosen_id) else {
+            let Some(var_pos) = step
+                .variants
+                .iter()
+                .position(|v| v.item_id == sel.variant_item_id)
+            else {
                 continue;
             };
             let chosen = step.variants.remove(var_pos);
@@ -1268,16 +1336,53 @@ impl AppSession {
         Some(build)
     }
 
-    /// Clamps overlay geometry to safe monitor bounds while avoiding the top 8% Dota 2 capture strip (`y >= 96.0`).
+    /// Computes the bottom Y coordinate of the Dota 2 top-bar portrait capture strip.
+    ///
+    /// When `dota_window_rect` `(x, y, w, h)` is known, uses `y + (h * 0.08).ceil().max(48.0)`.
+    /// Otherwise uses the monitor-level floor `(monitor_h * 0.08).ceil().max(96.0)`.
+    pub fn top_bar_capture_bottom_y(
+        monitor_h: f32,
+        dota_window_rect: Option<(f32, f32, f32, f32)>,
+    ) -> f32 {
+        match dota_window_rect {
+            Some((_, dota_y, _, dota_h)) => dota_y + (dota_h * 0.08).ceil().max(48.0),
+            None => (monitor_h * 0.08).ceil().max(96.0),
+        }
+    }
+
+    /// Clamps overlay geometry to safe monitor bounds while avoiding the Dota 2 top-bar capture strip.
     pub fn clamp_overlay_geometry(
-        mut geom: OverlayGeometry,
+        geom: OverlayGeometry,
         monitor_w: f32,
         monitor_h: f32,
     ) -> OverlayGeometry {
-        geom.width = geom.width.clamp(280.0, 520.0);
-        geom.height = geom.height.clamp(160.0, 360.0);
+        Self::clamp_overlay_geometry_against_capture(geom, monitor_w, monitor_h, None)
+    }
+
+    /// Clamps overlay geometry to safe monitor bounds and pushes it below `capture_strip_rect`
+    /// `(cx, cy, cw, ch)` when horizontally overlapping, or below `(monitor_h * 0.08).ceil().max(96.0)`.
+    pub fn clamp_overlay_geometry_against_capture(
+        mut geom: OverlayGeometry,
+        monitor_w: f32,
+        monitor_h: f32,
+        capture_strip_rect: Option<(f32, f32, f32, f32)>,
+    ) -> OverlayGeometry {
+        geom.width = geom.width.clamp(280.0, 520.0).min(monitor_w.max(280.0));
+        geom.height = geom.height.clamp(160.0, 360.0).min(monitor_h.max(160.0));
         geom.x = geom.x.clamp(0.0, (monitor_w - geom.width).max(0.0));
-        geom.y = geom.y.clamp(96.0, (monitor_h - geom.height).max(96.0));
+
+        let monitor_top_floor = (monitor_h * 0.08).ceil().max(96.0);
+        let min_safe_y = match capture_strip_rect {
+            Some((cx, cy, cw, ch))
+                if cw > 0.0 && ch > 0.0 && geom.x < cx + cw && geom.x + geom.width > cx =>
+            {
+                (cy + ch).max(monitor_top_floor)
+            }
+            _ => monitor_top_floor,
+        };
+        geom.y = geom
+            .y
+            .clamp(min_safe_y, (monitor_h - geom.height).max(min_safe_y));
         geom
     }
 
