@@ -5377,7 +5377,7 @@ fn sync_fetches_and_atomically_publishes_item_constants_and_builds_from_empty_ca
                 ))),
             },
             |_token| Err(truesight_core::ports::PortError("no stratz token".into())),
-            |_token| Err(truesight_core::ports::PortError("no stratz token".into())),
+            |_token, _hero_id| Err(truesight_core::ports::PortError("no stratz token".into())),
         )
         .expect("sync_from_sources_with should succeed");
 
@@ -5434,6 +5434,211 @@ fn sync_fetches_and_atomically_publishes_item_constants_and_builds_from_empty_ca
         mgr.is_meta_stale(now + 60),
         "missing item_constants.json must mark meta cache stale"
     );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn sync_from_sources_with_stratz_token_preserves_requested_hero_id_without_row_echo() {
+    use crate::sync::{LocalCacheManager, stratz_hero_item_purchases_graphql_payload};
+    use truesight_core::domain::{Bracket, HeroId, ItemId, Role};
+    use truesight_core::ports::ItemMetaRepository;
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_sync_stratz_items_no_row_hero_id_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    let mut mgr = LocalCacheManager::with_optional_account(tmp_dir.clone(), None);
+    mgr.stratz_api_token = Some("eyJhbGciOinone.eyJleHAiOjQxMDI0NDQ4MDB9.sig".to_string());
+    mgr.set_target_item_heroes(vec![HeroId(2)]);
+    let now = 1_795_000_000_u64;
+
+    let payload = stratz_hero_item_purchases_graphql_payload(2);
+    assert!(
+        payload.contains("itemStartingPurchase(heroId: 2)")
+            && payload.contains("itemFullPurchase(heroId: 2)"),
+        "STRATZ item query must target requested heroId: 2, got: {payload}"
+    );
+
+    let hero_stats_json = r#"[{"id": 2, "4_pick": 1000, "4_win": 530}]"#;
+    let item_constants_json = r#"{
+        "blink": {"id": 1, "dname": "Blink Dagger", "cost": 2250, "components": null},
+        "blade_mail": {"id": 127, "dname": "Blade Mail", "cost": 2100, "components": null},
+        "black_king_bar": {"id": 116, "dname": "Black King Bar", "cost": 4050, "components": null}
+    }"#;
+    let stratz_items_response = r#"{"data":{"heroStats":{"itemStartingPurchase":[{"itemId":1,"time":-60,"instance":0,"matchCount":1200,"winCount":680,"wasGiven":false}],"itemFullPurchase":[{"itemId":1,"time":720,"instance":0,"matchCount":4200,"winCount":2450},{"itemId":127,"time":980,"instance":0,"matchCount":3900,"winCount":2280},{"itemId":116,"time":1650,"instance":0,"matchCount":2800,"winCount":1720}]}}}"#;
+
+    let mut requested_hero_ids = Vec::new();
+    mgr.sync_from_sources_with(
+        false,
+        now,
+        |url| match url {
+            "https://api.opendota.com/api/heroStats" => Ok(hero_stats_json.to_string()),
+            "https://api.opendota.com/api/constants/items" => Ok(item_constants_json.to_string()),
+            other => Err(truesight_core::ports::PortError(format!(
+                "unexpected fallback URL when STRATZ succeeded: {other}"
+            ))),
+        },
+        |_token| Ok(r#"{"data":{"heroStats":{"matchUp":[]}}}"#.to_string()),
+        |_token, hero_id| {
+            requested_hero_ids.push(hero_id);
+            assert_eq!(hero_id, 2, "must request HeroId(2) instead of hardcoded 1");
+            Ok(stratz_items_response.to_string())
+        },
+    )
+    .expect("sync_from_sources_with with STRATZ token should succeed");
+
+    assert_eq!(requested_hero_ids, vec![2]);
+
+    let stats = mgr
+        .build_item_repository()
+        .hero_item_stats(HeroId(2), Role::Offlane, Bracket::Archon)
+        .expect("Axe (HeroId(2)) item stats must be cached from STRATZ response");
+    assert!(
+        stats.iter().any(|s| s.item_id == ItemId(1)),
+        "expected Blink Dagger (ItemId(1)) in HeroId(2) stats"
+    );
+    assert!(
+        stats.iter().any(|s| s.item_id == ItemId(127)),
+        "expected Blade Mail (ItemId(127)) in HeroId(2) stats"
+    );
+    assert!(
+        stats.iter().any(|s| s.item_id == ItemId(116)),
+        "expected Black King Bar (ItemId(116)) in HeroId(2) stats"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn sync_from_sources_with_opendota_fallback_requests_configured_target_hero() {
+    use crate::sync::LocalCacheManager;
+    use truesight_core::domain::{Bracket, HeroId, ItemId, Role};
+    use truesight_core::ports::ItemMetaRepository;
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_sync_opendota_target_hero_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    let mut mgr = LocalCacheManager::with_optional_account(tmp_dir.clone(), None);
+    mgr.set_target_item_heroes(vec![HeroId(2)]);
+    let now = 1_795_000_000_u64;
+
+    let hero_stats_json = r#"[{"id": 2, "4_pick": 1000, "4_win": 530}]"#;
+    let item_constants_json = r#"{
+        "blink": {"id": 1, "dname": "Blink Dagger", "cost": 2250, "components": null},
+        "blade_mail": {"id": 127, "dname": "Blade Mail", "cost": 2100, "components": null}
+    }"#;
+    let axe_timings_json = r#"[
+        {"hero_id": 2, "item": "blink", "time": 720, "games": "320", "wins": "192"},
+        {"hero_id": 2, "item": "blade_mail", "time": 960, "games": "280", "wins": "168"}
+    ]"#;
+
+    let mut requested_item_urls = Vec::new();
+    mgr.sync_from_sources_with(
+        false,
+        now,
+        |url| match url {
+            "https://api.opendota.com/api/heroStats" => Ok(hero_stats_json.to_string()),
+            "https://api.opendota.com/api/constants/items" => Ok(item_constants_json.to_string()),
+            u if u.starts_with("https://api.opendota.com/api/scenarios/itemTimings") => {
+                requested_item_urls.push(u.to_string());
+                assert_eq!(
+                    u,
+                    "https://api.opendota.com/api/scenarios/itemTimings?hero_id=2"
+                );
+                Ok(axe_timings_json.to_string())
+            }
+            other => Err(truesight_core::ports::PortError(format!(
+                "unexpected URL: {other}"
+            ))),
+        },
+        |_token| Err(truesight_core::ports::PortError("no stratz token".into())),
+        |_token, _hero_id| Err(truesight_core::ports::PortError("no stratz token".into())),
+    )
+    .expect("OpenDota fallback sync for HeroId(2) should succeed");
+
+    assert_eq!(
+        requested_item_urls,
+        vec!["https://api.opendota.com/api/scenarios/itemTimings?hero_id=2"]
+    );
+    let stats = mgr
+        .build_item_repository()
+        .hero_item_stats(HeroId(2), Role::Offlane, Bracket::Archon)
+        .expect("HeroId(2) item stats must be cached from OpenDota fallback");
+    assert!(stats.iter().any(|s| s.item_id == ItemId(1)));
+    assert!(stats.iter().any(|s| s.item_id == ItemId(127)));
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn sync_from_sources_with_accumulates_multiple_target_item_heroes() {
+    use crate::sync::LocalCacheManager;
+    use truesight_core::domain::{Bracket, HeroId, ItemId, Role};
+    use truesight_core::ports::ItemMetaRepository;
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_sync_multi_target_heroes_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    let mut mgr = LocalCacheManager::with_optional_account(tmp_dir.clone(), None);
+    mgr.set_target_item_heroes(vec![HeroId(2), HeroId(74)]);
+    let now = 1_795_000_000_u64;
+
+    let hero_stats_json =
+        r#"[{"id": 2, "4_pick": 1000, "4_win": 530}, {"id": 74, "4_pick": 1000, "4_win": 510}]"#;
+    let item_constants_json = r#"{
+        "blink": {"id": 1, "dname": "Blink Dagger", "cost": 2250, "components": null},
+        "hand_of_midas": {"id": 65, "dname": "Hand of Midas", "cost": 2200, "components": null}
+    }"#;
+
+    let mut requested_item_urls = Vec::new();
+    mgr.sync_from_sources_with(
+        false,
+        now,
+        |url| match url {
+            "https://api.opendota.com/api/heroStats" => Ok(hero_stats_json.to_string()),
+            "https://api.opendota.com/api/constants/items" => Ok(item_constants_json.to_string()),
+            "https://api.opendota.com/api/scenarios/itemTimings?hero_id=2" => {
+                requested_item_urls.push(url.to_string());
+                Ok(r#"[{"hero_id": 2, "item": "blink", "time": 720, "games": "300", "wins": "180"}]"#.to_string())
+            }
+            "https://api.opendota.com/api/scenarios/itemTimings?hero_id=74" => {
+                requested_item_urls.push(url.to_string());
+                Ok(r#"[{"hero_id": 74, "item": "hand_of_midas", "time": 600, "games": "400", "wins": "220"}]"#.to_string())
+            }
+            other => Err(truesight_core::ports::PortError(format!(
+                "unexpected URL: {other}"
+            ))),
+        },
+        |_token| Err(truesight_core::ports::PortError("no stratz token".into())),
+        |_token, _hero_id| Err(truesight_core::ports::PortError("no stratz token".into())),
+    )
+    .expect("multi-hero sync should succeed");
+
+    assert_eq!(
+        requested_item_urls,
+        vec![
+            "https://api.opendota.com/api/scenarios/itemTimings?hero_id=2",
+            "https://api.opendota.com/api/scenarios/itemTimings?hero_id=74",
+        ]
+    );
+    let repo = mgr.build_item_repository();
+    let axe_stats = repo
+        .hero_item_stats(HeroId(2), Role::Offlane, Bracket::Archon)
+        .expect("HeroId(2) stats must be cached");
+    assert!(axe_stats.iter().any(|s| s.item_id == ItemId(1)));
+    let invoker_stats = repo
+        .hero_item_stats(HeroId(74), Role::Mid, Bracket::Archon)
+        .expect("HeroId(74) stats must be cached");
+    assert!(invoker_stats.iter().any(|s| s.item_id == ItemId(65)));
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }

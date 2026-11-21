@@ -365,6 +365,7 @@ pub struct LocalCacheManager {
     pub explicitly_unlinked: bool,
     pub stratz_api_token: Option<String>,
     pub stratz_token_exp: Option<u64>,
+    pub target_item_hero_ids: Vec<HeroId>,
     sync_generation: u64,
     cancel_token: Arc<AtomicBool>,
     coordinator: Arc<Mutex<CacheSyncState>>,
@@ -420,6 +421,7 @@ impl LocalCacheManager {
             explicitly_unlinked: false,
             stratz_api_token: None,
             stratz_token_exp: None,
+            target_item_hero_ids: Vec::new(),
             sync_generation: 0,
             cancel_token: Arc::new(AtomicBool::new(false)),
             coordinator,
@@ -489,6 +491,38 @@ impl LocalCacheManager {
         self.explicit_override = false;
         self.explicitly_unlinked = false;
         self.player_account_id = detect_local_steam_vdf();
+    }
+
+    /// Configures the target hero IDs whose item builds should be synchronized.
+    /// Duplicates and invalid zero IDs are removed while preserving order.
+    pub fn set_target_item_heroes(&mut self, heroes: Vec<HeroId>) {
+        self.target_item_hero_ids = deduplicate_hero_ids(heroes);
+    }
+
+    /// Returns the deduplicated list of hero IDs targeted by item-build sync,
+    /// defaulting to `[HeroId(1)]` when no explicit target heroes are configured.
+    pub fn effective_target_item_heroes(&self) -> Vec<HeroId> {
+        let deduped = deduplicate_hero_ids(self.target_item_hero_ids.clone());
+        if deduped.is_empty() {
+            vec![HeroId(1)]
+        } else {
+            deduped
+        }
+    }
+
+    fn is_target_item_heroes_uncached(&self) -> bool {
+        let configured = deduplicate_hero_ids(self.target_item_hero_ids.clone());
+        if configured.is_empty() {
+            return false;
+        }
+        let Ok(existing) = fs::read_to_string(self.hero_item_stats_json_path()) else {
+            return true;
+        };
+        let grouped =
+            parse_hero_item_stats_grouped_by_hero(&existing, &SeededItemMetaRepository::new());
+        configured
+            .iter()
+            .any(|hid| !grouped.iter().any(|(cached_id, _)| cached_id == hid))
     }
 
     pub fn now_unix() -> u64 {
@@ -840,15 +874,16 @@ impl LocalCacheManager {
     where
         FUrl: FnMut(&str) -> Result<String, PortError>,
         FStratzSyn: FnMut(&str) -> Result<String, PortError>,
-        FStratzItems: FnMut(&str) -> Result<String, PortError>,
+        FStratzItems: FnMut(&str, u16) -> Result<String, PortError>,
     {
         if self.is_cancelled() {
             return Err(PortError("Sync cancelled".into()));
         }
         let need_meta = force || self.is_meta_stale(now_unix);
+        let need_item_stats = force || need_meta || self.is_target_item_heroes_uncached();
         let need_player =
             self.player_account_id.is_some() && (force || self.is_player_stale(now_unix));
-        if !need_meta && !need_player {
+        if !need_meta && !need_item_stats && !need_player {
             return Ok("DB cache is already fresh (Meta <24h, Player <1h).".into());
         }
 
@@ -899,36 +934,78 @@ impl LocalCacheManager {
                     }
                 }
             }
-            if !self.is_cancelled() {
-                let mut item_build_staged = false;
-                if let Some(ref token) = stratz_token {
-                    if let Some(sb) = fetch_stratz_items(token)
-                        .ok()
-                        .filter(|s| !parse_stratz_hero_item_purchase_json(s).is_empty())
-                    {
-                        fetched_hero_items = Some(sb);
-                        updated_parts.push("itemBuilds (24h TTL)");
-                        item_build_staged = true;
+        }
+        if need_item_stats && !self.is_cancelled() {
+            let mut catalog_repo = SeededItemMetaRepository::new();
+            if let Some(ref ic_body) = fetched_item_constants {
+                let parsed = parse_opendota_item_constants_json(ic_body);
+                if !parsed.is_empty() {
+                    catalog_repo.custom_catalog = parsed;
+                }
+            } else if let Ok(existing_ic) = fs::read_to_string(self.item_constants_json_path()) {
+                let parsed = parse_opendota_item_constants_json(&existing_ic);
+                if !parsed.is_empty() {
+                    catalog_repo.custom_catalog = parsed;
+                }
+            }
+
+            let mut merged_hero_items: std::collections::BTreeMap<u16, Vec<HeroItemStat>> =
+                std::collections::BTreeMap::new();
+            if let Ok(existing_his) = fs::read_to_string(self.hero_item_stats_json_path()) {
+                for (hid, stats) in
+                    parse_hero_item_stats_grouped_by_hero(&existing_his, &catalog_repo)
+                {
+                    if !stats.is_empty() {
+                        merged_hero_items.insert(hid.0, stats);
                     }
                 }
-                if !item_build_staged {
-                    let mut catalog_repo = SeededItemMetaRepository::new();
-                    if let Some(ref ic_body) = fetched_item_constants {
-                        let parsed = parse_opendota_item_constants_json(ic_body);
-                        if !parsed.is_empty() {
-                            catalog_repo.custom_catalog = parsed;
+            }
+
+            let restrict_to_requested = !self.target_item_hero_ids.is_empty();
+            let mut any_item_stats_fetched = false;
+            for hero_id in self.effective_target_item_heroes() {
+                if self.is_cancelled() {
+                    break;
+                }
+                let mut fetched_for_hero = false;
+                if let Some(ref token) = stratz_token {
+                    if let Ok(sb) = fetch_stratz_items(token, hero_id.0) {
+                        let stats = parse_stratz_hero_item_purchase_json(&sb);
+                        if !stats.is_empty() {
+                            merged_hero_items.insert(hero_id.0, stats);
+                            any_item_stats_fetched = true;
+                            fetched_for_hero = true;
                         }
                     }
-                    if let Some(ib_body) = fetch_opendota_url(
-                        "https://api.opendota.com/api/scenarios/itemTimings?hero_id=1",
-                    )
-                    .ok()
-                    .filter(|b| !parse_hero_item_stats_grouped_by_hero(b, &catalog_repo).is_empty())
-                    {
-                        fetched_hero_items = Some(ib_body);
-                        updated_parts.push("itemBuilds (24h TTL)");
+                }
+                if !fetched_for_hero {
+                    let url = format!(
+                        "https://api.opendota.com/api/scenarios/itemTimings?hero_id={}",
+                        hero_id.0
+                    );
+                    if let Ok(ib_body) = fetch_opendota_url(&url) {
+                        let grouped =
+                            parse_hero_item_stats_grouped_by_hero(&ib_body, &catalog_repo);
+                        if !grouped.is_empty() {
+                            for (hid, stats) in grouped {
+                                if (!restrict_to_requested || hid == hero_id) && !stats.is_empty() {
+                                    merged_hero_items.insert(hid.0, stats);
+                                    any_item_stats_fetched = true;
+                                }
+                            }
+                        } else {
+                            let stats = parse_opendota_item_timings_json(&ib_body, &catalog_repo);
+                            if !stats.is_empty() {
+                                merged_hero_items.insert(hero_id.0, stats);
+                                any_item_stats_fetched = true;
+                            }
+                        }
                     }
                 }
+            }
+            if any_item_stats_fetched && !merged_hero_items.is_empty() {
+                fetched_hero_items = Some(serialize_grouped_hero_item_stats(&merged_hero_items));
+                updated_parts.push("itemBuilds (24h TTL)");
             }
         }
         if need_player && !self.is_cancelled() {
@@ -1497,9 +1574,18 @@ fn fetch_stratz_with_synergy_graphql(token: &str) -> Result<String, PortError> {
     })
 }
 
-fn fetch_stratz_hero_item_purchases_graphql(token: &str) -> Result<String, PortError> {
+pub(crate) fn stratz_hero_item_purchases_graphql_payload(hero_id: u16) -> String {
+    format!(
+        r#"{{"query":"{{ heroStats {{ itemStartingPurchase(heroId: {hero_id}) {{ itemId time instance matchCount winCount wasGiven }} itemFullPurchase(heroId: {hero_id}) {{ itemId time instance matchCount winCount }} }} }}"}}"#
+    )
+}
+
+fn fetch_stratz_hero_item_purchases_graphql(
+    token: &str,
+    hero_id: u16,
+) -> Result<String, PortError> {
     let auth_header = format!("Authorization: Bearer {token}");
-    let query = r#"{"query":"{ heroStats { itemStartingPurchase(heroId: 1) { itemId time instance matchCount winCount wasGiven } itemFullPurchase(heroId: 1) { itemId time instance matchCount winCount } } }"}"#;
+    let query = stratz_hero_item_purchases_graphql_payload(hero_id);
     run_curl(
         "https://api.stratz.com/graphql",
         &[
@@ -1510,7 +1596,7 @@ fn fetch_stratz_hero_item_purchases_graphql(token: &str) -> Result<String, PortE
             "-H",
             &auth_header,
             "-d",
-            query,
+            &query,
         ],
         "STRATZ item builds fetch",
     )
@@ -2104,4 +2190,45 @@ fn parse_hero_item_stats_grouped_by_hero(
         .into_iter()
         .map(|(hid, stats)| (HeroId(hid), stats))
         .collect()
+}
+
+fn deduplicate_hero_ids(heroes: Vec<HeroId>) -> Vec<HeroId> {
+    let mut out = Vec::new();
+    for hid in heroes {
+        if hid.0 > 0 && !out.contains(&hid) {
+            out.push(hid);
+        }
+    }
+    out
+}
+
+fn serialize_grouped_hero_item_stats(
+    grouped: &std::collections::BTreeMap<u16, Vec<HeroItemStat>>,
+) -> String {
+    let mut entries = Vec::with_capacity(grouped.len());
+    for (&hero_id, stats) in grouped {
+        let mut starting = Vec::new();
+        let mut full = Vec::new();
+        for stat in stats {
+            if stat.phase == ItemPhase::Starting {
+                starting.push(format!(
+                    r#"{{"itemId":{},"time":0,"instance":0,"matchCount":{},"winCount":{},"wasGiven":false}}"#,
+                    stat.item_id.0, stat.match_count, stat.win_count
+                ));
+            } else {
+                let time_secs = (stat.avg_time_mins * 60.0).round().max(0.0) as i64;
+                full.push(format!(
+                    r#"{{"itemId":{},"time":{},"instance":0,"matchCount":{},"winCount":{}}}"#,
+                    stat.item_id.0, time_secs, stat.match_count, stat.win_count
+                ));
+            }
+        }
+        entries.push(format!(
+            r#"{{"heroId":{},"itemStartingPurchase":[{}],"itemFullPurchase":[{}]}}"#,
+            hero_id,
+            starting.join(","),
+            full.join(",")
+        ));
+    }
+    format!("[{}]", entries.join(","))
 }
