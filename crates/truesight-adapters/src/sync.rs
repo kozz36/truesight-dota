@@ -1141,8 +1141,30 @@ pub(crate) fn stratz_matchup_graphql_payload(hero_ids: &[u16]) -> String {
     )
 }
 
+/// Returns `true` when `json` contains an `"errors"` field whose array value has at least one
+/// non-whitespace character before `]`.
+pub(crate) fn has_nonempty_graphql_errors(json: &str) -> bool {
+    for (idx, _) in json.match_indices("\"errors\"") {
+        let after_key = json[idx + "\"errors\"".len()..].trim_start();
+        let Some(after_colon) = after_key.strip_prefix(':') else {
+            continue;
+        };
+        let after_ws = after_colon.trim_start();
+        if let Some(after_bracket) = after_ws.strip_prefix('[') {
+            let trimmed = after_bracket.trim_start();
+            if !trimmed.is_empty() && !trimmed.starts_with(']') {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Parses STRATZ empirical `with` synergy JSON rows (`heroId1`, `heroId2`, `synergy` / `wins`+`matchCount`).
 pub fn parse_stratz_with_synergy_json(json: &str) -> Vec<(HeroId, HeroId, f32, u32)> {
+    if has_nonempty_graphql_errors(json) {
+        return Vec::new();
+    }
     let mut rows = Vec::new();
     for obj_chunk in json.split('{').skip(1) {
         let Some(end) = obj_chunk.find('}') else {
@@ -1198,8 +1220,13 @@ where
         .map(|row| row.id)
         .collect();
     let mut responses = Vec::new();
-    for chunk in hero_ids.chunks(32) {
+    for (batch_idx, chunk) in hero_ids.chunks(32).enumerate() {
         let body = fetch_batch(chunk)?;
+        if has_nonempty_graphql_errors(&body) {
+            return Err(PortError(format!(
+                "STRATZ GraphQL batch {batch_idx} returned GraphQL errors"
+            )));
+        }
         if parse_stratz_with_synergy_json(&body).is_empty() {
             return Err(PortError(
                 "STRATZ GraphQL batch returned no parseable synergy rows".to_string(),

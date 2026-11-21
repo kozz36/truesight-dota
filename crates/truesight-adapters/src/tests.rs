@@ -4900,3 +4900,75 @@ fn fetch_stratz_with_synergy_batches_fails_closed_and_preserves_existing_cache()
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+#[test]
+fn fetch_stratz_with_synergy_batches_rejects_partial_graphql_response_with_nonempty_errors() {
+    use crate::sync::{
+        LocalCacheManager, fetch_stratz_with_synergy_batches_with, parse_stratz_with_synergy_json,
+    };
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_stratz_graphql_errors_test_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let cache = LocalCacheManager::with_optional_account(tmp_dir.clone(), None);
+    let initial_complete =
+        r#"[{"heroId1": 1, "heroId2": 57, "synergy": 2.445, "matchCount": 3444}]"#;
+    cache
+        .publish_staged_cache(
+            None,
+            Some(initial_complete),
+            None,
+            None,
+            None,
+            1_800_000_000,
+        )
+        .expect("initial cache persist should succeed");
+
+    let partial_with_errors = r#"{"data":{"heroStats":{"matchUp":[{"heroId":1,"with":[{"heroId1":1,"heroId2":2,"matchCount":500,"synergy":2.5,"winCount":265}]}]}},"errors":[{"message":"partial resolver failure"}]}"#;
+    assert!(
+        parse_stratz_with_synergy_json(partial_with_errors).is_empty(),
+        "parse_stratz_with_synergy_json must return empty Vec when top-level errors is nonempty"
+    );
+
+    let empty_errors_array = r#"{"data":{"heroStats":{"matchUp":[{"heroId":1,"with":[{"heroId1":1,"heroId2":2,"matchCount":500,"synergy":2.5,"winCount":265}]}]}},"errors":[]}"#;
+    assert_eq!(
+        parse_stratz_with_synergy_json(empty_errors_array).len(),
+        1,
+        "empty errors array must still allow valid synergy rows"
+    );
+
+    let null_errors = r#"{"data":{"heroStats":{"matchUp":[{"heroId":1,"with":[{"heroId1":1,"heroId2":2,"matchCount":500,"synergy":2.5,"winCount":265}]}]}},"errors":null}"#;
+    assert_eq!(
+        parse_stratz_with_synergy_json(null_errors).len(),
+        1,
+        "null errors must still allow valid synergy rows"
+    );
+
+    let mut call_idx = 0usize;
+    let res = fetch_stratz_with_synergy_batches_with(|_chunk| {
+        call_idx += 1;
+        if call_idx == 1 {
+            Ok(r#"{"data":{"heroStats":{"matchUp":[{"heroId":1,"with":[{"heroId1":1,"heroId2":97,"matchCount":1200,"synergy":3.5,"winCount":650}]}]}}}"#.to_string())
+        } else {
+            Ok(partial_with_errors.to_string())
+        }
+    });
+    assert!(
+        res.is_err(),
+        "partial GraphQL response with nonempty top-level errors must fail the entire refresh"
+    );
+
+    let cached_after = std::fs::read_to_string(tmp_dir.join("stratz_synergy.json"))
+        .expect("cached stratz_synergy.json should still exist");
+    assert_eq!(
+        cached_after, initial_complete,
+        "existing stratz_synergy.json cache must remain completely unchanged"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
