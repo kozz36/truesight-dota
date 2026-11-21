@@ -1128,6 +1128,19 @@ fn extract_f32_field(block: &str, key: &str) -> Option<f32> {
     token.parse::<f32>().ok()
 }
 
+pub(crate) const STRATZ_USER_AGENT_HEADER: &str = "User-Agent: STRATZ_API";
+
+pub(crate) fn stratz_matchup_graphql_payload(hero_ids: &[u16]) -> String {
+    let ids = hero_ids
+        .iter()
+        .map(u16::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        r#"{{"query":"{{ heroStats {{ matchUp(heroIds: [{ids}], take: 200) {{ heroId with {{ heroId1 heroId2 matchCount synergy winCount }} }} }} }}"}}"#
+    )
+}
+
 /// Parses STRATZ empirical `with` synergy JSON rows (`heroId1`, `heroId2`, `synergy` / `wins`+`matchCount`).
 pub fn parse_stratz_with_synergy_json(json: &str) -> Vec<(HeroId, HeroId, f32, u32)> {
     let mut rows = Vec::new();
@@ -1152,8 +1165,13 @@ pub fn parse_stratz_with_synergy_json(json: &str) -> Vec<(HeroId, HeroId, f32, u
         let syn = if let Some(s) = extract_f32_field(block, "\"synergy\"")
             .or_else(|| extract_f32_field(block, "\"with_synergy\""))
         {
-            s.clamp(-0.15, 0.15)
-        } else if let Some(wins) = extract_u64_field(block, "\"wins\"") {
+            // STRATZ returns percentage points (e.g. 2.445 for +2.445%), while legacy
+            // synthetic test fixtures may pass small ratio deltas (|s| <= 0.15).
+            let scaled = if s.abs() > 0.15 { s / 100.0 } else { s };
+            scaled.clamp(-0.15, 0.15)
+        } else if let Some(wins) = extract_u64_field(block, "\"wins\"")
+            .or_else(|| extract_u64_field(block, "\"winCount\""))
+        {
             if matches > 0 {
                 let shrunk = (wins as f32 + 50.0 * 0.50) / (matches as f32 + 50.0);
                 (shrunk - 0.50).clamp(-0.15, 0.15)
@@ -1169,18 +1187,36 @@ pub fn parse_stratz_with_synergy_json(json: &str) -> Vec<(HeroId, HeroId, f32, u
 }
 
 fn fetch_stratz_with_synergy_graphql(token: &str) -> Result<String, PortError> {
-    let query = r#"{"query":"{ heroStats { heroVsHeroMatchup { advantage { heroId1 heroId2 with { heroId1 heroId2 matchCount synergy } } } } }"}"#;
     let auth_header = format!("Authorization: Bearer {token}");
-    run_curl(
-        "https://api.stratz.com/graphql",
-        &[
-            "-H",
-            "Content-Type: application/json",
-            "-H",
-            &auth_header,
-            "-d",
-            query,
-        ],
-        "STRATZ GraphQL fetch",
-    )
+    let hero_ids: Vec<u16> = crate::snapshot_data::OPENDOTA_HERO_SNAPSHOT
+        .iter()
+        .map(|row| row.id)
+        .collect();
+    let mut responses = Vec::new();
+    let mut last_err = None;
+    for chunk in hero_ids.chunks(32) {
+        let payload = stratz_matchup_graphql_payload(chunk);
+        match run_curl(
+            "https://api.stratz.com/graphql",
+            &[
+                "-H",
+                "Content-Type: application/json",
+                "-H",
+                STRATZ_USER_AGENT_HEADER,
+                "-H",
+                &auth_header,
+                "-d",
+                &payload,
+            ],
+            "STRATZ GraphQL fetch",
+        ) {
+            Ok(body) => responses.push(body),
+            Err(err) => last_err = Some(err),
+        }
+    }
+    if responses.is_empty() {
+        return Err(last_err
+            .unwrap_or_else(|| PortError("STRATZ GraphQL fetch returned no data".to_string())));
+    }
+    Ok(format!("[{}]", responses.join(",")))
 }

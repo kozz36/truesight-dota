@@ -1234,7 +1234,7 @@ fn sync_stratz_synergy_parser_and_steam_id_normalizer_handle_edge_cases() {
     let json = r#"{
         "data": {
             "with": [
-                {"heroId1": 1, "heroId2": 97, "matchCount": 1200, "synergy": 0.42},
+                {"heroId1": 1, "heroId2": 97, "matchCount": 1200, "synergy": 42.0},
                 {"heroId1": 2, "heroId2": 2, "matchCount": 500, "synergy": 0.05},
                 {"heroId1": 0, "heroId2": 5, "matchCount": 500, "synergy": 0.05},
                 {"heroId1": 14, "heroId2": 27, "matches": 450, "wins": 270}
@@ -4739,4 +4739,84 @@ fn vision_x11_wire_geometry_and_parsers() {
         assert_eq!(client.query_window_geometry(0xdead), None);
         server.join().unwrap();
     }
+}
+
+#[test]
+fn stratz_matchup_graphql_payload_and_user_agent_header_match_api_contract() {
+    use crate::platform::build_curl_args;
+    use crate::sync::{STRATZ_USER_AGENT_HEADER, stratz_matchup_graphql_payload};
+
+    assert_eq!(STRATZ_USER_AGENT_HEADER, "User-Agent: STRATZ_API");
+
+    let payload = stratz_matchup_graphql_payload(&[1, 2, 14]);
+    assert!(
+        payload.contains("heroStats { matchUp(heroIds: [1,2,14], take: 200) { heroId with { heroId1 heroId2 matchCount synergy winCount } } }"),
+        "unexpected STRATZ GraphQL payload: {payload}"
+    );
+    assert!(
+        !payload.contains("heroVsHeroMatchup"),
+        "broken heroVsHeroMatchup query must not be used"
+    );
+
+    let extra_args = [
+        "-H",
+        "Content-Type: application/json",
+        "-H",
+        STRATZ_USER_AGENT_HEADER,
+        "-H",
+        "Authorization: Bearer test-token",
+        "-d",
+        &payload,
+    ];
+    let args = build_curl_args("https://api.stratz.com/graphql", &extra_args);
+    assert!(
+        args.windows(2)
+            .any(|pair| pair == ["-H", "User-Agent: STRATZ_API"]),
+        "STRATZ curl args must include -H User-Agent: STRATZ_API: {args:?}"
+    );
+}
+
+#[test]
+fn parse_stratz_with_synergy_json_scales_percentage_points_and_preserves_ratio_compat() {
+    use crate::sync::parse_stratz_with_synergy_json;
+
+    let stratz_response = r#"{"data":{"heroStats":{"matchUp":[{"heroId":1,"with":[{"heroId1":1,"heroId2":57,"matchCount":3444,"synergy":2.445,"winCount":1859},{"heroId1":1,"heroId2":112,"matchCount":10226,"synergy":-3.12,"winCount":4800},{"heroId1":1,"heroId2":99,"matchCount":500,"synergy":18.5,"winCount":350},{"heroId1":1,"heroId2":14,"matchCount":450,"winCount":270}]}]}}}"#;
+    let parsed = parse_stratz_with_synergy_json(stratz_response);
+    assert_eq!(parsed.len(), 4);
+    assert_eq!(parsed[0].0, HeroId(1));
+    assert_eq!(parsed[0].1, HeroId(57));
+    assert!((parsed[0].2 - 0.02445).abs() < 1e-5, "got {}", parsed[0].2);
+    assert_eq!(parsed[0].3, 3444);
+
+    assert_eq!(parsed[1].0, HeroId(1));
+    assert_eq!(parsed[1].1, HeroId(112));
+    assert!(
+        (parsed[1].2 - (-0.0312)).abs() < 1e-5,
+        "got {}",
+        parsed[1].2
+    );
+    assert_eq!(parsed[1].3, 10226);
+
+    assert_eq!(parsed[2].0, HeroId(1));
+    assert_eq!(parsed[2].1, HeroId(99));
+    assert!((parsed[2].2 - 0.15).abs() < 1e-6, "got {}", parsed[2].2);
+
+    assert_eq!(parsed[3].0, HeroId(1));
+    assert_eq!(parsed[3].1, HeroId(14));
+    assert!(
+        parsed[3].2 > 0.05 && parsed[3].2 <= 0.15,
+        "got {}",
+        parsed[3].2
+    );
+
+    // Backward compatibility with ratio-formatted synthetic fixtures where |s| <= 0.15
+    let legacy_ratio_json =
+        r#"[{"heroId1": 1, "heroId2": 97, "synergy": 0.042, "matchCount": 12500}]"#;
+    let legacy_parsed = parse_stratz_with_synergy_json(legacy_ratio_json);
+    assert_eq!(legacy_parsed.len(), 1);
+    assert!(
+        (legacy_parsed[0].2 - 0.042).abs() < 1e-6,
+        "got {}",
+        legacy_parsed[0].2
+    );
 }
