@@ -401,6 +401,13 @@ impl ScreenFrameSource for X11TopBarFrameSource {
         if frame.width < 640 || frame.height < 40 {
             return Ok(None);
         }
+        let mut frame = frame;
+        if let Some(geom) = query_geom(wid)
+            && let Some(strip_rect) =
+                super::compute_top_bar_capture_strip_rect(geom.x, geom.y, geom.width, geom.height)
+        {
+            frame = frame.with_capture_strip_rect(strip_rect);
+        }
         Ok(Some(frame))
     }
 }

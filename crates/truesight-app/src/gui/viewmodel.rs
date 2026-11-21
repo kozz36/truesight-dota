@@ -1,6 +1,8 @@
 use crate::AppSession;
-use truesight_core::domain::{AttackType, DraftPick, HeroId, Role, Side, TEAM_SIZE};
-use truesight_core::math::{DraftAnalysis5v5, MatchupMatrix};
+use truesight_core::domain::{
+    AttackType, DraftPick, HeroId, RecommendedBuild, Role, Side, TEAM_SIZE,
+};
+use truesight_core::math::{DraftAnalysis5v5, MatchupMatrix, recommend_heroes};
 
 // =============================================================================
 // Pure Telemetry & Diagnostic View-Models
@@ -195,5 +197,51 @@ pub fn compute_comp_diagnostic(
         initiators,
         rule_active,
         score,
+    }
+}
+
+/// Compact summary view-model shared by the always-on-top overlay in draft and post-draft phases.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OverlaySummary {
+    pub is_post_draft: bool,
+    pub projected_ally_win_pct: f32,
+    pub target_role: Role,
+    pub top_suggestions: Vec<(HeroId, String, f32)>,
+    pub counter_grid: [[Option<f32>; TEAM_SIZE]; TEAM_SIZE],
+    pub build: Option<RecommendedBuild>,
+    pub game_time_secs: i32,
+}
+
+/// Computes the compact overlay summary from `AppSession`, guaranteeing exact `0.00%` win% parity with the main window.
+pub fn compute_overlay_summary(session: &AppSession) -> OverlaySummary {
+    let (analysis, _) = session.evaluate();
+    let recs = recommend_heroes(&session.draft, &session.matrix, &session.weights, 3);
+    let top_suggestions = recs
+        .into_iter()
+        .take(3)
+        .map(|r| {
+            let name = session
+                .matrix
+                .hero(r.hero_id)
+                .map(|h| h.display_name.clone())
+                .unwrap_or_else(|| format!("Hero #{}", r.hero_id.0));
+            (r.hero_id, name, r.projected_win_probability * 100.0)
+        })
+        .collect();
+    let is_post_draft = session.is_post_draft_build_view();
+    let build = if is_post_draft {
+        session.compute_recommended_build()
+    } else {
+        None
+    };
+
+    OverlaySummary {
+        is_post_draft,
+        projected_ally_win_pct: analysis.ally_win_probability * 100.0,
+        target_role: session.draft.target_role,
+        top_suggestions,
+        counter_grid: analysis.counter_grid,
+        build,
+        game_time_secs: session.game_time_secs,
     }
 }

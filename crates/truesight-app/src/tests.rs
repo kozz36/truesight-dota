@@ -430,6 +430,7 @@ fn draft_reset_and_new_match_transition_reset_vision_worker_without_mid_draft_wi
         width: w,
         height: h,
         source_height: None,
+        capture_strip_rect: None,
         rgb,
     }))
     .unwrap();
@@ -1661,6 +1662,7 @@ fn session_suppresses_vision_during_wait_for_players_and_resumes_in_hero_selecti
         width: w,
         height: h,
         source_height: None,
+        capture_strip_rect: None,
         rgb,
     }))
     .unwrap();
@@ -1787,6 +1789,7 @@ fn live_gsi_init_and_custom_setup_suppress_vision_and_restore_across_match_trans
         width: w,
         height: h,
         source_height: None,
+        capture_strip_rect: None,
         rgb,
     }))
     .unwrap();
@@ -2941,6 +2944,7 @@ fn ui_config_persists_onboarding_dismissed_and_stratz_token_with_private_permiss
         onboarding_dismissed: true,
         stratz_api_token: Some("hdr.pay.sig".into()),
         stratz_token_exp: Some(1_731_536_000),
+        ..UiConfig::default()
     };
     save_ui_config_to_dir(&tmp_dir, &cfg).expect("save ui_config.toml");
 
@@ -3158,6 +3162,7 @@ fn stratz_token_expiry_derives_from_absolute_exp_and_rejects_expired_on_reload()
             onboarding_dismissed: false,
             stratz_api_token: Some(expired_token),
             stratz_token_exp: Some(2000),
+            ..UiConfig::default()
         },
     )
     .unwrap();
@@ -3218,4 +3223,496 @@ fn effective_stratz_token_enforces_expiry_during_open_session_with_env_override_
     );
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn session_transitions_to_post_draft_build_ticks_owned_items_and_swaps_variants() {
+    use truesight_core::ports::{DraftEvent, ItemMetaRepository};
+    let mut session = AppSession::new().unwrap();
+    assert!(
+        !session.is_post_draft_build_view(),
+        "initial session must default to draft/picks view"
+    );
+
+    // Hero selection keeps picks view.
+    session.apply_event(DraftEvent::GameRulesStateChanged {
+        state_name: "DOTA_GAMERULES_STATE_HERO_SELECTION".into(),
+        game_time_secs: 0,
+    });
+    assert!(!session.is_post_draft_build_view());
+
+    // Pick Anti-Mage (Carry) as local player hero and an enemy with Evasion (Phantom Assassin).
+    assert!(execute_command(&mut session, "ally 1 anti-mage").unwrap());
+    assert!(execute_command(&mut session, "enemy 1 phantom assassin").unwrap());
+
+    // Transition to PRE_GAME -> post-draft item build view.
+    session.apply_event(DraftEvent::GameRulesStateChanged {
+        state_name: "DOTA_GAMERULES_STATE_PRE_GAME".into(),
+        game_time_secs: 15,
+    });
+    assert!(session.is_post_draft_build_view());
+    assert_eq!(session.game_time_secs, 15);
+
+    // Transition to GAME_IN_PROGRESS -> stays in post-draft item build view.
+    session.apply_event(DraftEvent::GameRulesStateChanged {
+        state_name: "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS".into(),
+        game_time_secs: 900,
+    });
+    assert!(session.is_post_draft_build_view());
+    assert_eq!(session.game_time_secs, 900);
+
+    let build_before = session
+        .compute_recommended_build()
+        .expect("picked allied hero must produce a recommended build");
+    assert!(!build_before.steps.is_empty());
+    let first_step = &build_before.steps[0];
+    let first_slug = session
+        .item_repo
+        .item_catalog(first_step.item_id)
+        .expect("step item must exist in catalog")
+        .slug;
+
+    // InventoryUpdated populates owned_items and advances next_unowned_index.
+    session.apply_event(DraftEvent::InventoryUpdated {
+        item_slugs: vec![format!("item_{first_slug}")],
+    });
+    assert!(session.owned_items.contains(&first_step.item_id));
+
+    let build_after_own = session.compute_recommended_build().unwrap();
+    assert!(build_after_own.steps[0].owned);
+    assert_ne!(build_after_own.next_unowned_index, Some(0));
+
+    // Variant swap replaces the primary item at that step and keeps the old primary in variants.
+    if let Some((step_idx, var_id)) = build_after_own
+        .steps
+        .iter()
+        .enumerate()
+        .find_map(|(idx, s)| s.variants.first().map(|v| (idx, v.item_id)))
+    {
+        let old_primary_id = build_after_own.steps[step_idx].item_id;
+        session.select_build_variant(step_idx, var_id);
+        let swapped = session.compute_recommended_build().unwrap();
+        assert_eq!(swapped.steps[step_idx].item_id, var_id);
+        assert!(
+            swapped.steps[step_idx]
+                .variants
+                .iter()
+                .any(|v| v.item_id == old_primary_id),
+            "old primary item must remain in variants so user can switch back"
+        );
+    }
+
+    // Stale patch detection.
+    session.active_game_patch = truesight_core::domain::counter_trait_table_patch().to_string();
+    assert!(!session.is_counter_table_patch_stale());
+    session.active_game_patch = "7.41".to_string();
+    assert!(session.is_counter_table_patch_stale());
+}
+
+#[test]
+fn overlay_geometry_clamps_to_monitor_and_avoids_topbar_capture_strip() {
+    let clamped = AppSession::clamp_overlay_geometry(
+        crate::session::OverlayGeometry {
+            x: -50.0,
+            y: 10.0,
+            width: 100.0,
+            height: 999.0,
+            click_through: true,
+        },
+        1920.0,
+        1080.0,
+    );
+    assert_eq!(clamped.width, 280.0);
+    assert_eq!(clamped.height, 360.0);
+    assert_eq!(clamped.x, 0.0);
+    assert!(
+        clamped.y >= 96.0,
+        "overlay must stay below top 8% Dota 2 portrait capture strip (y >= 96.0)"
+    );
+    assert!(clamped.click_through);
+
+    let clamped_far = AppSession::clamp_overlay_geometry(
+        crate::session::OverlayGeometry {
+            x: 5000.0,
+            y: 5000.0,
+            width: 400.0,
+            height: 240.0,
+            click_through: false,
+        },
+        1920.0,
+        1080.0,
+    );
+    assert_eq!(clamped_far.x, 1520.0);
+    assert_eq!(clamped_far.y, 840.0);
+
+    // Persistence in ui_config.toml
+    let tmp_dir =
+        std::env::temp_dir().join(format!("truesight_test_overlay_cfg_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    let cfg_path = tmp_dir.join("config.toml");
+
+    let mgr = truesight_adapters::sync::LocalCacheManager::with_optional_account(
+        tmp_dir.join("cache"),
+        None,
+    );
+    let mut session = AppSession::with_cache_and_config(mgr, Some(cfg_path.clone())).unwrap();
+    session.set_overlay_geometry(clamped_far);
+    session.set_overlay_mode(true);
+
+    let reloaded_mgr = truesight_adapters::sync::LocalCacheManager::with_optional_account(
+        tmp_dir.join("cache"),
+        None,
+    );
+    let reloaded = AppSession::with_cache_and_config(reloaded_mgr, Some(cfg_path)).unwrap();
+    assert!(reloaded.overlay_mode);
+    assert_eq!(reloaded.overlay_geometry, clamped_far);
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn overlay_geometry_clamps_against_dynamic_monitor_and_capture_strip() {
+    assert_eq!(AppSession::top_bar_capture_bottom_y(1080.0, None), 96.0);
+    assert_eq!(AppSession::top_bar_capture_bottom_y(1440.0, None), 116.0);
+    assert_eq!(AppSession::top_bar_capture_bottom_y(2160.0, None), 173.0);
+    assert_eq!(
+        AppSession::top_bar_capture_bottom_y(1440.0, Some((100.0, 200.0, 1280.0, 720.0))),
+        258.0
+    );
+
+    let clamped_1440 = AppSession::clamp_overlay_geometry(
+        crate::session::OverlayGeometry {
+            x: 200.0,
+            y: 50.0,
+            width: 380.0,
+            height: 230.0,
+            click_through: false,
+        },
+        2560.0,
+        1440.0,
+    );
+    assert!(
+        clamped_1440.y >= 116.0,
+        "1440p monitor must clamp overlay below 8% top-bar strip (y >= 116.0), got {}",
+        clamped_1440.y
+    );
+
+    // Overlapping a custom Dota 2 capture strip pushes overlay below cy + ch.
+    let clamped_capture = AppSession::clamp_overlay_geometry_against_capture(
+        crate::session::OverlayGeometry {
+            x: 150.0,
+            y: 210.0,
+            width: 380.0,
+            height: 230.0,
+            click_through: false,
+        },
+        2560.0,
+        1440.0,
+        Some((100.0, 200.0, 1280.0, 58.0)),
+    );
+    assert!(
+        clamped_capture.y >= 258.0,
+        "overlapping capture strip must push overlay below cy + ch (258.0), got {}",
+        clamped_capture.y
+    );
+
+    // Non-overlapping horizontal span only clamps against monitor top-bar floor (116.0).
+    let clamped_outside = AppSession::clamp_overlay_geometry_against_capture(
+        crate::session::OverlayGeometry {
+            x: 1500.0,
+            y: 120.0,
+            width: 380.0,
+            height: 230.0,
+            click_through: false,
+        },
+        2560.0,
+        1440.0,
+        Some((100.0, 200.0, 1280.0, 58.0)),
+    );
+    assert_eq!(clamped_outside.y, 120.0);
+}
+
+#[test]
+fn variant_selection_persists_across_step_reorder_by_original_item_id() {
+    use truesight_core::ports::{DraftEvent, ItemMetaRepository};
+
+    let mut session = AppSession::new().unwrap();
+    assert!(execute_command(&mut session, "ally 1 anti-mage").unwrap());
+    assert!(execute_command(&mut session, "enemy 1 phantom assassin").unwrap());
+    session.apply_event(DraftEvent::GameRulesStateChanged {
+        state_name: "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS".into(),
+        game_time_secs: 900,
+    });
+
+    let build_before = session
+        .compute_recommended_build()
+        .expect("picked ally must produce a build");
+
+    // Pick step 1 (which has a variant), then own step 0, step 0's variant, and step 1's original
+    // primary item so all three are kept in `steps`, shifting step 1 from index 1 to index 2.
+    let (orig_idx, orig_primary_id, var_id) = build_before
+        .steps
+        .iter()
+        .enumerate()
+        .skip(1)
+        .take(1)
+        .find_map(|(idx, s)| s.variants.first().map(|v| (idx, s.item_id, v.item_id)))
+        .expect("expected step 1 to have a variant");
+
+    let earlier_variant_id = build_before.steps[0]
+        .variants
+        .first()
+        .map(|v| v.item_id)
+        .expect("expected first step to have a variant");
+    let mut owned_slugs = Vec::new();
+    for item_id in [
+        build_before.steps[0].item_id,
+        earlier_variant_id,
+        orig_primary_id,
+    ] {
+        let slug = session
+            .item_repo
+            .item_catalog(item_id)
+            .expect("earlier item must exist in catalog")
+            .slug;
+        owned_slugs.push(format!("item_{slug}"));
+    }
+
+    // Select the variant on `orig_primary_id`.
+    session.select_build_variant_for_item(orig_primary_id, var_id);
+    let swapped = session.compute_recommended_build().unwrap();
+    assert_eq!(swapped.steps[orig_idx].item_id, var_id);
+
+    // Owning the first two steps plus the first step's variant shifts `orig_idx` to a new index.
+    session.apply_event(DraftEvent::InventoryUpdated {
+        item_slugs: owned_slugs,
+    });
+
+    let reordered = session.compute_recommended_build().unwrap();
+    let new_idx = reordered
+        .steps
+        .iter()
+        .position(|s| s.item_id == var_id)
+        .expect("selected variant must remain present after step reorder");
+    assert_ne!(
+        new_idx, orig_idx,
+        "owning earlier items must reorder step away from index {orig_idx}"
+    );
+    assert!(
+        reordered.steps[new_idx]
+            .variants
+            .iter()
+            .any(|v| v.item_id == orig_primary_id),
+        "original primary item must remain in variants at the new index {new_idx}"
+    );
+
+    // Clicking the original primary item back removes the override and restores `orig_primary_id`.
+    session.select_build_variant_for_item(var_id, orig_primary_id);
+    let restored = session.compute_recommended_build().unwrap();
+    assert_eq!(restored.steps[new_idx].item_id, orig_primary_id);
+}
+
+#[test]
+fn clamp_overlay_geometry_in_monitor_preserves_secondary_monitor_coordinates() {
+    let right_monitor = crate::session::MonitorRect::new(1920.0, 0.0, 2560.0, 1440.0);
+    let clamped_right = AppSession::clamp_overlay_geometry_in_monitor(
+        crate::session::OverlayGeometry {
+            x: 2200.0,
+            y: 30.0,
+            width: 380.0,
+            height: 230.0,
+            click_through: false,
+        },
+        right_monitor,
+        None,
+    );
+    assert_eq!(clamped_right.x, 2200.0);
+    assert!(
+        clamped_right.y >= 116.0,
+        "1440p secondary monitor must clamp below 8% top-bar strip (y >= 116.0), got {}",
+        clamped_right.y
+    );
+
+    let clamped_right_overflow = AppSession::clamp_overlay_geometry_in_monitor(
+        crate::session::OverlayGeometry {
+            x: 5000.0,
+            y: 1600.0,
+            width: 380.0,
+            height: 230.0,
+            click_through: false,
+        },
+        right_monitor,
+        None,
+    );
+    assert_eq!(clamped_right_overflow.x, 1920.0 + 2560.0 - 380.0);
+    assert_eq!(clamped_right_overflow.y, 1440.0 - 230.0);
+
+    let left_monitor = crate::session::MonitorRect::new(-1920.0, 0.0, 1920.0, 1080.0);
+    let clamped_left = AppSession::clamp_overlay_geometry_in_monitor(
+        crate::session::OverlayGeometry {
+            x: -1600.0,
+            y: 40.0,
+            width: 380.0,
+            height: 230.0,
+            click_through: true,
+        },
+        left_monitor,
+        None,
+    );
+    assert_eq!(clamped_left.x, -1600.0);
+    assert_eq!(clamped_left.y, 96.0);
+    assert!(clamped_left.click_through);
+}
+
+#[test]
+fn clamp_overlay_geometry_in_monitor_avoids_offset_windowed_dota_capture_strip() {
+    let primary_monitor = crate::session::MonitorRect::new(0.0, 0.0, 1920.0, 1080.0);
+    // Dota 2 running in an offset window whose top-bar capture strip spans y = 180..252.
+    let offset_strip = Some((200.0, 180.0, 1600.0, 72.0));
+    let clamped = AppSession::clamp_overlay_geometry_in_monitor(
+        crate::session::OverlayGeometry {
+            x: 240.0,
+            y: 160.0,
+            width: 380.0,
+            height: 230.0,
+            click_through: false,
+        },
+        primary_monitor,
+        offset_strip,
+    );
+    assert_eq!(clamped.x, 240.0);
+    assert_eq!(
+        clamped.y, 252.0,
+        "overlay overlapping offset capture strip (y=180..252) must be pushed below it to y=252.0"
+    );
+}
+
+#[test]
+fn picking_allied_hero_updates_cache_manager_target_item_heroes() {
+    use truesight_core::domain::{HeroId, Side};
+    let mut session = AppSession::new().unwrap();
+    session.set_slot_manual(Side::Allies, 0, HeroId(74));
+    assert!(
+        session
+            .cache_mgr
+            .effective_target_item_heroes()
+            .contains(&HeroId(74)),
+        "picking allied hero 74 must update cache_mgr.effective_target_item_heroes()"
+    );
+}
+
+#[test]
+fn resolve_monitor_and_optional_clamp_respect_heterogeneous_monitors_and_unavailable_fallback() {
+    let mut session = AppSession::new().unwrap();
+    session.set_known_monitors(vec![
+        crate::session::MonitorRect::new(0.0, 0.0, 1920.0, 1080.0),
+        crate::session::MonitorRect::new(1920.0, 0.0, 1280.0, 720.0),
+    ]);
+
+    let on_secondary = crate::session::OverlayGeometry {
+        x: 2450.0,
+        y: 140.0,
+        width: 380.0,
+        height: 230.0,
+        click_through: false,
+    };
+    let resolved = session.resolve_monitor_for_overlay(on_secondary);
+    assert_eq!(
+        resolved,
+        Some(crate::session::MonitorRect::new(1920.0, 0.0, 1280.0, 720.0))
+    );
+    let clamped = AppSession::clamp_overlay_geometry_with_optional_monitor(
+        on_secondary,
+        resolved,
+        Some((1280.0, 720.0)),
+        None,
+    );
+    assert_eq!(clamped.x, 2450.0);
+    assert_eq!(clamped.y, 140.0);
+
+    // Without known_monitors or active_monitor_rect, x=2450 is preserved and offset capture strip is still avoided.
+    session.set_known_monitors(Vec::new());
+    assert_eq!(session.resolve_monitor_for_overlay(on_secondary), None);
+    let fallback_clamped = AppSession::clamp_overlay_geometry_with_optional_monitor(
+        crate::session::OverlayGeometry {
+            x: 2450.0,
+            y: 160.0,
+            width: 380.0,
+            height: 230.0,
+            click_through: false,
+        },
+        None,
+        Some((1280.0, 720.0)),
+        Some((2000.0, 180.0, 1200.0, 72.0)),
+    );
+    assert_eq!(fallback_clamped.x, 2450.0);
+    assert_eq!(fallback_clamped.y, 252.0);
+}
+
+#[test]
+fn overlay_geometry_mixed_dpi_normalizes_points_to_desktop_pixels_for_monitor_selection_and_capture_overlap()
+ {
+    let mut session = AppSession::new().unwrap();
+    session.set_known_monitors(vec![
+        crate::session::MonitorRect::new(0.0, 0.0, 1920.0, 1080.0),
+        crate::session::MonitorRect::new(1920.0, 0.0, 2560.0, 1440.0),
+    ]);
+
+    let ppp = 1.5;
+    let logical_pts = crate::session::OverlayGeometry {
+        x: 1400.0,
+        y: 120.0,
+        width: 380.0,
+        height: 230.0,
+        click_through: false,
+    };
+    let physical_px = logical_pts.scale_to_desktop_pixels(ppp);
+    assert_eq!(physical_px.x, 2100.0);
+    assert_eq!(physical_px.y, 180.0);
+    assert_eq!(physical_px.width, 570.0);
+    assert_eq!(physical_px.height, 345.0);
+
+    let resolved = session.resolve_monitor_for_overlay(physical_px);
+    assert_eq!(
+        resolved,
+        Some(crate::session::MonitorRect::new(
+            1920.0, 0.0, 2560.0, 1440.0
+        ))
+    );
+
+    let clamped_px = AppSession::clamp_overlay_geometry_with_optional_monitor_scaled(
+        physical_px,
+        resolved,
+        Some((2560.0, 1440.0)),
+        Some((2100.0, 180.0, 1600.0, 72.0)),
+        ppp,
+    );
+    assert_eq!(clamped_px.x, 2100.0);
+    assert_eq!(clamped_px.y, 252.0);
+    assert_eq!(clamped_px.width, 570.0);
+    assert_eq!(clamped_px.height, 345.0);
+
+    let clamped_pts = clamped_px.scale_to_egui_points(ppp);
+    assert_eq!(clamped_pts.x, 1400.0);
+    assert_eq!(clamped_pts.y, 168.0);
+    assert_eq!(clamped_pts.width, 380.0);
+    assert_eq!(clamped_pts.height, 230.0);
+}
+
+#[test]
+fn resolve_effective_pixels_per_point_honors_native_scale_and_app_zoom() {
+    assert!(
+        (AppSession::resolve_effective_pixels_per_point(Some(1.5), 1.0, 1.2) - 1.8).abs() < 1e-5
+    );
+    assert!(
+        (AppSession::resolve_effective_pixels_per_point(Some(1.5), 1.5, 1.0) - 1.5).abs() < 1e-5
+    );
+    assert!((AppSession::resolve_effective_pixels_per_point(None, 1.25, 1.25) - 1.25).abs() < 1e-5);
+    assert!(
+        (AppSession::resolve_effective_pixels_per_point(Some(0.0), 1.4, 1.0) - 1.4).abs() < 1e-5
+    );
+    assert!(
+        (AppSession::resolve_effective_pixels_per_point(Some(1.5), 1.0, f32::NAN) - 1.5).abs()
+            < 1e-5
+    );
 }
