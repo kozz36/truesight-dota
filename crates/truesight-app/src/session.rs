@@ -4,19 +4,21 @@ use std::sync::{
     mpsc::{self, Receiver, TryRecvError},
 };
 use truesight_adapters::gsi::BoundedGsiListener;
+use truesight_adapters::item_repo::SeededItemMetaRepository;
 use truesight_adapters::sync::{
     AccountLinkConfig, BracketConfig, LocalCacheManager, config_file_path, load_app_config,
     load_app_config_from, normalize_steam32_id, save_account_config_to, save_bracket_config_to,
 };
 use truesight_adapters::vision::{BoundedVisionWorker, CaptureAvailability, VisionCaptureMode};
 use truesight_core::domain::{
-    Bracket, DraftPick, DraftState, Faction, HeroId, Role, Side, TEAM_SIZE,
+    Bracket, BuildVariant, DraftPick, DraftState, Faction, HeroId, ItemId, RecommendedBuild, Role,
+    Side, TEAM_SIZE, counter_trait_table_patch,
 };
 use truesight_core::math::{
     DraftAnalysis5v5, HeroRecommendation, MatchupMatrix, ModelWeights, evaluate_draft_5v5,
-    recommend_heroes,
+    recommend_heroes, recommend_item_build,
 };
-use truesight_core::ports::{DraftEvent, DraftEventSource, StatsRepository};
+use truesight_core::ports::{DraftEvent, DraftEventSource, ItemMetaRepository, StatsRepository};
 
 pub(crate) struct SyncCompletion {
     generation: u64,
@@ -61,6 +63,14 @@ pub struct AppSession {
     pub stratz_api_token: Option<String>,
     pub stratz_token_exp: Option<u64>,
     pub pending_stratz_steam32_link: Option<u64>,
+    pub item_repo: SeededItemMetaRepository,
+    pub game_time_secs: i32,
+    pub owned_items: Vec<ItemId>,
+    pub selected_build_variants: Vec<(usize, ItemId)>,
+    pub post_draft_view_override: Option<bool>,
+    pub active_game_patch: String,
+    pub overlay_mode: bool,
+    pub overlay_geometry: OverlayGeometry,
 }
 
 impl Drop for AppSession {
@@ -146,6 +156,10 @@ impl AppSession {
         let matrix = repo
             .load_matrix(initial_bracket)
             .map_err(|e| e.to_string())?;
+        let item_repo = cache_mgr.build_item_repository();
+        let active_game_patch = cache_mgr
+            .read_cached_game_patch()
+            .unwrap_or_else(|| counter_trait_table_patch().to_string());
         let ui_cfg = read_config_path
             .as_deref()
             .and_then(Path::parent)
@@ -197,6 +211,14 @@ impl AppSession {
             stratz_api_token: ui_cfg.stratz_api_token,
             stratz_token_exp: resolved_exp,
             pending_stratz_steam32_link: None,
+            item_repo,
+            game_time_secs: 0,
+            owned_items: Vec::new(),
+            selected_build_variants: Vec::new(),
+            post_draft_view_override: None,
+            active_game_patch,
+            overlay_mode: ui_cfg.overlay_mode,
+            overlay_geometry: ui_cfg.overlay_geometry,
         })
     }
 
@@ -214,6 +236,8 @@ impl AppSession {
             self.onboarding_dismissed = ui_cfg.onboarding_dismissed;
             self.stratz_api_token = ui_cfg.stratz_api_token;
             self.stratz_token_exp = resolved_exp;
+            self.overlay_mode = ui_cfg.overlay_mode;
+            self.overlay_geometry = ui_cfg.overlay_geometry;
             if is_stratz_exp_expired(resolved_exp, now) {
                 self.cache_mgr.stratz_api_token = None;
                 self.cache_mgr.stratz_token_exp = None;
@@ -334,6 +358,11 @@ impl AppSession {
         {
             self.matrix = m;
         }
+        self.item_repo = self.cache_mgr.build_item_repository();
+        self.active_game_patch = self
+            .cache_mgr
+            .read_cached_game_patch()
+            .unwrap_or_else(|| counter_trait_table_patch().to_string());
         self.db_status = self
             .cache_mgr
             .freshness_badge(LocalCacheManager::now_unix());
@@ -608,6 +637,10 @@ impl AppSession {
         self.vision_reset_pending = true;
         self.vision_slots = [[None; TEAM_SIZE]; 2];
         self.vision_owned.clear();
+        self.game_time_secs = 0;
+        self.owned_items.clear();
+        self.selected_build_variants.clear();
+        self.post_draft_view_override = None;
     }
 
     fn side_picks(&self, side: Side) -> &[Option<DraftPick>; TEAM_SIZE] {
@@ -807,6 +840,7 @@ impl AppSession {
                 if entered_wait_for_players || entered_new_hero_selection {
                     self.reset_draft();
                 }
+                self.game_time_secs = game_time_secs;
                 self.last_rules_state = Some(state_name);
             }
             DraftEvent::FactionDetected { faction } => {
@@ -853,6 +887,12 @@ impl AppSession {
                 if !self.draft.is_unavailable(hero_id) {
                     let _ = self.draft.toggle_ban(hero_id);
                 }
+            }
+            DraftEvent::InventoryUpdated { item_slugs } => {
+                self.owned_items = item_slugs
+                    .iter()
+                    .filter_map(|slug| self.item_repo.item_by_slug(slug).map(|e| e.id))
+                    .collect();
             }
             DraftEvent::DraftReset => {
                 self.reset_draft();
@@ -1104,6 +1144,8 @@ impl AppSession {
                 onboarding_dismissed: self.onboarding_dismissed,
                 stratz_api_token: self.stratz_api_token.clone(),
                 stratz_token_exp: self.stratz_token_exp,
+                overlay_mode: self.overlay_mode,
+                overlay_geometry: self.overlay_geometry,
             };
             if let Err(err) = save_ui_config_to_dir(dir, &cfg) {
                 self.last_sync_notice = Some(format!(
@@ -1113,6 +1155,151 @@ impl AppSession {
             }
         }
         Ok(())
+    }
+
+    /// Returns `true` when the bottom-left panel should display the post-draft item build bar.
+    pub fn is_post_draft_build_view(&self) -> bool {
+        self.post_draft_view_override.unwrap_or(matches!(
+            self.last_rules_state.as_deref(),
+            Some("DOTA_GAMERULES_STATE_PRE_GAME" | "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")
+        ))
+    }
+
+    /// Toggles between the post-draft item build view and the suggested picks view.
+    pub fn toggle_post_draft_build_view(&mut self) {
+        self.post_draft_view_override = Some(!self.is_post_draft_build_view());
+    }
+
+    /// Returns `true` when the active game patch differs from the embedded counter-trait table patch.
+    pub fn is_counter_table_patch_stale(&self) -> bool {
+        let patch = self.active_game_patch.trim();
+        !patch.is_empty() && patch != counter_trait_table_patch()
+    }
+
+    /// Resolves the active allied hero and role for item build recommendations.
+    pub fn active_build_hero(&self) -> Option<(HeroId, Role)> {
+        if let Some(local_id) = self.local_player_hero {
+            let role = self
+                .draft
+                .allies
+                .iter()
+                .enumerate()
+                .find_map(|(idx, slot)| {
+                    slot.filter(|p| p.hero_id == local_id)
+                        .map(|p| p.role.unwrap_or(Role::ALL[idx]))
+                })
+                .unwrap_or(self.draft.target_role);
+            return Some((local_id, role));
+        }
+        if let Some(pick) = self.draft.allies[self.draft.target_role.index()] {
+            return Some((pick.hero_id, pick.role.unwrap_or(self.draft.target_role)));
+        }
+        self.draft
+            .allies
+            .iter()
+            .enumerate()
+            .find_map(|(idx, slot)| slot.map(|p| (p.hero_id, p.role.unwrap_or(Role::ALL[idx]))))
+    }
+
+    /// Selects a variant item override for a given build progression step index.
+    pub fn select_build_variant(&mut self, step_index: usize, variant_item_id: ItemId) {
+        if let Some(entry) = self
+            .selected_build_variants
+            .iter_mut()
+            .find(|(idx, _)| *idx == step_index)
+        {
+            entry.1 = variant_item_id;
+        } else {
+            self.selected_build_variants
+                .push((step_index, variant_item_id));
+        }
+    }
+
+    /// Computes the recommended item build for the active allied hero, applying any selected variant swaps.
+    pub fn compute_recommended_build(&self) -> Option<RecommendedBuild> {
+        let (hero_id, role) = self.active_build_hero()?;
+        let enemy_ids: [Option<HeroId>; TEAM_SIZE] =
+            self.draft.enemies.map(|slot| slot.map(|p| p.hero_id));
+        let mut build = recommend_item_build(
+            &self.item_repo,
+            hero_id,
+            role,
+            self.draft.bracket,
+            &enemy_ids,
+            &self.owned_items,
+            self.game_time_secs,
+        )
+        .ok()?;
+
+        for &(step_idx, chosen_id) in &self.selected_build_variants {
+            let Some(step) = build.steps.get_mut(step_idx) else {
+                continue;
+            };
+            let Some(var_pos) = step.variants.iter().position(|v| v.item_id == chosen_id) else {
+                continue;
+            };
+            let chosen = step.variants.remove(var_pos);
+            let old_primary = BuildVariant {
+                item_id: step.item_id,
+                score: step.score,
+                avg_time_mins: step.avg_time_mins,
+                counter_trait: step.counter_trait,
+            };
+            step.item_id = chosen.item_id;
+            step.score = chosen.score;
+            step.avg_time_mins = chosen.avg_time_mins;
+            step.counter_trait = chosen.counter_trait;
+            step.owned = self.owned_items.contains(&chosen.item_id);
+            if let Some(entry) = self.item_repo.item_catalog(chosen.item_id) {
+                step.total_components = entry.components.len();
+                step.owned_components = entry
+                    .components
+                    .iter()
+                    .filter(|c| self.owned_items.contains(c))
+                    .count();
+            } else {
+                step.total_components = 0;
+                step.owned_components = 0;
+            }
+            step.variants.insert(var_pos, old_primary);
+        }
+
+        build.next_unowned_index = build.steps.iter().position(|s| !s.owned);
+        Some(build)
+    }
+
+    /// Clamps overlay geometry to safe monitor bounds while avoiding the top 8% Dota 2 capture strip (`y >= 96.0`).
+    pub fn clamp_overlay_geometry(
+        mut geom: OverlayGeometry,
+        monitor_w: f32,
+        monitor_h: f32,
+    ) -> OverlayGeometry {
+        geom.width = geom.width.clamp(280.0, 520.0);
+        geom.height = geom.height.clamp(160.0, 360.0);
+        geom.x = geom.x.clamp(0.0, (monitor_w - geom.width).max(0.0));
+        geom.y = geom.y.clamp(96.0, (monitor_h - geom.height).max(96.0));
+        geom
+    }
+
+    /// Enables or disables compact overlay mode and persists the preference.
+    pub fn set_overlay_mode(&mut self, enabled: bool) {
+        self.overlay_mode = enabled;
+        if !enabled {
+            self.overlay_geometry.click_through = false;
+        }
+        let _ = self.persist_ui_config();
+    }
+
+    /// Enables or disables mouse click-through on the overlay window and persists the preference.
+    pub fn set_overlay_click_through(&mut self, click_through: bool) {
+        self.overlay_geometry.click_through = click_through;
+        let _ = self.persist_ui_config();
+    }
+
+    /// Updates and persists the overlay window geometry.
+    pub fn set_overlay_geometry(&mut self, geom: OverlayGeometry) {
+        self.overlay_geometry = geom;
+        let _ = self.persist_ui_config();
     }
 
     /// Persists the onboarding dismissal preference when config persistence is enabled.
@@ -1203,12 +1390,36 @@ pub struct StratzTokenInfo {
     pub days_remaining: u32,
 }
 
-/// Persisted UI onboarding and STRATZ token state stored in `ui_config.toml`.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// Persisted geometry and passthrough state for the compact always-on-top overlay window.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OverlayGeometry {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub click_through: bool,
+}
+
+impl Default for OverlayGeometry {
+    fn default() -> Self {
+        Self {
+            x: 24.0,
+            y: 112.0,
+            width: 380.0,
+            height: 230.0,
+            click_through: false,
+        }
+    }
+}
+
+/// Persisted UI onboarding, overlay, and STRATZ token state stored in `ui_config.toml`.
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct UiConfig {
     pub onboarding_dismissed: bool,
     pub stratz_api_token: Option<String>,
     pub stratz_token_exp: Option<u64>,
+    pub overlay_mode: bool,
+    pub overlay_geometry: OverlayGeometry,
 }
 
 fn resolve_stratz_exp(token: Option<&str>, explicit_exp: Option<u64>) -> Option<u64> {
@@ -1343,6 +1554,28 @@ pub fn load_ui_config_from_dir(config_dir: &Path) -> UiConfig {
             "stratz_token_exp" => {
                 cfg.stratz_token_exp = val.parse::<u64>().ok();
             }
+            "overlay_mode" => cfg.overlay_mode = val == "true",
+            "overlay_x" => {
+                if let Ok(x) = val.parse::<f32>() {
+                    cfg.overlay_geometry.x = x;
+                }
+            }
+            "overlay_y" => {
+                if let Ok(y) = val.parse::<f32>() {
+                    cfg.overlay_geometry.y = y;
+                }
+            }
+            "overlay_width" => {
+                if let Ok(w) = val.parse::<f32>() {
+                    cfg.overlay_geometry.width = w;
+                }
+            }
+            "overlay_height" => {
+                if let Ok(h) = val.parse::<f32>() {
+                    cfg.overlay_geometry.height = h;
+                }
+            }
+            "overlay_click_through" => cfg.overlay_geometry.click_through = val == "true",
             _ => {}
         }
     }
@@ -1369,6 +1602,18 @@ pub fn save_ui_config_to_dir(config_dir: &Path, cfg: &UiConfig) -> Result<(), St
     ));
 
     let mut body = format!("onboarding_dismissed = {}\n", cfg.onboarding_dismissed);
+    body.push_str(&format!("overlay_mode = {}\n", cfg.overlay_mode));
+    body.push_str(&format!("overlay_x = {}\n", cfg.overlay_geometry.x));
+    body.push_str(&format!("overlay_y = {}\n", cfg.overlay_geometry.y));
+    body.push_str(&format!("overlay_width = {}\n", cfg.overlay_geometry.width));
+    body.push_str(&format!(
+        "overlay_height = {}\n",
+        cfg.overlay_geometry.height
+    ));
+    body.push_str(&format!(
+        "overlay_click_through = {}\n",
+        cfg.overlay_geometry.click_through
+    ));
     if let Some(token) = cfg.stratz_api_token.as_deref().filter(|t| !t.is_empty()) {
         let escaped = token.replace('"', "");
         body.push_str(&format!("stratz_api_token = \"{escaped}\"\n"));

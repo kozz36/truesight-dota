@@ -45,6 +45,21 @@ impl TrueSightGuiApp {
                     .strong()
                     .color(P_GLINT),
                 );
+                let build_btn = egui::Button::new(
+                    RichText::new("[ BUILD > ]")
+                        .size(if compact_hdr { 9.0 } else { 9.5 })
+                        .strong()
+                        .color(P_CYAN),
+                )
+                .fill(P_INDIGO_2)
+                .stroke(Stroke::new(1.0_f32, P_LINE));
+                if ui
+                    .add(build_btn)
+                    .on_hover_text("Switch to post-draft Item Build view")
+                    .clicked()
+                {
+                    self.session.toggle_post_draft_build_view();
+                }
 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = if compact_hdr { 4.0 } else { 6.0 };

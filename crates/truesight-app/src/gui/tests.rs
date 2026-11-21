@@ -1552,3 +1552,86 @@ fn encode_b64url_for_test(input: &[u8]) -> String {
     }
     out
 }
+
+#[test]
+fn gui_build_bar_and_overlay_preserve_win_parity_and_render_variants() {
+    let mut session = AppSession::new().unwrap();
+    assert!(execute_command(&mut session, "ally 1 anti-mage").unwrap());
+    assert!(execute_command(&mut session, "enemy 1 phantom assassin").unwrap());
+    session.draft.target_role = Role::Mid;
+
+    let (analysis, recs) = session.evaluate();
+    let summary = super::viewmodel::compute_overlay_summary(&session);
+    assert!(!summary.is_post_draft);
+    assert!(
+        (summary.projected_ally_win_pct - analysis.ally_win_probability * 100.0).abs() < 1e-4,
+        "overlay win% must match main window analysis exactly"
+    );
+    assert_eq!(summary.top_suggestions.len(), 3);
+    for (idx, (id, _, win_pct)) in summary.top_suggestions.iter().enumerate() {
+        assert_eq!(*id, recs[idx].hero_id);
+        assert!((*win_pct - recs[idx].projected_win_probability * 100.0).abs() < 1e-4);
+    }
+
+    let mut app = TrueSightGuiApp::new(session, None, None);
+    let ctx = egui::Context::default();
+
+    // Render overlay in draft phase
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                pos2(0.0, 0.0),
+                egui::vec2(380.0, 230.0),
+            )),
+            ..Default::default()
+        },
+        |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let r = app.render_overlay_panel(ui);
+                assert!(r.width() > 0.0 && r.height() > 0.0);
+            });
+        },
+    );
+
+    // Transition to post-draft and render both build bar card and overlay post-draft panel
+    app.session
+        .apply_event(truesight_core::ports::DraftEvent::GameRulesStateChanged {
+            state_name: "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS".into(),
+            game_time_secs: 600,
+        });
+    let summary_post = super::viewmodel::compute_overlay_summary(&app.session);
+    assert!(summary_post.is_post_draft);
+    assert!(summary_post.build.is_some());
+
+    let mut suggested_rect = egui::Rect::NOTHING;
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                pos2(0.0, 0.0),
+                egui::vec2(1180.0, 700.0),
+            )),
+            ..Default::default()
+        },
+        |ctx| {
+            let rects = app.render_frame(ctx);
+            suggested_rect = rects.suggested;
+        },
+    );
+    assert!(suggested_rect.width() > 0.0 && suggested_rect.height() > 0.0);
+
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                pos2(0.0, 0.0),
+                egui::vec2(380.0, 230.0),
+            )),
+            ..Default::default()
+        },
+        |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let r = app.render_overlay_panel(ui);
+                assert!(r.width() > 0.0 && r.height() > 0.0);
+            });
+        },
+    );
+}

@@ -2941,6 +2941,7 @@ fn ui_config_persists_onboarding_dismissed_and_stratz_token_with_private_permiss
         onboarding_dismissed: true,
         stratz_api_token: Some("hdr.pay.sig".into()),
         stratz_token_exp: Some(1_731_536_000),
+        ..UiConfig::default()
     };
     save_ui_config_to_dir(&tmp_dir, &cfg).expect("save ui_config.toml");
 
@@ -3158,6 +3159,7 @@ fn stratz_token_expiry_derives_from_absolute_exp_and_rejects_expired_on_reload()
             onboarding_dismissed: false,
             stratz_api_token: Some(expired_token),
             stratz_token_exp: Some(2000),
+            ..UiConfig::default()
         },
     )
     .unwrap();
@@ -3216,6 +3218,151 @@ fn effective_stratz_token_enforces_expiry_during_open_session_with_env_override_
         Some("env_override_token"),
         "explicit STRATZ_API_TOKEN env override must still take precedence over expired persisted token"
     );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn session_transitions_to_post_draft_build_ticks_owned_items_and_swaps_variants() {
+    use truesight_core::ports::{DraftEvent, ItemMetaRepository};
+    let mut session = AppSession::new().unwrap();
+    assert!(
+        !session.is_post_draft_build_view(),
+        "initial session must default to draft/picks view"
+    );
+
+    // Hero selection keeps picks view.
+    session.apply_event(DraftEvent::GameRulesStateChanged {
+        state_name: "DOTA_GAMERULES_STATE_HERO_SELECTION".into(),
+        game_time_secs: 0,
+    });
+    assert!(!session.is_post_draft_build_view());
+
+    // Pick Anti-Mage (Carry) as local player hero and an enemy with Evasion (Phantom Assassin).
+    assert!(execute_command(&mut session, "ally 1 anti-mage").unwrap());
+    assert!(execute_command(&mut session, "enemy 1 phantom assassin").unwrap());
+
+    // Transition to PRE_GAME -> post-draft item build view.
+    session.apply_event(DraftEvent::GameRulesStateChanged {
+        state_name: "DOTA_GAMERULES_STATE_PRE_GAME".into(),
+        game_time_secs: 15,
+    });
+    assert!(session.is_post_draft_build_view());
+    assert_eq!(session.game_time_secs, 15);
+
+    // Transition to GAME_IN_PROGRESS -> stays in post-draft item build view.
+    session.apply_event(DraftEvent::GameRulesStateChanged {
+        state_name: "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS".into(),
+        game_time_secs: 900,
+    });
+    assert!(session.is_post_draft_build_view());
+    assert_eq!(session.game_time_secs, 900);
+
+    let build_before = session
+        .compute_recommended_build()
+        .expect("picked allied hero must produce a recommended build");
+    assert!(!build_before.steps.is_empty());
+    let first_step = &build_before.steps[0];
+    let first_slug = session
+        .item_repo
+        .item_catalog(first_step.item_id)
+        .expect("step item must exist in catalog")
+        .slug;
+
+    // InventoryUpdated populates owned_items and advances next_unowned_index.
+    session.apply_event(DraftEvent::InventoryUpdated {
+        item_slugs: vec![format!("item_{first_slug}")],
+    });
+    assert!(session.owned_items.contains(&first_step.item_id));
+
+    let build_after_own = session.compute_recommended_build().unwrap();
+    assert!(build_after_own.steps[0].owned);
+    assert_ne!(build_after_own.next_unowned_index, Some(0));
+
+    // Variant swap replaces the primary item at that step and keeps the old primary in variants.
+    if let Some((step_idx, var_id)) = build_after_own
+        .steps
+        .iter()
+        .enumerate()
+        .find_map(|(idx, s)| s.variants.first().map(|v| (idx, v.item_id)))
+    {
+        let old_primary_id = build_after_own.steps[step_idx].item_id;
+        session.select_build_variant(step_idx, var_id);
+        let swapped = session.compute_recommended_build().unwrap();
+        assert_eq!(swapped.steps[step_idx].item_id, var_id);
+        assert!(
+            swapped.steps[step_idx]
+                .variants
+                .iter()
+                .any(|v| v.item_id == old_primary_id),
+            "old primary item must remain in variants so user can switch back"
+        );
+    }
+
+    // Stale patch detection.
+    session.active_game_patch = truesight_core::domain::counter_trait_table_patch().to_string();
+    assert!(!session.is_counter_table_patch_stale());
+    session.active_game_patch = "7.41".to_string();
+    assert!(session.is_counter_table_patch_stale());
+}
+
+#[test]
+fn overlay_geometry_clamps_to_monitor_and_avoids_topbar_capture_strip() {
+    let clamped = AppSession::clamp_overlay_geometry(
+        crate::session::OverlayGeometry {
+            x: -50.0,
+            y: 10.0,
+            width: 100.0,
+            height: 999.0,
+            click_through: true,
+        },
+        1920.0,
+        1080.0,
+    );
+    assert_eq!(clamped.width, 280.0);
+    assert_eq!(clamped.height, 360.0);
+    assert_eq!(clamped.x, 0.0);
+    assert!(
+        clamped.y >= 96.0,
+        "overlay must stay below top 8% Dota 2 portrait capture strip (y >= 96.0)"
+    );
+    assert!(clamped.click_through);
+
+    let clamped_far = AppSession::clamp_overlay_geometry(
+        crate::session::OverlayGeometry {
+            x: 5000.0,
+            y: 5000.0,
+            width: 400.0,
+            height: 240.0,
+            click_through: false,
+        },
+        1920.0,
+        1080.0,
+    );
+    assert_eq!(clamped_far.x, 1520.0);
+    assert_eq!(clamped_far.y, 840.0);
+
+    // Persistence in ui_config.toml
+    let tmp_dir =
+        std::env::temp_dir().join(format!("truesight_test_overlay_cfg_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    let cfg_path = tmp_dir.join("config.toml");
+
+    let mgr = truesight_adapters::sync::LocalCacheManager::with_optional_account(
+        tmp_dir.join("cache"),
+        None,
+    );
+    let mut session = AppSession::with_cache_and_config(mgr, Some(cfg_path.clone())).unwrap();
+    session.set_overlay_geometry(clamped_far);
+    session.set_overlay_mode(true);
+
+    let reloaded_mgr = truesight_adapters::sync::LocalCacheManager::with_optional_account(
+        tmp_dir.join("cache"),
+        None,
+    );
+    let reloaded = AppSession::with_cache_and_config(reloaded_mgr, Some(cfg_path)).unwrap();
+    assert!(reloaded.overlay_mode);
+    assert_eq!(reloaded.overlay_geometry, clamped_far);
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
