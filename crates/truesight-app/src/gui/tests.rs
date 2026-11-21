@@ -1481,6 +1481,56 @@ fn paste_stratz_token_reads_current_clipboard_not_stale_snapshot() {
     );
 }
 
+#[test]
+fn clipboard_watcher_retries_delivery_when_single_slot_queue_is_full() {
+    use std::sync::mpsc;
+
+    let (tx, rx) = mpsc::sync_channel::<String>(1);
+    let mut last_seen: Option<String> = Some("baseline_text".into());
+
+    // First sample fills the 1-slot channel.
+    assert!(
+        super::onboarding::try_deliver_clipboard_sample(
+            &tx,
+            &mut last_seen,
+            "unrelated_copied_url".into()
+        ),
+        "first sample should enter the empty 1-slot queue"
+    );
+    assert_eq!(last_seen.as_deref(), Some("unrelated_copied_url"));
+
+    // Second sample (the new STRATZ token) arrives while the 1-slot queue is still full.
+    let now = truesight_adapters::sync::LocalCacheManager::now_unix();
+    let exp = now + 365 * 86_400;
+    let hdr_b64 = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9";
+    let payload = format!(
+        r#"{{"iss":"https://api.stratz.com","SteamId":"76561198087521479","iat":{now},"exp":{exp}}}"#
+    );
+    let token = format!(
+        "{hdr_b64}.{}.c2ln",
+        encode_b64url_for_test(payload.as_bytes())
+    );
+
+    assert!(
+        !super::onboarding::try_deliver_clipboard_sample(&tx, &mut last_seen, token.clone()),
+        "send must report full queue without advancing last_seen"
+    );
+    assert_eq!(
+        last_seen.as_deref(),
+        Some("unrelated_copied_url"),
+        "last_seen must NOT advance when try_send fails on a full queue"
+    );
+
+    // Consumer drains the first sample; next watcher poll retries the same clipboard token and succeeds.
+    assert_eq!(rx.try_recv().ok().as_deref(), Some("unrelated_copied_url"));
+    assert!(
+        super::onboarding::try_deliver_clipboard_sample(&tx, &mut last_seen, token.clone()),
+        "watcher must retry and deliver the token once the queue slot frees up"
+    );
+    assert_eq!(last_seen.as_deref(), Some(token.as_str()));
+    assert_eq!(rx.try_recv().ok().as_deref(), Some(token.as_str()));
+}
+
 fn encode_b64url_for_test(input: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::new();

@@ -89,6 +89,25 @@ fn read_system_clipboard_bounded(stop: &AtomicBool) -> Option<String> {
     }
 }
 
+/// Attempts to deliver a new clipboard sample to the 1-slot channel, advancing
+/// `last_seen` only after `tx.try_send` succeeds so a full queue never drops
+/// a newly copied token without retrying on subsequent polls.
+pub(super) fn try_deliver_clipboard_sample(
+    tx: &mpsc::SyncSender<String>,
+    last_seen: &mut Option<String>,
+    text: String,
+) -> bool {
+    if last_seen.as_deref() == Some(text.as_str()) {
+        return false;
+    }
+    if tx.try_send(text.clone()).is_ok() {
+        *last_seen = Some(text);
+        true
+    } else {
+        false
+    }
+}
+
 impl TrueSightGuiApp {
     pub(super) fn is_watching_stratz_clipboard(&self, now_unix_secs: u64) -> bool {
         self.stratz_clipboard_watch_until
@@ -144,11 +163,8 @@ impl TrueSightGuiApp {
                     {
                         break;
                     }
-                    if let Some(text) = read_system_clipboard_bounded(&stop_worker)
-                        && last_seen.as_deref() != Some(text.as_str())
-                    {
-                        last_seen = Some(text.clone());
-                        let _ = tx.try_send(text);
+                    if let Some(text) = read_system_clipboard_bounded(&stop_worker) {
+                        let _ = try_deliver_clipboard_sample(&tx, &mut last_seen, text);
                     }
                 }
             });
