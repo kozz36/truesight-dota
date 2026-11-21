@@ -1437,48 +1437,96 @@ impl AppSession {
         })
     }
 
+    /// Sanitizes an `egui` `pixels_per_point` scale factor into a safe finite range `[0.5, 8.0]`.
+    pub fn sanitize_pixels_per_point(pixels_per_point: f32) -> f32 {
+        if pixels_per_point.is_finite() && pixels_per_point > 0.0 {
+            pixels_per_point.clamp(0.5, 8.0)
+        } else {
+            1.0
+        }
+    }
+
+    /// Returns the persisted overlay geometry converted into physical desktop pixels
+    /// using `pixels_per_point`.
+    pub fn overlay_geometry_in_desktop_pixels(&self, pixels_per_point: f32) -> OverlayGeometry {
+        self.overlay_geometry
+            .scale_to_desktop_pixels(pixels_per_point)
+    }
+
     /// Clamps overlay geometry against `monitor` when reliable bounds are available; otherwise
     /// clamps dimensions and avoids `capture_strip_rect` without guessing a monitor origin.
     pub fn clamp_overlay_geometry_with_optional_monitor(
-        mut geom: OverlayGeometry,
+        geom: OverlayGeometry,
         monitor: Option<MonitorRect>,
         fallback_monitor_size: Option<(f32, f32)>,
         capture_strip_rect: Option<(f32, f32, f32, f32)>,
     ) -> OverlayGeometry {
-        if let Some(mon) = monitor {
-            return Self::clamp_overlay_geometry_in_monitor(geom, mon, capture_strip_rect);
+        Self::clamp_overlay_geometry_with_optional_monitor_scaled(
+            geom,
+            monitor,
+            fallback_monitor_size,
+            capture_strip_rect,
+            1.0,
+        )
+    }
+
+    /// Clamps physical desktop pixel `geom_px` against physical `monitor_px` (when available)
+    /// and physical `capture_strip_rect_px`, scaling logical point bounds (`280..520` x `160..360`)
+    /// by `pixels_per_point`.
+    pub fn clamp_overlay_geometry_with_optional_monitor_scaled(
+        mut geom_px: OverlayGeometry,
+        monitor_px: Option<MonitorRect>,
+        fallback_monitor_size_px: Option<(f32, f32)>,
+        capture_strip_rect_px: Option<(f32, f32, f32, f32)>,
+        pixels_per_point: f32,
+    ) -> OverlayGeometry {
+        let ppp = Self::sanitize_pixels_per_point(pixels_per_point);
+        if let Some(mon) = monitor_px {
+            return Self::clamp_overlay_geometry_in_monitor_scaled(
+                geom_px,
+                mon,
+                capture_strip_rect_px,
+                ppp,
+            );
         }
 
-        let max_w = fallback_monitor_size
+        let min_w_px = 280.0 * ppp;
+        let max_w_cap_px = 520.0 * ppp;
+        let min_h_px = 160.0 * ppp;
+        let max_h_cap_px = 360.0 * ppp;
+        let min_mon_w_px = 640.0 * ppp;
+        let min_mon_h_px = 480.0 * ppp;
+
+        let max_w = fallback_monitor_size_px
             .map(|(w, _)| w)
-            .filter(|w| w.is_finite() && *w >= 640.0)
-            .unwrap_or(520.0);
-        let max_h = fallback_monitor_size
+            .filter(|w| w.is_finite() && *w >= min_mon_w_px)
+            .unwrap_or(max_w_cap_px);
+        let max_h = fallback_monitor_size_px
             .map(|(_, h)| h)
-            .filter(|h| h.is_finite() && *h >= 480.0)
-            .unwrap_or(360.0);
+            .filter(|h| h.is_finite() && *h >= min_mon_h_px)
+            .unwrap_or(max_h_cap_px);
 
-        let raw_w = if geom.width.is_finite() {
-            geom.width
+        let raw_w = if geom_px.width.is_finite() {
+            geom_px.width
         } else {
-            380.0
+            380.0 * ppp
         };
-        let raw_h = if geom.height.is_finite() {
-            geom.height
+        let raw_h = if geom_px.height.is_finite() {
+            geom_px.height
         } else {
-            230.0
+            230.0 * ppp
         };
-        geom.width = raw_w.clamp(280.0, 520.0_f32.min(max_w.max(280.0)));
-        geom.height = raw_h.clamp(160.0, 360.0_f32.min(max_h.max(160.0)));
+        geom_px.width = raw_w.clamp(min_w_px, max_w_cap_px.min(max_w.max(min_w_px)));
+        geom_px.height = raw_h.clamp(min_h_px, max_h_cap_px.min(max_h.max(min_h_px)));
 
-        if !geom.x.is_finite() {
-            geom.x = 24.0;
+        if !geom_px.x.is_finite() {
+            geom_px.x = 24.0 * ppp;
         }
-        if !geom.y.is_finite() {
-            geom.y = 96.0;
+        if !geom_px.y.is_finite() {
+            geom_px.y = 96.0 * ppp;
         }
 
-        if let Some((cx, cy, cw, ch)) = capture_strip_rect.filter(|&(cx, cy, cw, ch)| {
+        if let Some((cx, cy, cw, ch)) = capture_strip_rect_px.filter(|&(cx, cy, cw, ch)| {
             cx.is_finite()
                 && cy.is_finite()
                 && cw.is_finite()
@@ -1486,23 +1534,25 @@ impl AppSession {
                 && cw > 0.0
                 && ch > 0.0
         }) {
-            let overlaps_x = geom.x < cx + cw && geom.x + geom.width > cx;
-            let overlaps_y = geom.y < cy + ch && geom.y + geom.height > cy;
+            let overlaps_x = geom_px.x < cx + cw && geom_px.x + geom_px.width > cx;
+            let overlaps_y = geom_px.y < cy + ch && geom_px.y + geom_px.height > cy;
             if overlaps_x && overlaps_y {
                 let below_y = cy + ch;
-                let fits_below = fallback_monitor_size
-                    .map(|(_, h)| !h.is_finite() || h < 480.0 || below_y + geom.height <= h)
+                let fits_below = fallback_monitor_size_px
+                    .map(|(_, h)| {
+                        !h.is_finite() || h < min_mon_h_px || below_y + geom_px.height <= h
+                    })
                     .unwrap_or(true);
-                let above_y = cy - geom.height;
+                let above_y = cy - geom_px.height;
                 if fits_below || above_y < 0.0 {
-                    geom.y = below_y;
+                    geom_px.y = below_y;
                 } else {
-                    geom.y = above_y;
+                    geom_px.y = above_y;
                 }
             }
         }
 
-        geom
+        geom_px
     }
 
     /// Sets the active Dota 2 top-bar capture strip rectangle `(x, y, w, h)` in desktop coordinates.
@@ -1538,62 +1588,82 @@ impl AppSession {
     /// and prevents it from intersecting `capture_strip_rect` `(cx, cy, cw, ch)` (including
     /// when Dota 2 runs in a window offset from the top of the monitor).
     pub fn clamp_overlay_geometry_in_monitor(
-        mut geom: OverlayGeometry,
+        geom: OverlayGeometry,
         monitor: MonitorRect,
         capture_strip_rect: Option<(f32, f32, f32, f32)>,
     ) -> OverlayGeometry {
-        let mon_x = if monitor.x.is_finite() {
-            monitor.x
+        Self::clamp_overlay_geometry_in_monitor_scaled(geom, monitor, capture_strip_rect, 1.0)
+    }
+
+    /// Clamps physical desktop pixel `geom_px` within physical `monitor_px` (preserving secondary
+    /// monitor origins) and prevents it from intersecting physical `capture_strip_rect_px`,
+    /// scaling logical point bounds (`280..520` x `160..360`) by `pixels_per_point`.
+    pub fn clamp_overlay_geometry_in_monitor_scaled(
+        mut geom_px: OverlayGeometry,
+        monitor_px: MonitorRect,
+        capture_strip_rect_px: Option<(f32, f32, f32, f32)>,
+        pixels_per_point: f32,
+    ) -> OverlayGeometry {
+        let ppp = Self::sanitize_pixels_per_point(pixels_per_point);
+        let min_w_px = 280.0 * ppp;
+        let max_w_cap_px = 520.0 * ppp;
+        let min_h_px = 160.0 * ppp;
+        let max_h_cap_px = 360.0 * ppp;
+        let min_mon_w_px = 640.0 * ppp;
+        let min_mon_h_px = 480.0 * ppp;
+
+        let mon_x = if monitor_px.x.is_finite() {
+            monitor_px.x
         } else {
             0.0
         };
-        let mon_y = if monitor.y.is_finite() {
-            monitor.y
+        let mon_y = if monitor_px.y.is_finite() {
+            monitor_px.y
         } else {
             0.0
         };
-        let mon_w = if monitor.width.is_finite() && monitor.width >= 640.0 {
-            monitor.width
+        let mon_w = if monitor_px.width.is_finite() && monitor_px.width >= min_mon_w_px {
+            monitor_px.width
         } else {
-            1920.0
+            1920.0 * ppp
         };
-        let mon_h = if monitor.height.is_finite() && monitor.height >= 480.0 {
-            monitor.height
+        let mon_h = if monitor_px.height.is_finite() && monitor_px.height >= min_mon_h_px {
+            monitor_px.height
         } else {
-            1080.0
+            1080.0 * ppp
         };
 
-        let raw_w = if geom.width.is_finite() {
-            geom.width
+        let raw_w = if geom_px.width.is_finite() {
+            geom_px.width
         } else {
-            380.0
+            380.0 * ppp
         };
-        let raw_h = if geom.height.is_finite() {
-            geom.height
+        let raw_h = if geom_px.height.is_finite() {
+            geom_px.height
         } else {
-            230.0
+            230.0 * ppp
         };
-        geom.width = raw_w.clamp(280.0, 520.0_f32.min(mon_w.max(280.0)));
-        geom.height = raw_h.clamp(160.0, 360.0_f32.min(mon_h.max(160.0)));
+        geom_px.width = raw_w.clamp(min_w_px, max_w_cap_px.min(mon_w.max(min_w_px)));
+        geom_px.height = raw_h.clamp(min_h_px, max_h_cap_px.min(mon_h.max(min_h_px)));
 
-        let default_top_floor = (mon_h * 0.08).ceil().max(96.0);
-        let raw_x = if geom.x.is_finite() {
-            geom.x
+        let default_top_floor = (mon_h * 0.08).ceil().max(96.0 * ppp);
+        let raw_x = if geom_px.x.is_finite() {
+            geom_px.x
         } else {
-            mon_x + 24.0
+            mon_x + 24.0 * ppp
         };
-        let raw_y = if geom.y.is_finite() {
-            geom.y
+        let raw_y = if geom_px.y.is_finite() {
+            geom_px.y
         } else {
             mon_y + default_top_floor
         };
 
-        let max_x = (mon_x + mon_w - geom.width).max(mon_x);
-        let max_y = (mon_y + mon_h - geom.height).max(mon_y);
-        geom.x = raw_x.clamp(mon_x, max_x);
-        geom.y = raw_y.clamp(mon_y, max_y);
+        let max_x = (mon_x + mon_w - geom_px.width).max(mon_x);
+        let max_y = (mon_y + mon_h - geom_px.height).max(mon_y);
+        geom_px.x = raw_x.clamp(mon_x, max_x);
+        geom_px.y = raw_y.clamp(mon_y, max_y);
 
-        if let Some((cx, cy, cw, ch)) = capture_strip_rect.filter(|&(cx, cy, cw, ch)| {
+        if let Some((cx, cy, cw, ch)) = capture_strip_rect_px.filter(|&(cx, cy, cw, ch)| {
             cx.is_finite()
                 && cy.is_finite()
                 && cw.is_finite()
@@ -1601,27 +1671,27 @@ impl AppSession {
                 && cw > 0.0
                 && ch > 0.0
         }) {
-            let overlaps_x = geom.x < cx + cw && geom.x + geom.width > cx;
-            let overlaps_y = geom.y < cy + ch && geom.y + geom.height > cy;
+            let overlaps_x = geom_px.x < cx + cw && geom_px.x + geom_px.width > cx;
+            let overlaps_y = geom_px.y < cy + ch && geom_px.y + geom_px.height > cy;
             if overlaps_x && overlaps_y {
                 let below_y = cy + ch;
-                let above_y = cy - geom.height;
+                let above_y = cy - geom_px.height;
                 if below_y <= max_y {
-                    geom.y = below_y.max(mon_y);
+                    geom_px.y = below_y.max(mon_y);
                 } else if above_y >= mon_y {
-                    geom.y = above_y.min(max_y);
+                    geom_px.y = above_y.min(max_y);
                 } else {
-                    geom.y = max_y;
+                    geom_px.y = max_y;
                 }
             }
         } else {
             let min_y = (mon_y + default_top_floor).min(max_y);
-            if geom.y < min_y {
-                geom.y = min_y;
+            if geom_px.y < min_y {
+                geom_px.y = min_y;
             }
         }
 
-        geom
+        geom_px
     }
 
     /// Enables or disables compact overlay mode and persists the preference.
@@ -1779,6 +1849,34 @@ pub struct OverlayGeometry {
     pub width: f32,
     pub height: f32,
     pub click_through: bool,
+}
+
+impl OverlayGeometry {
+    /// Converts logical `egui` viewport points (`x, y, width, height`) into physical desktop
+    /// pixels using the viewport's `pixels_per_point` scale factor.
+    pub fn scale_to_desktop_pixels(self, pixels_per_point: f32) -> Self {
+        let ppp = AppSession::sanitize_pixels_per_point(pixels_per_point);
+        Self {
+            x: self.x * ppp,
+            y: self.y * ppp,
+            width: self.width * ppp,
+            height: self.height * ppp,
+            click_through: self.click_through,
+        }
+    }
+
+    /// Converts physical desktop pixel geometry back into logical `egui` viewport points
+    /// using the viewport's `pixels_per_point` scale factor.
+    pub fn scale_to_egui_points(self, pixels_per_point: f32) -> Self {
+        let ppp = AppSession::sanitize_pixels_per_point(pixels_per_point);
+        Self {
+            x: self.x / ppp,
+            y: self.y / ppp,
+            width: self.width / ppp,
+            height: self.height / ppp,
+            click_through: self.click_through,
+        }
+    }
 }
 
 impl Default for OverlayGeometry {

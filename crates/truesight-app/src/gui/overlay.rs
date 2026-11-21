@@ -42,17 +42,22 @@ impl TrueSightGuiApp {
             self.native_monitors_probed = true;
         }
 
-        let (vp_monitor_size, vp_outer_rect, vp_inner_rect, screen_rect) = vctx.input(|i| {
-            let vp = i.viewport();
-            (
-                vp.monitor_size,
-                vp.outer_rect,
-                vp.inner_rect,
-                i.screen_rect(),
-            )
-        });
+        let (vp_monitor_size, vp_outer_rect, vp_inner_rect, vp_native_ppp, ctx_ppp, screen_rect) =
+            vctx.input(|i| {
+                let vp = i.viewport();
+                (
+                    vp.monitor_size,
+                    vp.outer_rect,
+                    vp.inner_rect,
+                    vp.native_pixels_per_point,
+                    i.pixels_per_point(),
+                    i.screen_rect(),
+                )
+            });
+        let ppp =
+            crate::session::AppSession::sanitize_pixels_per_point(vp_native_ppp.unwrap_or(ctx_ppp));
 
-        let fallback_monitor_size = vp_monitor_size
+        let fallback_monitor_size_pts = vp_monitor_size
             .map(|s| (s.x, s.y))
             .filter(|(w, h)| *w > 0.0 && *h > 0.0)
             .or_else(|| {
@@ -63,6 +68,7 @@ impl TrueSightGuiApp {
                     None
                 }
             });
+        let fallback_monitor_size_px = fallback_monitor_size_pts.map(|(w, h)| (w * ppp, h * ppp));
 
         let (x, y) = vp_outer_rect
             .or(vp_inner_rect)
@@ -80,42 +86,49 @@ impl TrueSightGuiApp {
                 self.session.overlay_geometry.height,
             ));
 
-        let candidate = OverlayGeometry {
+        let candidate_pts = OverlayGeometry {
             x,
             y,
             width,
             height,
             click_through: self.session.overlay_geometry.click_through,
         };
-        let monitor_rect = self.session.resolve_monitor_for_overlay(candidate);
-        let clamped = crate::session::AppSession::clamp_overlay_geometry_with_optional_monitor(
-            candidate,
-            monitor_rect,
-            fallback_monitor_size,
-            self.session.active_capture_strip_rect,
-        );
+        let candidate_px = candidate_pts.scale_to_desktop_pixels(ppp);
+        let monitor_rect_px = self.session.resolve_monitor_for_overlay(candidate_px);
+        let clamped_px =
+            crate::session::AppSession::clamp_overlay_geometry_with_optional_monitor_scaled(
+                candidate_px,
+                monitor_rect_px,
+                fallback_monitor_size_px,
+                self.session.active_capture_strip_rect,
+                ppp,
+            );
+        let clamped_pts = clamped_px.scale_to_egui_points(ppp);
 
-        if (clamped.x - candidate.x).abs() > 0.5 || (clamped.y - candidate.y).abs() > 0.5 {
+        if (clamped_pts.x - candidate_pts.x).abs() > 0.5
+            || (clamped_pts.y - candidate_pts.y).abs() > 0.5
+        {
             vctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
-                clamped.x, clamped.y,
+                clamped_pts.x,
+                clamped_pts.y,
             )));
         }
-        if (clamped.width - candidate.width).abs() > 0.5
-            || (clamped.height - candidate.height).abs() > 0.5
+        if (clamped_pts.width - candidate_pts.width).abs() > 0.5
+            || (clamped_pts.height - candidate_pts.height).abs() > 0.5
         {
             vctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
-                clamped.width,
-                clamped.height,
+                clamped_pts.width,
+                clamped_pts.height,
             )));
         }
 
         let prev = self.session.overlay_geometry;
-        if (clamped.x - prev.x).abs() > 0.5
-            || (clamped.y - prev.y).abs() > 0.5
-            || (clamped.width - prev.width).abs() > 0.5
-            || (clamped.height - prev.height).abs() > 0.5
+        if (clamped_pts.x - prev.x).abs() > 0.5
+            || (clamped_pts.y - prev.y).abs() > 0.5
+            || (clamped_pts.width - prev.width).abs() > 0.5
+            || (clamped_pts.height - prev.height).abs() > 0.5
         {
-            self.session.set_overlay_geometry(clamped);
+            self.session.set_overlay_geometry(clamped_pts);
         }
     }
 

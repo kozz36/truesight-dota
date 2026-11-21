@@ -3648,3 +3648,53 @@ fn resolve_monitor_and_optional_clamp_respect_heterogeneous_monitors_and_unavail
     assert_eq!(fallback_clamped.x, 2450.0);
     assert_eq!(fallback_clamped.y, 252.0);
 }
+
+#[test]
+fn overlay_geometry_mixed_dpi_normalizes_points_to_desktop_pixels_for_monitor_selection_and_capture_overlap()
+ {
+    let mut session = AppSession::new().unwrap();
+    session.set_known_monitors(vec![
+        crate::session::MonitorRect::new(0.0, 0.0, 1920.0, 1080.0),
+        crate::session::MonitorRect::new(1920.0, 0.0, 2560.0, 1440.0),
+    ]);
+
+    let ppp = 1.5;
+    let logical_pts = crate::session::OverlayGeometry {
+        x: 1400.0,
+        y: 120.0,
+        width: 380.0,
+        height: 230.0,
+        click_through: false,
+    };
+    let physical_px = logical_pts.scale_to_desktop_pixels(ppp);
+    assert_eq!(physical_px.x, 2100.0);
+    assert_eq!(physical_px.y, 180.0);
+    assert_eq!(physical_px.width, 570.0);
+    assert_eq!(physical_px.height, 345.0);
+
+    let resolved = session.resolve_monitor_for_overlay(physical_px);
+    assert_eq!(
+        resolved,
+        Some(crate::session::MonitorRect::new(
+            1920.0, 0.0, 2560.0, 1440.0
+        ))
+    );
+
+    let clamped_px = AppSession::clamp_overlay_geometry_with_optional_monitor_scaled(
+        physical_px,
+        resolved,
+        Some((2560.0, 1440.0)),
+        Some((2100.0, 180.0, 1600.0, 72.0)),
+        ppp,
+    );
+    assert_eq!(clamped_px.x, 2100.0);
+    assert_eq!(clamped_px.y, 252.0);
+    assert_eq!(clamped_px.width, 570.0);
+    assert_eq!(clamped_px.height, 345.0);
+
+    let clamped_pts = clamped_px.scale_to_egui_points(ppp);
+    assert_eq!(clamped_pts.x, 1400.0);
+    assert_eq!(clamped_pts.y, 168.0);
+    assert_eq!(clamped_pts.width, 380.0);
+    assert_eq!(clamped_pts.height, 230.0);
+}

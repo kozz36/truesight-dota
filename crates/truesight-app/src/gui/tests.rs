@@ -2040,3 +2040,106 @@ fn live_overlay_avoids_offset_capture_strip_from_bounded_vision_worker_productio
         "overlay overlapping live worker's offset capture strip (y=180..252) must be clamped to y=252.0"
     );
 }
+
+#[test]
+fn live_overlay_viewport_geometry_normalizes_mixed_dpi_secondary_monitor_and_capture_strip() {
+    use truesight_adapters::vision::{BoundedVisionWorker, RgbFrame, ScreenFrameSource};
+    use truesight_core::ports::PortError;
+
+    // Physical Dota capture strip on secondary 150%-DPI monitor (origin 1920, 0):
+    // physical rect = (2100, 180, 1600, 72) -> y = 180..252 physical px.
+    struct SecondaryMonitorDotaSource;
+    impl ScreenFrameSource for SecondaryMonitorDotaSource {
+        fn capture_frame(&mut self) -> Result<Option<RgbFrame>, PortError> {
+            Ok(Some(
+                RgbFrame::with_source_height(1600, 72, 1440, vec![0; 1600 * 72 * 3])
+                    .with_capture_strip_rect((2100.0, 180.0, 1600.0, 72.0)),
+            ))
+        }
+    }
+
+    let worker = BoundedVisionWorker::spawn_with_source(SecondaryMonitorDotaSource)
+        .expect("vision worker must spawn");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while worker.capture_strip_rect().is_none() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(
+        worker.capture_strip_rect(),
+        Some((2100.0, 180.0, 1600.0, 72.0))
+    );
+
+    let mut session = AppSession::new().unwrap();
+    session.overlay_mode = true;
+    // Mixed-DPI desktop: 100% primary (1920x1080 at 0,0) + 150% secondary (2560x1440 at 1920,0) in physical pixels.
+    session.set_known_monitors(vec![
+        crate::session::MonitorRect::new(0.0, 0.0, 1920.0, 1080.0),
+        crate::session::MonitorRect::new(1920.0, 0.0, 2560.0, 1440.0),
+    ]);
+    // Overlay physically at (2100, 180, 570, 345) on 150% monitor -> logical egui points (1400, 120, 380, 230).
+    // Without DPI normalization, x=1400 looks inside primary (0..1920) and misses the physical strip at (2100, 180).
+    session.overlay_geometry = crate::session::OverlayGeometry {
+        x: 1400.0,
+        y: 120.0,
+        width: 380.0,
+        height: 230.0,
+        click_through: false,
+    };
+
+    let mut app = TrueSightGuiApp::new(session, None, Some(worker));
+    let ctx = egui::Context::default();
+    let overlay_id = egui::ViewportId::from_hash_of("truesight_compact_overlay");
+
+    let make_input = |x_pts: f32, y_pts: f32| {
+        let vp_info = egui::ViewportInfo {
+            native_pixels_per_point: Some(1.5),
+            monitor_size: Some(egui::vec2(2560.0 / 1.5, 1440.0 / 1.5)),
+            outer_rect: Some(egui::Rect::from_min_size(
+                pos2(x_pts, y_pts),
+                egui::vec2(380.0, 230.0),
+            )),
+            inner_rect: Some(egui::Rect::from_min_size(
+                pos2(x_pts, y_pts),
+                egui::vec2(380.0, 230.0),
+            )),
+            ..Default::default()
+        };
+        let mut raw_input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                pos2(0.0, 0.0),
+                egui::vec2(1280.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        raw_input
+            .viewports
+            .insert(egui::ViewportId::ROOT, vp_info.clone());
+        raw_input.viewports.insert(overlay_id, vp_info);
+        raw_input
+    };
+
+    let _ = ctx.run(make_input(1400.0, 120.0), |ctx| {
+        let _ = app.render_frame(ctx);
+    });
+
+    assert_eq!(
+        app.session.overlay_geometry.x, 1400.0,
+        "150%-DPI secondary monitor overlay at physical x=2100 (1400pt) must stay on secondary monitor"
+    );
+    assert_eq!(
+        app.session.overlay_geometry.y, 168.0,
+        "150%-DPI overlay overlapping physical strip (y=180..252) must be pushed to physical y=252 (168pt)"
+    );
+    assert_eq!(app.session.overlay_geometry.width, 380.0);
+    assert_eq!(app.session.overlay_geometry.height, 230.0);
+
+    // Dragging past right edge of 150% secondary monitor (1920 + 2560 - 570 = 3910px = 2606.6667pt)
+    let _ = ctx.run(make_input(2800.0, 168.0), |ctx| {
+        let _ = app.render_frame(ctx);
+    });
+    assert!(
+        (app.session.overlay_geometry.x - (3910.0 / 1.5)).abs() < 0.1,
+        "dragging past right edge on 150%-DPI secondary monitor must clamp to physical max_x / 1.5, got {}",
+        app.session.overlay_geometry.x
+    );
+}
