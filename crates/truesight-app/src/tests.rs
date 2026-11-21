@@ -3175,3 +3175,47 @@ fn stratz_token_expiry_derives_from_absolute_exp_and_rejects_expired_on_reload()
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+#[test]
+fn effective_stratz_token_enforces_expiry_during_open_session_with_env_override_precedence() {
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_test_stratz_sync_exp_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    let cfg_path = tmp_dir.join("config.toml");
+
+    let t0 = 1_700_000_000_u64;
+    let exp = t0 + 3_600;
+    let token = make_test_jwt(&format!(
+        r#"{{"iss":"https://api.stratz.com","iat":{t0},"exp":{exp}}}"#
+    ));
+
+    let mgr = truesight_adapters::sync::LocalCacheManager::with_optional_account(
+        tmp_dir.join("cache"),
+        None,
+    );
+    let mut session = AppSession::with_cache_and_config(mgr, Some(cfg_path)).unwrap();
+    session.apply_stratz_token(&token, t0).unwrap();
+
+    assert_eq!(
+        session.cache_mgr.effective_stratz_token_at(t0).as_deref(),
+        Some(token.as_str()),
+        "valid token must be returned before exp"
+    );
+    assert_eq!(
+        session.cache_mgr.effective_stratz_token_at(exp + 1),
+        None,
+        "expired persisted token must NOT be returned after exp during the same open session"
+    );
+    assert_eq!(
+        session
+            .cache_mgr
+            .effective_stratz_token_with_env_at(Some("env_override_token"), exp + 1)
+            .as_deref(),
+        Some("env_override_token"),
+        "explicit STRATZ_API_TOKEN env override must still take precedence over expired persisted token"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}

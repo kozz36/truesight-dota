@@ -71,7 +71,9 @@ pub struct TrueSightGuiApp {
     pub(super) stratz_clipboard_watch_until: Option<u64>,
     pub(super) stratz_clipboard_rx: Option<std::sync::mpsc::Receiver<String>>,
     pub(super) stratz_clipboard_stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-    pub(super) stratz_clipboard_latest: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    pub(super) stratz_clipboard_baseline: Option<String>,
+    pub(super) stratz_paste_rx: Option<std::sync::mpsc::Receiver<Option<String>>>,
+    pub(super) stratz_paste_stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     #[cfg(test)]
     pub(super) test_clipboard_override: Option<String>,
     pub(super) stratz_paste_open: bool,
@@ -81,6 +83,9 @@ pub struct TrueSightGuiApp {
 impl Drop for TrueSightGuiApp {
     fn drop(&mut self) {
         self.stop_stratz_clipboard_watch();
+        if let Some(stop) = self.stratz_paste_stop.take() {
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 }
 
@@ -125,7 +130,9 @@ impl TrueSightGuiApp {
             stratz_clipboard_watch_until: None,
             stratz_clipboard_rx: None,
             stratz_clipboard_stop: None,
-            stratz_clipboard_latest: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            stratz_clipboard_baseline: None,
+            stratz_paste_rx: None,
+            stratz_paste_stop: None,
             #[cfg(test)]
             test_clipboard_override: None,
             stratz_paste_open: false,
@@ -275,10 +282,14 @@ impl TrueSightGuiApp {
         self.session
             .poll_live_sources(self.gsi_listener.as_mut(), self.vision_worker.as_mut());
         self.poll_stratz_clipboard_watcher();
+        self.poll_stratz_clipboard_paste();
         if self
             .is_watching_stratz_clipboard(truesight_adapters::sync::LocalCacheManager::now_unix())
         {
             ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        }
+        if self.stratz_paste_rx.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
         if let Some(notice) = self.session.last_sync_notice.take() {
             self.status_banner = notice;

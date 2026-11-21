@@ -101,16 +101,27 @@ impl TrueSightGuiApp {
         }
         self.stratz_clipboard_watch_until = None;
         self.stratz_clipboard_rx = None;
+        self.stratz_clipboard_baseline = None;
     }
 
-    /// Spawns a bounded background thread that polls the system clipboard off the render thread.
+    /// Spawns a bounded background thread that polls the system clipboard off the render thread,
+    /// treating the initial clipboard value as a baseline until the user copies a new token.
     pub(super) fn start_stratz_clipboard_watch(&mut self, now_unix_secs: u64) {
         self.stop_stratz_clipboard_watch();
         let deadline = now_unix_secs + STRATZ_CLIPBOARD_WATCH_SECS;
         let (tx, rx) = mpsc::sync_channel::<String>(1);
         let stop = Arc::new(AtomicBool::new(false));
         let stop_worker = Arc::clone(&stop);
-        let latest = Arc::clone(&self.stratz_clipboard_latest);
+
+        #[cfg(test)]
+        {
+            self.stratz_clipboard_baseline = self
+                .test_clipboard_override
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(ToOwned::to_owned);
+        }
 
         self.stratz_clipboard_watch_until = Some(deadline);
         self.stratz_clipboard_rx = Some(rx);
@@ -119,23 +130,25 @@ impl TrueSightGuiApp {
         let _ = std::thread::Builder::new()
             .name("truesight-clipboard-watch".into())
             .spawn(move || {
-                let mut last_seen: Option<String> = None;
+                let mut last_seen: Option<String> = read_system_clipboard_bounded(&stop_worker);
                 while !stop_worker.load(Ordering::Relaxed)
                     && LocalCacheManager::now_unix() < deadline
                 {
-                    if let Some(text) = read_system_clipboard_bounded(&stop_worker) {
-                        if let Ok(mut guard) = latest.lock() {
-                            *guard = Some(text.clone());
-                        }
-                        if last_seen.as_deref() != Some(text.as_str()) {
-                            last_seen = Some(text.clone());
-                            let _ = tx.try_send(text);
-                        }
-                    }
                     let mut slept = Duration::ZERO;
                     while slept < CLIPBOARD_POLL_INTERVAL && !stop_worker.load(Ordering::Relaxed) {
                         std::thread::sleep(Duration::from_millis(50));
                         slept += Duration::from_millis(50);
+                    }
+                    if stop_worker.load(Ordering::Relaxed)
+                        || LocalCacheManager::now_unix() >= deadline
+                    {
+                        break;
+                    }
+                    if let Some(text) = read_system_clipboard_bounded(&stop_worker)
+                        && last_seen.as_deref() != Some(text.as_str())
+                    {
+                        last_seen = Some(text.clone());
+                        let _ = tx.try_send(text);
                     }
                 }
             });
@@ -172,6 +185,9 @@ impl TrueSightGuiApp {
         let now = LocalCacheManager::now_unix();
         #[cfg(test)]
         if let Some(clip) = self.test_clipboard_override.take() {
+            if self.stratz_clipboard_baseline.as_deref() == Some(clip.trim()) {
+                return;
+            }
             let _ = self.process_stratz_clipboard_text(&clip, now);
             return;
         }
@@ -180,6 +196,7 @@ impl TrueSightGuiApp {
             .as_ref()
             .and_then(|rx| rx.try_recv().ok());
         if let Some(clip) = received
+            && self.stratz_clipboard_baseline.as_deref() != Some(clip.trim())
             && self.process_stratz_clipboard_text(&clip, now)
         {
             return;
@@ -220,32 +237,71 @@ impl TrueSightGuiApp {
         }
     }
 
+    /// Triggers a fresh, bounded off-render-thread clipboard read when `PASTE TOKEN` is clicked.
     pub(super) fn try_paste_stratz_token(&mut self) {
-        let snapshot = {
-            #[cfg(test)]
-            {
-                self.test_clipboard_override.take().or_else(|| {
-                    self.stratz_clipboard_latest
-                        .lock()
-                        .ok()
-                        .and_then(|g| g.clone())
-                })
+        #[cfg(test)]
+        if let Some(clip) = self.test_clipboard_override.take() {
+            if self.apply_stratz_token_ui(&clip, LocalCacheManager::now_unix()) {
+                self.stratz_paste_open = false;
+                self.stop_stratz_clipboard_watch();
+            } else {
+                self.status_banner =
+                    "Clipboard does not contain a valid STRATZ token — paste manually below."
+                        .into();
+                self.stratz_paste_open = true;
             }
-            #[cfg(not(test))]
-            {
-                self.stratz_clipboard_latest
-                    .lock()
-                    .ok()
-                    .and_then(|g| g.clone())
-            }
-        };
-        if let Some(clip) = snapshot
-            && self.apply_stratz_token_ui(&clip, LocalCacheManager::now_unix())
-        {
-            self.stratz_paste_open = false;
             return;
         }
-        self.stratz_paste_open = !self.stratz_paste_open;
+        self.request_stratz_clipboard_paste();
+    }
+
+    fn request_stratz_clipboard_paste(&mut self) {
+        if let Some(stop) = self.stratz_paste_stop.take() {
+            stop.store(true, Ordering::Relaxed);
+        }
+        let (tx, rx) = mpsc::sync_channel::<Option<String>>(1);
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_worker = Arc::clone(&stop);
+        self.stratz_paste_rx = Some(rx);
+        self.stratz_paste_stop = Some(stop);
+        self.status_banner = "Reading STRATZ token from clipboard...".into();
+
+        let _ = std::thread::Builder::new()
+            .name("truesight-clipboard-paste".into())
+            .spawn(move || {
+                let clip = read_system_clipboard_bounded(&stop_worker);
+                let _ = tx.try_send(clip);
+            });
+    }
+
+    pub(super) fn poll_stratz_clipboard_paste(&mut self) {
+        let state = self.stratz_paste_rx.as_ref().map(|rx| rx.try_recv());
+        match state {
+            Some(Ok(clip_opt)) => {
+                self.stratz_paste_rx = None;
+                self.stratz_paste_stop = None;
+                if let Some(clip) = clip_opt
+                    && self.apply_stratz_token_ui(&clip, LocalCacheManager::now_unix())
+                {
+                    self.stratz_paste_open = false;
+                    self.stop_stratz_clipboard_watch();
+                } else {
+                    self.status_banner =
+                        "Clipboard does not contain a valid STRATZ token — paste manually below."
+                            .into();
+                    self.stratz_paste_open = true;
+                }
+            }
+            Some(Err(mpsc::TryRecvError::Disconnected)) => {
+                self.stratz_paste_rx = None;
+                self.stratz_paste_stop = None;
+                self.status_banner =
+                    "Clipboard does not contain a valid STRATZ token — paste manually below."
+                        .into();
+                self.stratz_paste_open = true;
+            }
+            Some(Err(mpsc::TryRecvError::Empty)) | None => {}
+        }
     }
 
     pub(super) fn render_stratz_pending_link_prompt(&mut self, ui: &mut egui::Ui) {

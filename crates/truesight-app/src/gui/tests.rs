@@ -1385,6 +1385,102 @@ fn pending_stratz_steam_link_preserves_explicit_account_in_gui_until_confirmed()
     assert!(r.onboarding_window.is_some());
 }
 
+#[test]
+fn connect_stratz_ignores_initial_clipboard_baseline_until_new_token_copied() {
+    let mut app = TrueSightGuiApp::new(AppSession::new().unwrap(), None, None);
+    let now = truesight_adapters::sync::LocalCacheManager::now_unix();
+    let exp = now + 365 * 86_400;
+    let hdr_b64 = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9";
+
+    let payload_a = format!(
+        r#"{{"iss":"https://api.stratz.com","SteamId":"76561198087521469","iat":{now},"exp":{exp}}}"#
+    );
+    let token_a = format!(
+        "{hdr_b64}.{}.c2ln",
+        encode_b64url_for_test(payload_a.as_bytes())
+    );
+
+    let payload_b = format!(
+        r#"{{"iss":"https://api.stratz.com","SteamId":"76561198087521470","iat":{now},"exp":{exp}}}"#
+    );
+    let token_b = format!(
+        "{hdr_b64}.{}.c2ln",
+        encode_b64url_for_test(payload_b.as_bytes())
+    );
+
+    // Pre-existing valid token_a on the clipboard before clicking CONNECT STRATZ.
+    app.test_clipboard_override = Some(token_a.clone());
+    app.start_stratz_clipboard_watch(now);
+    app.poll_stratz_clipboard_watcher();
+
+    assert!(
+        app.is_watching_stratz_clipboard(now),
+        "watcher must stay active when clipboard still holds the initial baseline token"
+    );
+    assert_eq!(
+        app.session.stratz_api_token, None,
+        "initial baseline token_a must NOT be applied"
+    );
+
+    // User later copies a new valid token_b onto the clipboard.
+    app.test_clipboard_override = Some(token_b.clone());
+    app.poll_stratz_clipboard_watcher();
+
+    assert!(
+        !app.is_watching_stratz_clipboard(now),
+        "watcher must stop after applying new token_b"
+    );
+    assert_eq!(
+        app.session.stratz_api_token.as_deref(),
+        Some(token_b.as_str()),
+        "new token_b must be applied once clipboard changes from baseline"
+    );
+}
+
+#[test]
+fn paste_stratz_token_reads_current_clipboard_not_stale_snapshot() {
+    let mut app = TrueSightGuiApp::new(AppSession::new().unwrap(), None, None);
+    let now = truesight_adapters::sync::LocalCacheManager::now_unix();
+    let exp = now + 365 * 86_400;
+    let hdr_b64 = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9";
+
+    let payload_c = format!(
+        r#"{{"iss":"https://api.stratz.com","SteamId":"76561198087521471","iat":{now},"exp":{exp}}}"#
+    );
+    let token_c = format!(
+        "{hdr_b64}.{}.c2ln",
+        encode_b64url_for_test(payload_c.as_bytes())
+    );
+
+    // Even with no watcher active, clicking PASTE TOKEN reads the current clipboard value.
+    app.test_clipboard_override = Some(token_c.clone());
+    app.try_paste_stratz_token();
+
+    assert_eq!(
+        app.session.stratz_api_token.as_deref(),
+        Some(token_c.as_str()),
+        "PASTE TOKEN must apply the current clipboard token_c"
+    );
+    assert!(!app.stratz_paste_open);
+
+    // Simulate a subsequent clipboard change to token_d and click PASTE TOKEN again.
+    let payload_d = format!(
+        r#"{{"iss":"https://api.stratz.com","SteamId":"76561198087521472","iat":{now},"exp":{exp}}}"#
+    );
+    let token_d = format!(
+        "{hdr_b64}.{}.c2ln",
+        encode_b64url_for_test(payload_d.as_bytes())
+    );
+    app.test_clipboard_override = Some(token_d.clone());
+    app.try_paste_stratz_token();
+
+    assert_eq!(
+        app.session.stratz_api_token.as_deref(),
+        Some(token_d.as_str()),
+        "PASTE TOKEN must read fresh clipboard value token_d instead of any stale snapshot"
+    );
+}
+
 fn encode_b64url_for_test(input: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::new();

@@ -363,6 +363,7 @@ pub struct LocalCacheManager {
     pub explicit_override: bool,
     pub explicitly_unlinked: bool,
     pub stratz_api_token: Option<String>,
+    pub stratz_token_exp: Option<u64>,
     sync_generation: u64,
     cancel_token: Arc<AtomicBool>,
     coordinator: Arc<Mutex<CacheSyncState>>,
@@ -417,26 +418,47 @@ impl LocalCacheManager {
             explicit_override: false,
             explicitly_unlinked: false,
             stratz_api_token: None,
+            stratz_token_exp: None,
             sync_generation: 0,
             cancel_token: Arc::new(AtomicBool::new(false)),
             coordinator,
         }
     }
 
-    /// Resolves the active STRATZ API bearer token, giving precedence to the
-    /// `STRATZ_API_TOKEN` environment variable over the persisted UI token.
+    /// Resolves the active STRATZ API bearer token against the current wall-clock time,
+    /// giving precedence to `STRATZ_API_TOKEN` and rejecting expired persisted tokens.
     pub fn effective_stratz_token(&self) -> Option<String> {
-        std::env::var("STRATZ_API_TOKEN")
-            .ok()
-            .map(|t| t.trim().to_string())
-            .filter(|t| !t.is_empty())
-            .or_else(|| {
-                self.stratz_api_token
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|t| !t.is_empty())
-                    .map(ToOwned::to_owned)
-            })
+        self.effective_stratz_token_at(Self::now_unix())
+    }
+
+    /// Resolves the active STRATZ API bearer token at `now_unix_secs`.
+    pub fn effective_stratz_token_at(&self, now_unix_secs: u64) -> Option<String> {
+        let env_val = std::env::var("STRATZ_API_TOKEN").ok();
+        self.effective_stratz_token_with_env_at(env_val.as_deref(), now_unix_secs)
+    }
+
+    /// Resolves the active STRATZ API bearer token at `now_unix_secs` with an explicit
+    /// environment override value (used by `effective_stratz_token_at` and deterministic tests).
+    pub fn effective_stratz_token_with_env_at(
+        &self,
+        env_token: Option<&str>,
+        now_unix_secs: u64,
+    ) -> Option<String> {
+        if let Some(env_tok) = env_token.map(str::trim).filter(|t| !t.is_empty()) {
+            return Some(env_tok.to_owned());
+        }
+        let trimmed = self
+            .stratz_api_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())?;
+        let exp = self
+            .stratz_token_exp
+            .or_else(|| extract_jwt_exp_unverified(trimmed));
+        if exp.is_some_and(|exp_ts| exp_ts <= now_unix_secs) {
+            return None;
+        }
+        Some(trimmed.to_owned())
     }
 
     pub fn begin_sync_generation(&mut self) -> (u64, Arc<AtomicBool>) {
@@ -1198,4 +1220,33 @@ fn fetch_stratz_with_synergy_graphql(token: &str) -> Result<String, PortError> {
         ],
         "STRATZ GraphQL fetch",
     )
+}
+
+fn extract_jwt_exp_unverified(token: &str) -> Option<u64> {
+    let payload_b64 = token.trim().split('.').nth(1)?;
+    let clean = payload_b64.trim_end_matches('=');
+    if clean.len() % 4 == 1 {
+        return None;
+    }
+    let mut out = Vec::with_capacity((clean.len() * 3) / 4);
+    let mut buf: u32 = 0;
+    let mut bits: u8 = 0;
+    for byte in clean.bytes() {
+        let val: u32 = match byte {
+            b'A'..=b'Z' => u32::from(byte - b'A'),
+            b'a'..=b'z' => u32::from(byte - b'a') + 26,
+            b'0'..=b'9' => u32::from(byte - b'0') + 52,
+            b'-' | b'+' => 62,
+            b'_' | b'/' => 63,
+            _ => return None,
+        };
+        buf = (buf << 6) | val;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((buf >> bits) & 0xFF) as u8);
+        }
+    }
+    let payload = std::str::from_utf8(&out).ok()?;
+    extract_u64_field(payload, "\"exp\"")
 }

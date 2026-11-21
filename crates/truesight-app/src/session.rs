@@ -156,6 +156,7 @@ impl AppSession {
             resolve_stratz_exp(ui_cfg.stratz_api_token.as_deref(), ui_cfg.stratz_token_exp);
         if !is_stratz_exp_expired(resolved_exp, now) {
             cache_mgr.stratz_api_token = ui_cfg.stratz_api_token.clone();
+            cache_mgr.stratz_token_exp = resolved_exp;
         }
         let db_status = cache_mgr.freshness_badge(now);
         Ok(Self {
@@ -213,11 +214,13 @@ impl AppSession {
             self.onboarding_dismissed = ui_cfg.onboarding_dismissed;
             self.stratz_api_token = ui_cfg.stratz_api_token;
             self.stratz_token_exp = resolved_exp;
-            self.cache_mgr.stratz_api_token = if is_stratz_exp_expired(resolved_exp, now) {
-                None
+            if is_stratz_exp_expired(resolved_exp, now) {
+                self.cache_mgr.stratz_api_token = None;
+                self.cache_mgr.stratz_token_exp = None;
             } else {
-                self.stratz_api_token.clone()
-            };
+                self.cache_mgr.stratz_api_token = self.stratz_api_token.clone();
+                self.cache_mgr.stratz_token_exp = resolved_exp;
+            }
         }
         self.config_path = Some(cfg_path);
     }
@@ -1151,6 +1154,7 @@ impl AppSession {
         self.stratz_api_token = Some(cleaned.clone());
         self.cache_mgr.stratz_api_token = Some(cleaned);
         self.stratz_token_exp = Some(info.exp);
+        self.cache_mgr.stratz_token_exp = Some(info.exp);
         let _ = self.persist_ui_config();
         if let Some(steam32) = info.steam32_id {
             let has_different_explicit = self.cache_mgr.explicit_override
