@@ -820,11 +820,20 @@ fn item_stat(
 #[test]
 fn counter_trait_table_is_consistent_and_patch_versioned() {
     use crate::domain::{
-        COUNTER_TRAIT_TABLE_PATCH, CounterTrait, ItemId, all_referenced_counter_item_ids,
-        counter_items_for_trait, hero_counter_traits,
+        COUNTER_TRAIT_DATA_TOML, COUNTER_TRAIT_TABLE_PATCH, COUNTER_TRAIT_TABLE_REVIEWED_AT,
+        CounterTrait, ItemId, all_referenced_counter_item_ids, counter_items_for_trait,
+        counter_trait_table_patch, counter_trait_table_reviewed_at, hero_counter_traits,
     };
 
     assert_eq!(COUNTER_TRAIT_TABLE_PATCH, "7.40");
+    assert_eq!(COUNTER_TRAIT_TABLE_REVIEWED_AT, "2026-11-21");
+    assert_eq!(counter_trait_table_patch(), COUNTER_TRAIT_TABLE_PATCH);
+    assert_eq!(
+        counter_trait_table_reviewed_at(),
+        COUNTER_TRAIT_TABLE_REVIEWED_AT
+    );
+    assert!(COUNTER_TRAIT_DATA_TOML.contains("patch = \"7.40\""));
+    assert!(COUNTER_TRAIT_DATA_TOML.contains("reviewed_at = \"2026-11-21\""));
 
     let all_traits = [
         CounterTrait::Evasion,
@@ -1006,7 +1015,8 @@ fn recommend_item_build_prioritizes_partially_built_items() {
     assert_eq!(build.steps[0].item_id, ItemId(158));
     assert_eq!(build.steps[0].owned_components, 1);
     assert_eq!(build.steps[0].total_components, 2);
-    assert!(build.steps[0].score > build.steps[1].score);
+    assert_eq!(build.steps[0].variants[0].item_id, ItemId(145));
+    assert!(build.steps[0].score > build.steps[0].variants[0].score);
 }
 
 #[test]
@@ -1082,4 +1092,42 @@ fn recommend_item_build_base_meta_vs_enemy_counter_traits() {
         silver_edge_present,
         "Silver Edge should promote into build/variants against PA"
     );
+}
+
+#[test]
+fn recommend_item_build_classifies_same_phase_variants_with_fewer_than_six_candidates() {
+    use crate::domain::{Bracket, ItemId, ItemPhase};
+    use crate::math::recommend_item_build;
+
+    let repo = MockItemRepo {
+        catalog: vec![
+            catalog_entry(160, "Eye of Skadi", 5300, &[], false, false),
+            catalog_entry(139, "Butterfly", 4975, &[], false, false),
+        ],
+        stats: vec![
+            item_stat(160, ItemPhase::Late, 32.0, 600, 340),
+            item_stat(139, ItemPhase::Late, 31.0, 600, 340),
+        ],
+    };
+
+    let enemies = [None; 5];
+    let build = recommend_item_build(
+        &repo,
+        HeroId(1),
+        Role::Carry,
+        Bracket::Immortal,
+        &enemies,
+        &[],
+        1500,
+    )
+    .expect("build should succeed");
+
+    assert_eq!(
+        build.steps.len(),
+        1,
+        "two same-phase equal-score alternatives must collapse into 1 primary step + 1 variant"
+    );
+    assert_eq!(build.steps[0].item_id, ItemId(139));
+    assert_eq!(build.steps[0].variants.len(), 1);
+    assert_eq!(build.steps[0].variants[0].item_id, ItemId(160));
 }

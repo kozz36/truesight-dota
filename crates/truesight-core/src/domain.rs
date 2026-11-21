@@ -1,4 +1,5 @@
 use core::fmt;
+use std::sync::OnceLock;
 
 pub const MAX_HEROES: usize = 160;
 pub const TEAM_SIZE: usize = 5;
@@ -380,6 +381,18 @@ pub enum CounterTrait {
 }
 
 impl CounterTrait {
+    /// All counter-trait variants in canonical index order.
+    pub const ALL: [Self; 8] = [
+        Self::Evasion,
+        Self::HeavyMagicDisable,
+        Self::HighHealingRegen,
+        Self::EtherealGhostSave,
+        Self::CriticalPassives,
+        Self::IllusionsSummons,
+        Self::Invisibility,
+        Self::HighPhysicalBurst,
+    ];
+
     /// Human-readable short label for UI and CLI display.
     pub const fn label(self) -> &'static str {
         match self {
@@ -391,6 +404,35 @@ impl CounterTrait {
             Self::IllusionsSummons => "Illusions / Summons",
             Self::Invisibility => "Invisibility",
             Self::HighPhysicalBurst => "High Physical Burst",
+        }
+    }
+
+    #[inline]
+    const fn index(self) -> usize {
+        match self {
+            Self::Evasion => 0,
+            Self::HeavyMagicDisable => 1,
+            Self::HighHealingRegen => 2,
+            Self::EtherealGhostSave => 3,
+            Self::CriticalPassives => 4,
+            Self::IllusionsSummons => 5,
+            Self::Invisibility => 6,
+            Self::HighPhysicalBurst => 7,
+        }
+    }
+
+    /// Parses a snake_case slug from `data/counter_traits.toml` into a `CounterTrait`.
+    pub fn from_slug(slug: &str) -> Option<Self> {
+        match slug {
+            "evasion" => Some(Self::Evasion),
+            "heavy_magic_disable" => Some(Self::HeavyMagicDisable),
+            "high_healing_regen" => Some(Self::HighHealingRegen),
+            "ethereal_ghost_save" => Some(Self::EtherealGhostSave),
+            "critical_passives" => Some(Self::CriticalPassives),
+            "illusions_summons" => Some(Self::IllusionsSummons),
+            "invisibility" => Some(Self::Invisibility),
+            "high_physical_burst" => Some(Self::HighPhysicalBurst),
+            _ => None,
         }
     }
 }
@@ -452,104 +494,198 @@ pub struct RecommendedBuild {
     pub next_unowned_index: Option<usize>,
 }
 
+/// Compile-time embedded contents of the patch-versioned counter-trait data file.
+pub const COUNTER_TRAIT_DATA_TOML: &str = include_str!("../../../data/counter_traits.toml");
+
 /// Dota 2 patch version against which the curated counter-trait tables are maintained.
 pub const COUNTER_TRAIT_TABLE_PATCH: &str = "7.40";
 
+/// ISO-8601 review date of the curated counter-trait tables in `data/counter_traits.toml`.
+pub const COUNTER_TRAIT_TABLE_REVIEWED_AT: &str = "2026-11-21";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CounterTraitTable {
+    patch: String,
+    reviewed_at: String,
+    traits: [Vec<ItemId>; 8],
+    heroes: Vec<(u16, Vec<CounterTrait>)>,
+    all_referenced_items: Vec<ItemId>,
+}
+
+impl CounterTraitTable {
+    fn empty() -> Self {
+        Self {
+            patch: String::new(),
+            reviewed_at: String::new(),
+            traits: Default::default(),
+            heroes: Vec::new(),
+            all_referenced_items: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TomlSection {
+    Root,
+    Traits,
+    Heroes,
+}
+
+fn strip_toml_comment(line: &str) -> &str {
+    let mut in_quotes = false;
+    let mut escaped = false;
+    for (idx, ch) in line.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && in_quotes {
+            escaped = true;
+            continue;
+        }
+        if ch == '"' {
+            in_quotes = !in_quotes;
+        } else if ch == '#' && !in_quotes {
+            return &line[..idx];
+        }
+    }
+    line
+}
+
+fn parse_quoted_str(raw: &str) -> Result<String, &'static str> {
+    let trimmed = raw.trim();
+    let inner = trimmed
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .ok_or("expected double-quoted TOML string")?;
+    Ok(inner.to_owned())
+}
+
+fn parse_array_elements(raw: &str) -> Result<Vec<&str>, &'static str> {
+    let trimmed = raw.trim();
+    let inner = trimmed
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .ok_or("expected TOML array `[...]`")?;
+    let mut items = Vec::new();
+    for part in inner.split(',') {
+        let token = part.trim();
+        if !token.is_empty() {
+            items.push(token);
+        }
+    }
+    Ok(items)
+}
+
+fn parse_counter_trait_toml(raw: &str) -> Result<CounterTraitTable, &'static str> {
+    let mut table = CounterTraitTable::empty();
+    let mut section = TomlSection::Root;
+
+    for raw_line in raw.lines() {
+        let line = strip_toml_comment(raw_line).trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            let header = line[1..line.len() - 1].trim();
+            section = match header {
+                "traits" => TomlSection::Traits,
+                "heroes" => TomlSection::Heroes,
+                _ => return Err("unknown TOML section in counter_traits.toml"),
+            };
+            continue;
+        }
+        let (key, value) = line
+            .split_once('=')
+            .ok_or("expected `key = value` in counter_traits.toml")?;
+        let key = key.trim();
+        let value = value.trim();
+
+        match section {
+            TomlSection::Root => match key {
+                "patch" => table.patch = parse_quoted_str(value)?,
+                "reviewed_at" => table.reviewed_at = parse_quoted_str(value)?,
+                _ => return Err("unknown root key in counter_traits.toml"),
+            },
+            TomlSection::Traits => {
+                let trait_kind =
+                    CounterTrait::from_slug(key).ok_or("unknown counter trait slug in [traits]")?;
+                let mut items = Vec::new();
+                for token in parse_array_elements(value)? {
+                    let id: u16 = token
+                        .parse()
+                        .map_err(|_| "invalid item ID integer in [traits]")?;
+                    items.push(ItemId(id));
+                }
+                table.traits[trait_kind.index()] = items;
+            }
+            TomlSection::Heroes => {
+                let hero_id: u16 = key
+                    .parse()
+                    .map_err(|_| "invalid hero ID integer in [heroes]")?;
+                let mut traits = Vec::new();
+                for token in parse_array_elements(value)? {
+                    let slug = parse_quoted_str(token)?;
+                    let trait_kind = CounterTrait::from_slug(&slug)
+                        .ok_or("unknown counter trait slug in [heroes]")?;
+                    traits.push(trait_kind);
+                }
+                table.heroes.push((hero_id, traits));
+            }
+        }
+    }
+
+    if table.patch.is_empty() || table.reviewed_at.is_empty() {
+        return Err("counter_traits.toml must define non-empty `patch` and `reviewed_at`");
+    }
+
+    table.heroes.sort_unstable_by_key(|(id, _)| *id);
+
+    let mut all_items: Vec<ItemId> = table
+        .traits
+        .iter()
+        .flat_map(|items| items.iter().copied())
+        .collect();
+    all_items.sort_unstable();
+    all_items.dedup();
+    table.all_referenced_items = all_items;
+
+    Ok(table)
+}
+
+fn counter_trait_table() -> &'static CounterTraitTable {
+    static TABLE: OnceLock<CounterTraitTable> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        parse_counter_trait_toml(COUNTER_TRAIT_DATA_TOML)
+            .unwrap_or_else(|_| CounterTraitTable::empty())
+    })
+}
+
+/// Returns the patch string parsed from `data/counter_traits.toml`.
+pub fn counter_trait_table_patch() -> &'static str {
+    counter_trait_table().patch.as_str()
+}
+
+/// Returns the ISO-8601 review date parsed from `data/counter_traits.toml`.
+pub fn counter_trait_table_reviewed_at() -> &'static str {
+    counter_trait_table().reviewed_at.as_str()
+}
+
 /// Maps a Dota 2 hero ID to the tactical counter traits they present to opponents.
 pub fn hero_counter_traits(hero_id: HeroId) -> &'static [CounterTrait] {
-    match hero_id.0 {
-        // Phantom Assassin: Blur evasion, Coup de Grace/Blur passives, high physical crit burst.
-        44 => &[
-            CounterTrait::Evasion,
-            CounterTrait::CriticalPassives,
-            CounterTrait::HighPhysicalBurst,
-        ],
-        // Windranger: Windrun evasion.
-        21 => &[CounterTrait::Evasion],
-        // Huskar: Berserker's Blood / regeneration.
-        59 => &[CounterTrait::HighHealingRegen],
-        // Necrophos: Ghost Shroud ethereal save + Death Pulse / Sadist healing.
-        36 => &[
-            CounterTrait::HighHealingRegen,
-            CounterTrait::EtherealGhostSave,
-        ],
-        // Morphling, Alchemist, Io: high healing/regen sustain.
-        10 | 73 | 91 => &[CounterTrait::HighHealingRegen],
-        // Bristleback: Bristleback passive + spell lifesteal sustain.
-        99 => &[
-            CounterTrait::CriticalPassives,
-            CounterTrait::HighHealingRegen,
-        ],
-        // Spectre, Tidehunter: Dispersion / Kraken Shell critical passives.
-        67 | 29 => &[CounterTrait::CriticalPassives],
-        // Phantom Lancer, Naga Siren, Meepo: illusion/clone armies.
-        12 | 89 | 82 => &[CounterTrait::IllusionsSummons],
-        // Chaos Knight: Phantasm illusions + physical crit burst.
-        81 => &[
-            CounterTrait::IllusionsSummons,
-            CounterTrait::HighPhysicalBurst,
-        ],
-        // Riki, Bounty Hunter: permanent / frequent invisibility.
-        32 | 62 => &[CounterTrait::Invisibility],
-        // Clinkz: Skeleton Walk invisibility + high physical burst.
-        56 => &[CounterTrait::Invisibility, CounterTrait::HighPhysicalBurst],
-        // Nyx Assassin: Vendetta invisibility + heavy magic burst/stun.
-        88 => &[CounterTrait::Invisibility, CounterTrait::HeavyMagicDisable],
-        // Lion, Shadow Shaman, Invoker, Earthshaker, Zeus: heavy magic damage / disables.
-        26 | 27 | 74 | 7 | 22 => &[CounterTrait::HeavyMagicDisable],
-        // Pugna: Decrepify ethereal save + heavy magic burst.
-        45 => &[
-            CounterTrait::EtherealGhostSave,
-            CounterTrait::HeavyMagicDisable,
-        ],
-        // Sven, Templar Assassin, Ursa: high physical burst.
-        18 | 46 | 70 => &[CounterTrait::HighPhysicalBurst],
-        _ => &[],
+    let heroes = &counter_trait_table().heroes;
+    match heroes.binary_search_by_key(&hero_id.0, |(id, _)| *id) {
+        Ok(idx) => heroes[idx].1.as_slice(),
+        Err(_) => &[],
     }
 }
 
 /// Maps a counter trait to canonical OpenDota/STRATZ item IDs that answer it.
 pub fn counter_items_for_trait(trait_kind: CounterTrait) -> &'static [ItemId] {
-    match trait_kind {
-        // Monkey King Bar (135)
-        CounterTrait::Evasion => &[ItemId(135)],
-        // Black King Bar (116), Pipe of Insight (90), Lotus Orb (226)
-        CounterTrait::HeavyMagicDisable => &[ItemId(116), ItemId(90), ItemId(226)],
-        // Spirit Vessel (267), Shiva's Guard (119), Eye of Skadi (160)
-        CounterTrait::HighHealingRegen => &[ItemId(267), ItemId(119), ItemId(160)],
-        // Bloodthorn (250), Nullifier (225)
-        CounterTrait::EtherealGhostSave => &[ItemId(250), ItemId(225)],
-        // Silver Edge (249)
-        CounterTrait::CriticalPassives => &[ItemId(249)],
-        // Mjollnir (158), Battle Fury (145), Shiva's Guard (119)
-        CounterTrait::IllusionsSummons => &[ItemId(158), ItemId(145), ItemId(119)],
-        // Dust of Appearance (40), Gem of True Sight (30), Sentry Ward (43)
-        CounterTrait::Invisibility => &[ItemId(40), ItemId(30), ItemId(43)],
-        // Assault Cuirass (112), Shiva's Guard (119), Crimson Guard (242), Heaven's Halberd (210)
-        CounterTrait::HighPhysicalBurst => &[ItemId(112), ItemId(119), ItemId(242), ItemId(210)],
-    }
+    counter_trait_table().traits[trait_kind.index()].as_slice()
 }
 
 /// Deduplicated slice of all item IDs referenced by `counter_items_for_trait` for CI catalog validation.
 pub fn all_referenced_counter_item_ids() -> &'static [ItemId] {
-    &[
-        ItemId(30),
-        ItemId(40),
-        ItemId(43),
-        ItemId(90),
-        ItemId(112),
-        ItemId(116),
-        ItemId(119),
-        ItemId(135),
-        ItemId(145),
-        ItemId(158),
-        ItemId(160),
-        ItemId(210),
-        ItemId(225),
-        ItemId(226),
-        ItemId(242),
-        ItemId(249),
-        ItemId(250),
-        ItemId(267),
-    ]
+    counter_trait_table().all_referenced_items.as_slice()
 }

@@ -1,0 +1,67 @@
+# Curated Dota 2 counter-trait mappings for pure item-build recommendations.
+# Update `patch` and `reviewed_at` whenever reviewing hero/item traits for a new Dota 2 patch.
+
+patch = "7.40"
+reviewed_at = "2026-11-21"
+
+[traits]
+# Monkey King Bar (135)
+evasion = [135]
+# Black King Bar (116), Pipe of Insight (90), Lotus Orb (226)
+heavy_magic_disable = [116, 90, 226]
+# Spirit Vessel (267), Shiva's Guard (119), Eye of Skadi (160)
+high_healing_regen = [267, 119, 160]
+# Bloodthorn (250), Nullifier (225)
+ethereal_ghost_save = [250, 225]
+# Silver Edge (249)
+critical_passives = [249]
+# Mjollnir (158), Battle Fury (145), Shiva's Guard (119)
+illusions_summons = [158, 145, 119]
+# Dust of Appearance (40), Gem of True Sight (30), Sentry Ward (43)
+invisibility = [40, 30, 43]
+# Assault Cuirass (112), Shiva's Guard (119), Crimson Guard (242), Heaven's Halberd (210)
+high_physical_burst = [112, 119, 242, 210]
+
+[heroes]
+# Phantom Assassin: Blur evasion, Coup de Grace/Blur passives, high physical crit burst.
+44 = ["evasion", "critical_passives", "high_physical_burst"]
+# Windranger: Windrun evasion.
+21 = ["evasion"]
+# Huskar: Berserker's Blood / regeneration.
+59 = ["high_healing_regen"]
+# Necrophos: Ghost Shroud ethereal save + Death Pulse / Sadist healing.
+36 = ["high_healing_regen", "ethereal_ghost_save"]
+# Morphling, Alchemist, Io: high healing/regen sustain.
+10 = ["high_healing_regen"]
+73 = ["high_healing_regen"]
+91 = ["high_healing_regen"]
+# Bristleback: Bristleback passive + spell lifesteal sustain.
+99 = ["critical_passives", "high_healing_regen"]
+# Spectre, Tidehunter: Dispersion / Kraken Shell critical passives.
+67 = ["critical_passives"]
+29 = ["critical_passives"]
+# Phantom Lancer, Naga Siren, Meepo: illusion/clone armies.
+12 = ["illusions_summons"]
+89 = ["illusions_summons"]
+82 = ["illusions_summons"]
+# Chaos Knight: Phantasm illusions + physical crit burst.
+81 = ["illusions_summons", "high_physical_burst"]
+# Riki, Bounty Hunter: permanent / frequent invisibility.
+32 = ["invisibility"]
+62 = ["invisibility"]
+# Clinkz: Skeleton Walk invisibility + high physical burst.
+56 = ["invisibility", "high_physical_burst"]
+# Nyx Assassin: Vendetta invisibility + heavy magic burst/stun.
+88 = ["invisibility", "heavy_magic_disable"]
+# Lion, Shadow Shaman, Invoker, Earthshaker, Zeus: heavy magic damage / disables.
+26 = ["heavy_magic_disable"]
+27 = ["heavy_magic_disable"]
+74 = ["heavy_magic_disable"]
+7 = ["heavy_magic_disable"]
+22 = ["heavy_magic_disable"]
+# Pugna: Decrepify ethereal save + heavy magic burst.
+45 = ["ethereal_ghost_save", "heavy_magic_disable"]
+# Sven, Templar Assassin, Ursa: high physical burst.
+18 = ["high_physical_burst"]
+46 = ["high_physical_burst"]
+70 = ["high_physical_burst"]

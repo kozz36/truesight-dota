@@ -1,7 +1,7 @@
 use crate::domain::{
-    Bracket, BuildStep, BuildVariant, COUNTER_TRAIT_TABLE_PATCH, CounterTrait, DomainError,
-    DraftPick, DraftState, HeroId, HeroItemStat, HeroProfile, ItemId, ItemPhase, MAX_HEROES,
-    PairStats, RecommendedBuild, Role, TEAM_SIZE, counter_items_for_trait, hero_counter_traits,
+    Bracket, BuildStep, BuildVariant, CounterTrait, DomainError, DraftPick, DraftState, HeroId,
+    HeroItemStat, HeroProfile, ItemId, ItemPhase, MAX_HEROES, PairStats, RecommendedBuild, Role,
+    TEAM_SIZE, counter_items_for_trait, counter_trait_table_patch, hero_counter_traits,
 };
 use crate::ports::{ItemMetaRepository, PortError};
 
@@ -598,6 +598,9 @@ fn default_role_for_slot(slot: usize) -> Role {
 /// Score proximity threshold for attaching same-phase alternative items as build variants.
 pub const ITEM_VARIANT_SCORE_EPSILON: f32 = 0.08;
 
+/// Maximum average-purchase-time difference (minutes) for clustering same-phase variants.
+const ITEM_VARIANT_TIME_WINDOW_MINS: f32 = 6.0;
+
 /// Maximum number of primary progression steps in a recommended `[item 1] > [item 2] > ...` bar.
 const MAX_PRIMARY_BUILD_STEPS: usize = 6;
 
@@ -693,20 +696,49 @@ pub fn recommend_item_build(
             .then_with(|| a.item_id.cmp(&b.item_id))
     });
 
+    // Classify same-phase alternatives into variants BEFORE applying MAX_PRIMARY_BUILD_STEPS,
+    // so even with fewer than 6 candidates, competing same-phase alternatives collapse into 1 step.
+    let mut clustered: Vec<BuildStep> = Vec::with_capacity(scored.len());
+    let mut unowned_candidates: Vec<BuildStep> = Vec::with_capacity(scored.len());
+    for step in scored {
+        if step.owned {
+            clustered.push(step);
+        } else {
+            unowned_candidates.push(step);
+        }
+    }
+
+    for cand in unowned_candidates {
+        if let Some(primary) = clustered.iter_mut().find(|step| {
+            step.phase == cand.phase
+                && (step.score - cand.score).abs() <= ITEM_VARIANT_SCORE_EPSILON
+                && (step.avg_time_mins - cand.avg_time_mins).abs() <= ITEM_VARIANT_TIME_WINDOW_MINS
+        }) {
+            primary.variants.push(BuildVariant {
+                item_id: cand.item_id,
+                score: cand.score,
+                avg_time_mins: cand.avg_time_mins,
+                counter_trait: cand.counter_trait,
+            });
+        } else {
+            clustered.push(cand);
+        }
+    }
+
     // Select primary steps (always keeping owned items, capping at MAX_PRIMARY_BUILD_STEPS
     // with up to 2 per phase on the first pass so the bar spans Early -> Core -> Late).
-    let mut is_primary = vec![false; scored.len()];
+    let mut is_primary = vec![false; clustered.len()];
     let mut primary_count = 0_usize;
     let mut phase_counts = [0_usize; 5];
 
-    for (idx, step) in scored.iter().enumerate() {
+    for (idx, step) in clustered.iter().enumerate() {
         if step.owned {
             is_primary[idx] = true;
             primary_count += 1;
             phase_counts[phase_slot(step.phase)] += 1;
         }
     }
-    for (idx, step) in scored.iter().enumerate() {
+    for (idx, step) in clustered.iter().enumerate() {
         if primary_count >= MAX_PRIMARY_BUILD_STEPS {
             break;
         }
@@ -720,7 +752,7 @@ pub fn recommend_item_build(
             phase_counts[slot] += 1;
         }
     }
-    for (idx, _) in scored.iter().enumerate() {
+    for (idx, _) in clustered.iter().enumerate() {
         if primary_count >= MAX_PRIMARY_BUILD_STEPS {
             break;
         }
@@ -732,8 +764,8 @@ pub fn recommend_item_build(
 
     let mut steps: Vec<BuildStep> = Vec::with_capacity(primary_count);
     let mut remainder: Vec<BuildStep> =
-        Vec::with_capacity(scored.len().saturating_sub(primary_count));
-    for (idx, step) in scored.into_iter().enumerate() {
+        Vec::with_capacity(clustered.len().saturating_sub(primary_count));
+    for (idx, step) in clustered.into_iter().enumerate() {
         if is_primary[idx] {
             steps.push(step);
         } else {
@@ -741,27 +773,27 @@ pub fn recommend_item_build(
         }
     }
 
-    // Attach same-phase alternative items within ITEM_VARIANT_SCORE_EPSILON of each step's score.
-    for step in &mut steps {
-        let mut variants: Vec<BuildVariant> = remainder
-            .iter()
-            .filter(|cand| {
-                cand.phase == step.phase
-                    && (step.score - cand.score).abs() <= ITEM_VARIANT_SCORE_EPSILON
-            })
-            .map(|cand| BuildVariant {
+    // Attach any remaining unchosen primary steps as variants if within ITEM_VARIANT_SCORE_EPSILON.
+    for cand in remainder {
+        if let Some(step) = steps.iter_mut().find(|step| {
+            step.phase == cand.phase
+                && (step.score - cand.score).abs() <= ITEM_VARIANT_SCORE_EPSILON
+        }) {
+            step.variants.push(BuildVariant {
                 item_id: cand.item_id,
                 score: cand.score,
                 avg_time_mins: cand.avg_time_mins,
                 counter_trait: cand.counter_trait,
-            })
-            .collect();
-        variants.sort_by(|a, b| {
+            });
+        }
+    }
+
+    for step in &mut steps {
+        step.variants.sort_by(|a, b| {
             b.score
                 .total_cmp(&a.score)
                 .then_with(|| a.item_id.cmp(&b.item_id))
         });
-        step.variants = variants;
     }
 
     // Order primary build sequence by effective timing window.
@@ -776,7 +808,7 @@ pub fn recommend_item_build(
     let next_unowned_index = steps.iter().position(|s| !s.owned);
 
     Ok(RecommendedBuild {
-        target_patch: COUNTER_TRAIT_TABLE_PATCH,
+        target_patch: counter_trait_table_patch(),
         hero_id,
         role,
         bracket,
