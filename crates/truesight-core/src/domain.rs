@@ -351,3 +351,205 @@ impl fmt::Display for DomainError {
 }
 
 impl core::error::Error for DomainError {}
+
+/// Compact zero-cost identifier for a Dota 2 item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ItemId(pub u16);
+
+/// Game phase bucket for a recommended item build step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ItemPhase {
+    Starting,
+    Early,
+    Core,
+    Late,
+    Situational,
+}
+
+/// Tactical enemy mechanic or threat countered by specific item choices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CounterTrait {
+    Evasion,
+    HeavyMagicDisable,
+    HighHealingRegen,
+    EtherealGhostSave,
+    CriticalPassives,
+    IllusionsSummons,
+    Invisibility,
+    HighPhysicalBurst,
+}
+
+impl CounterTrait {
+    /// Human-readable short label for UI and CLI display.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Evasion => "Evasion",
+            Self::HeavyMagicDisable => "Heavy Magic / Disable",
+            Self::HighHealingRegen => "High Healing / Regen",
+            Self::EtherealGhostSave => "Ethereal / Ghost Save",
+            Self::CriticalPassives => "Critical Passives",
+            Self::IllusionsSummons => "Illusions / Summons",
+            Self::Invisibility => "Invisibility",
+            Self::HighPhysicalBurst => "High Physical Burst",
+        }
+    }
+}
+
+/// Static catalog metadata for a Dota 2 item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemCatalogEntry {
+    pub id: ItemId,
+    pub slug: String,
+    pub display_name: String,
+    pub cost: u32,
+    pub components: Vec<ItemId>,
+    pub is_recipe: bool,
+    pub is_consumable_drop: bool,
+}
+
+/// Empirical purchase statistics for a hero item in a specific role and bracket.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HeroItemStat {
+    pub item_id: ItemId,
+    pub phase: ItemPhase,
+    pub avg_time_mins: f32,
+    pub match_count: u32,
+    pub win_count: u32,
+}
+
+/// Alternative item option within the same phase and score tolerance of a primary step.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BuildVariant {
+    pub item_id: ItemId,
+    pub score: f32,
+    pub avg_time_mins: f32,
+    pub counter_trait: Option<CounterTrait>,
+}
+
+/// Single primary step in a sequential item build recommendation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BuildStep {
+    pub item_id: ItemId,
+    pub phase: ItemPhase,
+    pub avg_time_mins: f32,
+    pub score: f32,
+    pub owned: bool,
+    pub owned_components: usize,
+    pub total_components: usize,
+    pub counter_trait: Option<CounterTrait>,
+    pub variants: Vec<BuildVariant>,
+}
+
+/// Complete recommended item progression for a hero, role, bracket, and enemy matchup.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecommendedBuild {
+    pub target_patch: &'static str,
+    pub hero_id: HeroId,
+    pub role: Role,
+    pub bracket: Bracket,
+    pub starting_items: Vec<ItemId>,
+    pub steps: Vec<BuildStep>,
+    pub next_unowned_index: Option<usize>,
+}
+
+/// Dota 2 patch version against which the curated counter-trait tables are maintained.
+pub const COUNTER_TRAIT_TABLE_PATCH: &str = "7.40";
+
+/// Maps a Dota 2 hero ID to the tactical counter traits they present to opponents.
+pub fn hero_counter_traits(hero_id: HeroId) -> &'static [CounterTrait] {
+    match hero_id.0 {
+        // Phantom Assassin: Blur evasion, Coup de Grace/Blur passives, high physical crit burst.
+        44 => &[
+            CounterTrait::Evasion,
+            CounterTrait::CriticalPassives,
+            CounterTrait::HighPhysicalBurst,
+        ],
+        // Windranger: Windrun evasion.
+        21 => &[CounterTrait::Evasion],
+        // Huskar: Berserker's Blood / regeneration.
+        59 => &[CounterTrait::HighHealingRegen],
+        // Necrophos: Ghost Shroud ethereal save + Death Pulse / Sadist healing.
+        36 => &[
+            CounterTrait::HighHealingRegen,
+            CounterTrait::EtherealGhostSave,
+        ],
+        // Morphling, Alchemist, Io: high healing/regen sustain.
+        10 | 73 | 91 => &[CounterTrait::HighHealingRegen],
+        // Bristleback: Bristleback passive + spell lifesteal sustain.
+        99 => &[
+            CounterTrait::CriticalPassives,
+            CounterTrait::HighHealingRegen,
+        ],
+        // Spectre, Tidehunter: Dispersion / Kraken Shell critical passives.
+        67 | 29 => &[CounterTrait::CriticalPassives],
+        // Phantom Lancer, Naga Siren, Meepo: illusion/clone armies.
+        12 | 89 | 82 => &[CounterTrait::IllusionsSummons],
+        // Chaos Knight: Phantasm illusions + physical crit burst.
+        81 => &[
+            CounterTrait::IllusionsSummons,
+            CounterTrait::HighPhysicalBurst,
+        ],
+        // Riki, Bounty Hunter: permanent / frequent invisibility.
+        32 | 62 => &[CounterTrait::Invisibility],
+        // Clinkz: Skeleton Walk invisibility + high physical burst.
+        56 => &[CounterTrait::Invisibility, CounterTrait::HighPhysicalBurst],
+        // Nyx Assassin: Vendetta invisibility + heavy magic burst/stun.
+        88 => &[CounterTrait::Invisibility, CounterTrait::HeavyMagicDisable],
+        // Lion, Shadow Shaman, Invoker, Earthshaker, Zeus: heavy magic damage / disables.
+        26 | 27 | 74 | 7 | 22 => &[CounterTrait::HeavyMagicDisable],
+        // Pugna: Decrepify ethereal save + heavy magic burst.
+        45 => &[
+            CounterTrait::EtherealGhostSave,
+            CounterTrait::HeavyMagicDisable,
+        ],
+        // Sven, Templar Assassin, Ursa: high physical burst.
+        18 | 46 | 70 => &[CounterTrait::HighPhysicalBurst],
+        _ => &[],
+    }
+}
+
+/// Maps a counter trait to canonical OpenDota/STRATZ item IDs that answer it.
+pub fn counter_items_for_trait(trait_kind: CounterTrait) -> &'static [ItemId] {
+    match trait_kind {
+        // Monkey King Bar (135)
+        CounterTrait::Evasion => &[ItemId(135)],
+        // Black King Bar (116), Pipe of Insight (90), Lotus Orb (226)
+        CounterTrait::HeavyMagicDisable => &[ItemId(116), ItemId(90), ItemId(226)],
+        // Spirit Vessel (267), Shiva's Guard (119), Eye of Skadi (160)
+        CounterTrait::HighHealingRegen => &[ItemId(267), ItemId(119), ItemId(160)],
+        // Bloodthorn (250), Nullifier (225)
+        CounterTrait::EtherealGhostSave => &[ItemId(250), ItemId(225)],
+        // Silver Edge (249)
+        CounterTrait::CriticalPassives => &[ItemId(249)],
+        // Mjollnir (158), Battle Fury (145), Shiva's Guard (119)
+        CounterTrait::IllusionsSummons => &[ItemId(158), ItemId(145), ItemId(119)],
+        // Dust of Appearance (40), Gem of True Sight (30), Sentry Ward (43)
+        CounterTrait::Invisibility => &[ItemId(40), ItemId(30), ItemId(43)],
+        // Assault Cuirass (112), Shiva's Guard (119), Crimson Guard (242), Heaven's Halberd (210)
+        CounterTrait::HighPhysicalBurst => &[ItemId(112), ItemId(119), ItemId(242), ItemId(210)],
+    }
+}
+
+/// Deduplicated slice of all item IDs referenced by `counter_items_for_trait` for CI catalog validation.
+pub fn all_referenced_counter_item_ids() -> &'static [ItemId] {
+    &[
+        ItemId(30),
+        ItemId(40),
+        ItemId(43),
+        ItemId(90),
+        ItemId(112),
+        ItemId(116),
+        ItemId(119),
+        ItemId(135),
+        ItemId(145),
+        ItemId(158),
+        ItemId(160),
+        ItemId(210),
+        ItemId(225),
+        ItemId(226),
+        ItemId(242),
+        ItemId(249),
+        ItemId(250),
+        ItemId(267),
+    ]
+}
