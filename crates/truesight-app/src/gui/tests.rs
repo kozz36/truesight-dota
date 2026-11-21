@@ -1269,3 +1269,115 @@ fn suggested_vs_enemies_cells_align_and_pick_column_follows_row_stripes() {
         }
     }
 }
+
+#[test]
+fn top_bar_renders_compact_vector_gear_and_info_button_without_overlap() {
+    let mut app = TrueSightGuiApp::new(AppSession::new().unwrap(), None, None);
+    app.onboarding_open = false;
+    app.onboarding_dismissed = true;
+    let ctx = egui::Context::default();
+
+    for viewport in [vec2(960.0, 680.0), vec2(1180.0, 700.0)] {
+        let r = render_at_viewport(&mut app, &ctx, viewport);
+        assert!(
+            (38.0..=44.0).contains(&r.options_button.width()),
+            "viewport={viewport:?} gear button width must be compact (38..44px), got {}",
+            r.options_button.width()
+        );
+        assert!(
+            (20.0..=24.0).contains(&r.info_button.width()),
+            "viewport={viewport:?} info button width must be ~22px, got {}",
+            r.info_button.width()
+        );
+        assert!(r.top_bar.contains_rect(r.options_button));
+        assert!(r.top_bar.contains_rect(r.info_button));
+        assert!(!r.options_button.intersects(r.info_button));
+        assert!(!r.info_button.intersects(r.reset_button));
+        assert!(!r.info_button.intersects(r.bracket_bar));
+    }
+
+    let viewport = vec2(1180.0, 700.0);
+    let r = render_at_viewport(&mut app, &ctx, viewport);
+    let click_pos = r.info_button.center();
+    app.onboarding_step = 2;
+    for pressed in [true, false] {
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), viewport)),
+            events: vec![
+                egui::Event::PointerMoved(click_pos),
+                egui::Event::PointerButton {
+                    pos: click_pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            app.render_frame(ctx);
+        });
+    }
+    assert!(
+        app.onboarding_open,
+        "clicking top-bar `i` button must reopen onboarding guide even after dismissal"
+    );
+    assert_eq!(app.onboarding_step, 0);
+}
+
+#[test]
+fn onboarding_guide_navigates_steps_and_handles_clipboard_stratz_token() {
+    let mut app = TrueSightGuiApp::new(AppSession::new().unwrap(), None, None);
+    app.onboarding_open = true;
+    app.onboarding_step = 0;
+    let ctx = egui::Context::default();
+    let r = render_at_viewport(&mut app, &ctx, vec2(1180.0, 700.0));
+    assert!(
+        r.onboarding_window.is_some(),
+        "onboarding guide window must render when onboarding_open is true"
+    );
+
+    // Simulate active 90s clipboard watcher detecting a valid STRATZ JWT
+    app.stratz_clipboard_watch_until =
+        Some(std::time::Instant::now() + std::time::Duration::from_secs(90));
+    let now = 1_700_000_000_u64;
+    let exp = now + 365 * 86_400;
+    let payload = format!(
+        r#"{{"iss":"https://api.stratz.com","SteamId":"76561198087521469","iat":{now},"exp":{exp}}}"#
+    );
+    let hdr_b64 = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9";
+    let pay_b64 = encode_b64url_for_test(payload.as_bytes());
+    let jwt = format!("{hdr_b64}.{pay_b64}.c2ln");
+
+    assert!(app.process_stratz_clipboard_text(&jwt, now));
+    assert!(app.stratz_clipboard_watch_until.is_none());
+    assert_eq!(app.session.cache_mgr.player_account_id, Some(127_255_741));
+    assert!(
+        app.status_banner
+            .contains("STRATZ token connected (365d remaining)"),
+        "unexpected status_banner: {}",
+        app.status_banner
+    );
+}
+
+fn encode_b64url_for_test(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::new();
+    let mut i = 0;
+    while i < input.len() {
+        let b0 = input[i];
+        let b1 = if i + 1 < input.len() { input[i + 1] } else { 0 };
+        let b2 = if i + 2 < input.len() { input[i + 2] } else { 0 };
+        let triple = (u32::from(b0) << 16) | (u32::from(b1) << 8) | u32::from(b2);
+        out.push(TABLE[((triple >> 18) & 0x3F) as usize] as char);
+        out.push(TABLE[((triple >> 12) & 0x3F) as usize] as char);
+        if i + 1 < input.len() {
+            out.push(TABLE[((triple >> 6) & 0x3F) as usize] as char);
+        }
+        if i + 2 < input.len() {
+            out.push(TABLE[(triple & 0x3F) as usize] as char);
+        }
+        i += 3;
+    }
+    out
+}

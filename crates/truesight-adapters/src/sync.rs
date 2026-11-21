@@ -362,6 +362,7 @@ pub struct LocalCacheManager {
     pub player_account_id: Option<u64>,
     pub explicit_override: bool,
     pub explicitly_unlinked: bool,
+    pub stratz_api_token: Option<String>,
     sync_generation: u64,
     cancel_token: Arc<AtomicBool>,
     coordinator: Arc<Mutex<CacheSyncState>>,
@@ -415,10 +416,27 @@ impl LocalCacheManager {
             player_account_id: player_account_id.and_then(normalize_steam32_id),
             explicit_override: false,
             explicitly_unlinked: false,
+            stratz_api_token: None,
             sync_generation: 0,
             cancel_token: Arc::new(AtomicBool::new(false)),
             coordinator,
         }
+    }
+
+    /// Resolves the active STRATZ API bearer token, giving precedence to the
+    /// `STRATZ_API_TOKEN` environment variable over the persisted UI token.
+    pub fn effective_stratz_token(&self) -> Option<String> {
+        std::env::var("STRATZ_API_TOKEN")
+            .ok()
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .or_else(|| {
+                self.stratz_api_token
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                    .map(ToOwned::to_owned)
+            })
     }
 
     pub fn begin_sync_generation(&mut self) -> (u64, Arc<AtomicBool>) {
@@ -706,11 +724,8 @@ impl LocalCacheManager {
                 updated_parts.push("heroStats (24h TTL)");
             }
             if !self.is_cancelled() {
-                if let Some(token) = std::env::var("STRATZ_API_TOKEN")
-                    .ok()
-                    .filter(|t| !t.trim().is_empty())
-                {
-                    if let Some(sb) = fetch_stratz_with_synergy_graphql(token.trim())
+                if let Some(token) = self.effective_stratz_token() {
+                    if let Some(sb) = fetch_stratz_with_synergy_graphql(&token)
                         .ok()
                         .filter(|s| !parse_stratz_with_synergy_json(s).is_empty())
                     {

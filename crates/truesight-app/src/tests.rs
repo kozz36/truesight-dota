@@ -2862,3 +2862,146 @@ fn session_rejects_pre_match_menu_frames_and_transitions_cleanly_to_live_match()
     assert_eq!(allies_ig, vec![1, 88]);
     assert_eq!(enemies_ig, vec![2]);
 }
+
+fn encode_base64url_no_pad(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::new();
+    let mut i = 0;
+    while i < input.len() {
+        let b0 = input[i];
+        let b1 = if i + 1 < input.len() { input[i + 1] } else { 0 };
+        let b2 = if i + 2 < input.len() { input[i + 2] } else { 0 };
+        let triple = (u32::from(b0) << 16) | (u32::from(b1) << 8) | u32::from(b2);
+        out.push(TABLE[((triple >> 18) & 0x3F) as usize] as char);
+        out.push(TABLE[((triple >> 12) & 0x3F) as usize] as char);
+        if i + 1 < input.len() {
+            out.push(TABLE[((triple >> 6) & 0x3F) as usize] as char);
+        }
+        if i + 2 < input.len() {
+            out.push(TABLE[(triple & 0x3F) as usize] as char);
+        }
+        i += 3;
+    }
+    out
+}
+
+fn make_test_jwt(payload_json: &str) -> String {
+    let hdr = encode_base64url_no_pad(br#"{"alg":"RS256","typ":"JWT"}"#);
+    let pay = encode_base64url_no_pad(payload_json.as_bytes());
+    format!("{hdr}.{pay}.c2ln")
+}
+
+#[test]
+fn stratz_jwt_claims_decoder_extracts_steam_id_and_days_remaining() {
+    use crate::session::parse_stratz_jwt_claims;
+
+    let now = 1_700_000_000_u64;
+    let exp = now + 365 * 86_400;
+    let token_str_id = make_test_jwt(&format!(
+        r#"{{"iss":"https://api.stratz.com","SteamId":"76561198087521469","iat":{now},"exp":{exp}}}"#
+    ));
+    let info = parse_stratz_jwt_claims(&token_str_id, now).expect("valid STRATZ JWT");
+    assert_eq!(info.steam32_id, Some(127_255_741));
+    assert_eq!(info.days_remaining, 365);
+    assert_eq!(info.exp, exp);
+    assert_eq!(info.iat, Some(now));
+
+    let token_num_id = make_test_jwt(&format!(
+        r#"{{"iss":"https://api.stratz.com","SteamId":76561198087521469,"exp":{exp}}}"#
+    ));
+    let info_num = parse_stratz_jwt_claims(&token_num_id, now).expect("numeric SteamId JWT");
+    assert_eq!(info_num.steam32_id, Some(127_255_741));
+    assert_eq!(info_num.days_remaining, 365);
+
+    assert!(
+        parse_stratz_jwt_claims(&token_str_id, exp).is_err(),
+        "expired token at exp == now must be rejected"
+    );
+    assert!(
+        parse_stratz_jwt_claims("not.a.jwt.with.five.parts", now).is_err(),
+        "malformed segment count must be rejected"
+    );
+    let wrong_iss = make_test_jwt(&format!(r#"{{"iss":"https://example.com","exp":{exp}}}"#));
+    assert!(
+        parse_stratz_jwt_claims(&wrong_iss, now).is_err(),
+        "non-stratz issuer must be rejected"
+    );
+}
+
+#[test]
+fn ui_config_persists_onboarding_dismissed_and_stratz_token_with_private_permissions() {
+    use crate::session::{UiConfig, load_ui_config_from_dir, save_ui_config_to_dir};
+
+    let tmp_dir =
+        std::env::temp_dir().join(format!("truesight_test_ui_cfg_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    assert!(!load_ui_config_from_dir(&tmp_dir).onboarding_dismissed);
+
+    let cfg = UiConfig {
+        onboarding_dismissed: true,
+        stratz_api_token: Some("hdr.pay.sig".into()),
+        stratz_token_days_remaining: Some(365),
+    };
+    save_ui_config_to_dir(&tmp_dir, &cfg).expect("save ui_config.toml");
+
+    let loaded = load_ui_config_from_dir(&tmp_dir);
+    assert_eq!(loaded, cfg);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let meta = std::fs::metadata(tmp_dir.join("ui_config.toml")).unwrap();
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+    }
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn apply_stratz_token_auto_links_steam32_and_updates_session() {
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_test_stratz_apply_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    let cfg_path = tmp_dir.join("config.toml");
+    let mgr = truesight_adapters::sync::LocalCacheManager::with_optional_account(
+        tmp_dir.join("cache"),
+        None,
+    );
+    let mut session = AppSession::with_cache_and_config(mgr, Some(cfg_path)).unwrap();
+
+    let now = 1_700_000_000_u64;
+    let exp = now + 365 * 86_400;
+    let token = make_test_jwt(&format!(
+        r#"{{"iss":"https://api.stratz.com","SteamId":"76561198087521469","iat":{now},"exp":{exp}}}"#
+    ));
+    let info = session
+        .apply_stratz_token(&token, now)
+        .expect("apply_stratz_token should succeed");
+    assert_eq!(info.steam32_id, Some(127_255_741));
+    assert_eq!(info.days_remaining, 365);
+    assert_eq!(session.cache_mgr.player_account_id, Some(127_255_741));
+    assert_eq!(session.stratz_token_days_remaining, Some(365));
+    assert_eq!(
+        session.cache_mgr.stratz_api_token.as_deref(),
+        Some(token.as_str())
+    );
+    assert_eq!(
+        session.cache_mgr.effective_stratz_token().as_deref(),
+        Some(token.as_str())
+    );
+
+    let reloaded_mgr = truesight_adapters::sync::LocalCacheManager::with_optional_account(
+        tmp_dir.join("cache"),
+        None,
+    );
+    let mut deferred = AppSession::with_cache_and_config(reloaded_mgr, None).unwrap();
+    assert_eq!(deferred.cache_mgr.stratz_api_token, None);
+    deferred.enable_config_persistence_for_path(tmp_dir.join("config.toml"));
+    assert_eq!(
+        deferred.cache_mgr.stratz_api_token.as_deref(),
+        Some(token.as_str())
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}

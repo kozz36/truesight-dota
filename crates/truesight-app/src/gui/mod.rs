@@ -1,4 +1,5 @@
 mod matrix_card;
+mod onboarding;
 mod oracle_card;
 mod suggested_table;
 mod team_card;
@@ -64,6 +65,12 @@ pub struct TrueSightGuiApp {
     account_editor_open: bool,
     account_input: String,
     pub(super) enemy_scout_role: Option<Role>,
+    pub(super) onboarding_open: bool,
+    pub(super) onboarding_dismissed: bool,
+    pub(super) onboarding_step: usize,
+    pub(super) stratz_clipboard_watch_until: Option<std::time::Instant>,
+    pub(super) stratz_paste_open: bool,
+    pub(super) stratz_token_input: String,
 }
 
 impl TrueSightGuiApp {
@@ -83,6 +90,7 @@ impl TrueSightGuiApp {
             "Click any Ally (P1..P5) or Enemy (P1..P5) slot card, type hero name, and press Enter."
                 .into()
         };
+        let onboarding_dismissed = session.onboarding_dismissed;
         Self {
             session,
             gsi_listener,
@@ -100,6 +108,12 @@ impl TrueSightGuiApp {
             account_editor_open: false,
             account_input,
             enemy_scout_role: None,
+            onboarding_open: !onboarding_dismissed,
+            onboarding_dismissed,
+            onboarding_step: 0,
+            stratz_clipboard_watch_until: None,
+            stratz_paste_open: false,
+            stratz_token_input: String::new(),
         }
     }
 
@@ -204,10 +218,12 @@ impl Default for SlotTelemetry {
 pub struct LayoutRects {
     pub top_bar: Rect,
     pub options_button: Rect,
+    pub info_button: Rect,
     pub reset_button: Rect,
     pub bracket_bar: Rect,
     pub options_window: Option<Rect>,
     pub options_demo_button: Option<Rect>,
+    pub onboarding_window: Option<Rect>,
     pub account_window: Option<Rect>,
     pub account_apply_button: Option<Rect>,
     pub account_close_button: Option<Rect>,
@@ -242,6 +258,7 @@ impl TrueSightGuiApp {
 
         self.session
             .poll_live_sources(self.gsi_listener.as_mut(), self.vision_worker.as_mut());
+        self.poll_stratz_clipboard_watcher();
         if let Some(notice) = self.session.last_sync_notice.take() {
             self.status_banner = notice;
         }
@@ -250,10 +267,12 @@ impl TrueSightGuiApp {
         let mut rects = LayoutRects {
             top_bar: Rect::NOTHING,
             options_button: Rect::NOTHING,
+            info_button: Rect::NOTHING,
             reset_button: Rect::NOTHING,
             bracket_bar: Rect::NOTHING,
             options_window: None,
             options_demo_button: None,
+            onboarding_window: None,
             account_window: None,
             account_apply_button: None,
             account_close_button: None,
@@ -320,6 +339,7 @@ impl TrueSightGuiApp {
         let (opts_win, opts_demo) = self.render_options_window(ctx, rects.top_bar.max.y);
         rects.options_window = opts_win;
         rects.options_demo_button = opts_demo;
+        rects.onboarding_window = self.render_onboarding_window(ctx);
 
         if self.drag_slot.is_some() {
             ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
@@ -455,6 +475,7 @@ impl TrueSightGuiApp {
         let top_out = self.render_top_bar(ui);
         rects.top_bar = top_out.bar;
         rects.options_button = top_out.options_button;
+        rects.info_button = top_out.info_button;
         rects.reset_button = top_out.reset_button;
         rects.bracket_bar = top_out.bracket_bar;
         ui.add_space(if compact_h { 8.0 } else { 10.0 });
