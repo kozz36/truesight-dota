@@ -2895,7 +2895,7 @@ fn make_test_jwt(payload_json: &str) -> String {
 fn stratz_jwt_claims_decoder_extracts_steam_id_and_days_remaining() {
     use crate::session::parse_stratz_jwt_claims;
 
-    let now = 1_700_000_000_u64;
+    let now = truesight_adapters::sync::LocalCacheManager::now_unix();
     let exp = now + 365 * 86_400;
     let token_str_id = make_test_jwt(&format!(
         r#"{{"iss":"https://api.stratz.com","SteamId":"76561198087521469","iat":{now},"exp":{exp}}}"#
@@ -2940,12 +2940,19 @@ fn ui_config_persists_onboarding_dismissed_and_stratz_token_with_private_permiss
     let cfg = UiConfig {
         onboarding_dismissed: true,
         stratz_api_token: Some("hdr.pay.sig".into()),
-        stratz_token_days_remaining: Some(365),
+        stratz_token_exp: Some(1_731_536_000),
     };
     save_ui_config_to_dir(&tmp_dir, &cfg).expect("save ui_config.toml");
 
     let loaded = load_ui_config_from_dir(&tmp_dir);
     assert_eq!(loaded, cfg);
+
+    let leftover_tmps: Vec<_> = std::fs::read_dir(&tmp_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
+        .collect();
+    assert!(leftover_tmps.is_empty(), "expected no leftover tmp files");
 
     #[cfg(unix)]
     {
@@ -2953,6 +2960,61 @@ fn ui_config_persists_onboarding_dismissed_and_stratz_token_with_private_permiss
         let meta = std::fs::metadata(tmp_dir.join("ui_config.toml")).unwrap();
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
     }
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn save_ui_config_failure_surfaces_warning_and_keeps_in_memory_state() {
+    let tmp_dir =
+        std::env::temp_dir().join(format!("truesight_test_ui_cfg_fail_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    // Block config directory creation by placing a regular file where the dir should be.
+    let blocking_file = tmp_dir.join("blocked_dir");
+    std::fs::write(&blocking_file, b"not a directory").unwrap();
+    let cfg_path = blocking_file.join("config.toml");
+
+    let mgr = truesight_adapters::sync::LocalCacheManager::with_optional_account(
+        tmp_dir.join("cache"),
+        None,
+    );
+    let mut session = AppSession::with_cache_and_config(mgr, Some(cfg_path)).unwrap();
+
+    let res = session.set_onboarding_dismissed(true);
+    assert!(res.is_err(), "expected save failure on blocked dir");
+    assert!(
+        session.onboarding_dismissed,
+        "in-memory state must remain updated"
+    );
+    assert!(
+        session
+            .last_sync_notice
+            .as_deref()
+            .is_some_and(|n| n.contains("failed to save ui_config.toml")),
+        "expected warning in last_sync_notice, got: {:?}",
+        session.last_sync_notice
+    );
+
+    let now = 1_700_000_000_u64;
+    let exp = now + 30 * 86_400;
+    let token = make_test_jwt(&format!(
+        r#"{{"iss":"https://api.stratz.com","iat":{now},"exp":{exp}}}"#
+    ));
+    session.last_sync_notice = None;
+    let info = session
+        .apply_stratz_token(&token, now)
+        .expect("apply_stratz_token should succeed in-memory even if save fails");
+    assert_eq!(info.exp, exp);
+    assert_eq!(session.stratz_api_token.as_deref(), Some(token.as_str()));
+    assert!(
+        session
+            .last_sync_notice
+            .as_deref()
+            .is_some_and(|n| n.contains("failed to save ui_config.toml")),
+        "expected save failure warning in last_sync_notice, got: {:?}",
+        session.last_sync_notice
+    );
+
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
 
@@ -2970,7 +3032,7 @@ fn apply_stratz_token_auto_links_steam32_and_updates_session() {
     );
     let mut session = AppSession::with_cache_and_config(mgr, Some(cfg_path)).unwrap();
 
-    let now = 1_700_000_000_u64;
+    let now = truesight_adapters::sync::LocalCacheManager::now_unix();
     let exp = now + 365 * 86_400;
     let token = make_test_jwt(&format!(
         r#"{{"iss":"https://api.stratz.com","SteamId":"76561198087521469","iat":{now},"exp":{exp}}}"#
@@ -2981,7 +3043,8 @@ fn apply_stratz_token_auto_links_steam32_and_updates_session() {
     assert_eq!(info.steam32_id, Some(127_255_741));
     assert_eq!(info.days_remaining, 365);
     assert_eq!(session.cache_mgr.player_account_id, Some(127_255_741));
-    assert_eq!(session.stratz_token_days_remaining, Some(365));
+    assert_eq!(session.stratz_token_days_remaining_at(now), Some(365));
+    assert!(!session.is_stratz_token_expired_at(now));
     assert_eq!(
         session.cache_mgr.stratz_api_token.as_deref(),
         Some(token.as_str())
@@ -3001,6 +3064,113 @@ fn apply_stratz_token_auto_links_steam32_and_updates_session() {
     assert_eq!(
         deferred.cache_mgr.stratz_api_token.as_deref(),
         Some(token.as_str())
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn apply_stratz_token_preserves_different_explicit_steam_link_until_confirmed() {
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_test_stratz_explicit_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    let cfg_path = tmp_dir.join("config.toml");
+    let mgr = truesight_adapters::sync::LocalCacheManager::with_optional_account(
+        tmp_dir.join("cache"),
+        Some(111_222_333),
+    );
+    let mut session = AppSession::with_cache_and_config(mgr, Some(cfg_path.clone())).unwrap();
+    session.set_account_id(Some(111_222_333), true);
+
+    let now = 1_700_000_000_u64;
+    let exp = now + 30 * 86_400;
+    let token = make_test_jwt(&format!(
+        r#"{{"iss":"https://api.stratz.com","SteamId":"76561198087521469","iat":{now},"exp":{exp}}}"#
+    ));
+    session.apply_stratz_token(&token, now).unwrap();
+
+    // STRATZ token is connected, but explicit Steam account 111_222_333 is preserved.
+    assert_eq!(
+        session.cache_mgr.stratz_api_token.as_deref(),
+        Some(token.as_str())
+    );
+    assert_eq!(session.cache_mgr.player_account_id, Some(111_222_333));
+    assert_eq!(session.pending_stratz_steam32_link, Some(127_255_741));
+
+    // Dismissing keeps the existing explicit account.
+    session.dismiss_pending_stratz_steam_link();
+    assert_eq!(session.pending_stratz_steam32_link, None);
+    assert_eq!(session.cache_mgr.player_account_id, Some(111_222_333));
+
+    // Re-applying and confirming replaces the explicit account and persists it.
+    session.apply_stratz_token(&token, now).unwrap();
+    assert_eq!(session.pending_stratz_steam32_link, Some(127_255_741));
+    assert_eq!(
+        session.confirm_pending_stratz_steam_link(),
+        Some(127_255_741)
+    );
+    assert_eq!(session.pending_stratz_steam32_link, None);
+    assert_eq!(session.cache_mgr.player_account_id, Some(127_255_741));
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn stratz_token_expiry_derives_from_absolute_exp_and_rejects_expired_on_reload() {
+    use crate::session::{UiConfig, save_ui_config_to_dir};
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_test_stratz_expiry_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    let cfg_path = tmp_dir.join("config.toml");
+
+    let now = 1_700_000_000_u64;
+    let exp = now + 10 * 86_400;
+    let token = make_test_jwt(&format!(
+        r#"{{"iss":"https://api.stratz.com","iat":{now},"exp":{exp}}}"#
+    ));
+
+    let mgr = truesight_adapters::sync::LocalCacheManager::with_optional_account(
+        tmp_dir.join("cache"),
+        None,
+    );
+    let mut session = AppSession::with_cache_and_config(mgr, Some(cfg_path.clone())).unwrap();
+    session.apply_stratz_token(&token, now).unwrap();
+
+    assert_eq!(session.stratz_token_days_remaining_at(now), Some(10));
+    assert_eq!(
+        session.stratz_token_days_remaining_at(now + 4 * 86_400),
+        Some(6)
+    );
+    assert!(!session.is_stratz_token_expired_at(now + 4 * 86_400));
+    assert_eq!(session.stratz_token_days_remaining_at(exp), None);
+    assert!(session.is_stratz_token_expired_at(exp));
+
+    // Persist an already-expired token and verify reload does not wire it into cache_mgr.
+    let expired_token = make_test_jwt(r#"{"iss":"https://api.stratz.com","iat":1000,"exp":2000}"#);
+    save_ui_config_to_dir(
+        &tmp_dir,
+        &UiConfig {
+            onboarding_dismissed: false,
+            stratz_api_token: Some(expired_token),
+            stratz_token_exp: Some(2000),
+        },
+    )
+    .unwrap();
+
+    let reloaded_mgr = truesight_adapters::sync::LocalCacheManager::with_optional_account(
+        tmp_dir.join("cache"),
+        None,
+    );
+    let reloaded = AppSession::with_cache_and_config(reloaded_mgr, Some(cfg_path)).unwrap();
+    assert_eq!(reloaded.cache_mgr.stratz_api_token, None);
+    assert!(
+        reloaded
+            .is_stratz_token_expired_at(truesight_adapters::sync::LocalCacheManager::now_unix())
     );
 
     let _ = std::fs::remove_dir_all(&tmp_dir);

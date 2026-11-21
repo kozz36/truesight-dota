@@ -1338,9 +1338,8 @@ fn onboarding_guide_navigates_steps_and_handles_clipboard_stratz_token() {
     );
 
     // Simulate active 90s clipboard watcher detecting a valid STRATZ JWT
-    app.stratz_clipboard_watch_until =
-        Some(std::time::Instant::now() + std::time::Duration::from_secs(90));
     let now = 1_700_000_000_u64;
+    app.stratz_clipboard_watch_until = Some(now + 90);
     let exp = now + 365 * 86_400;
     let payload = format!(
         r#"{{"iss":"https://api.stratz.com","SteamId":"76561198087521469","iat":{now},"exp":{exp}}}"#
@@ -1358,6 +1357,32 @@ fn onboarding_guide_navigates_steps_and_handles_clipboard_stratz_token() {
         "unexpected status_banner: {}",
         app.status_banner
     );
+}
+
+#[test]
+fn pending_stratz_steam_link_preserves_explicit_account_in_gui_until_confirmed() {
+    let mut session = AppSession::new().unwrap();
+    session.set_account_id(Some(111_222_333), true);
+    let mut app = TrueSightGuiApp::new(session, None, None);
+    app.onboarding_open = true;
+    app.onboarding_step = 2;
+
+    let now = truesight_adapters::sync::LocalCacheManager::now_unix();
+    let exp = now + 365 * 86_400;
+    let payload = format!(
+        r#"{{"iss":"https://api.stratz.com","SteamId":"76561198087521469","iat":{now},"exp":{exp}}}"#
+    );
+    let hdr_b64 = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9";
+    let pay_b64 = encode_b64url_for_test(payload.as_bytes());
+    let jwt = format!("{hdr_b64}.{pay_b64}.c2ln");
+
+    assert!(app.apply_stratz_token_ui(&jwt, now));
+    assert_eq!(app.session.cache_mgr.player_account_id, Some(111_222_333));
+    assert_eq!(app.session.pending_stratz_steam32_link, Some(127_255_741));
+
+    let ctx = egui::Context::default();
+    let r = render_at_viewport(&mut app, &ctx, vec2(1180.0, 700.0));
+    assert!(r.onboarding_window.is_some());
 }
 
 fn encode_b64url_for_test(input: &[u8]) -> String {

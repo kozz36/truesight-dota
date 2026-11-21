@@ -59,7 +59,8 @@ pub struct AppSession {
     vision_owned: Vec<(Side, HeroId)>,
     pub onboarding_dismissed: bool,
     pub stratz_api_token: Option<String>,
-    pub stratz_token_days_remaining: Option<u32>,
+    pub stratz_token_exp: Option<u64>,
+    pub pending_stratz_steam32_link: Option<u64>,
 }
 
 impl Drop for AppSession {
@@ -150,10 +151,13 @@ impl AppSession {
             .and_then(Path::parent)
             .map(load_ui_config_from_dir)
             .unwrap_or_default();
-        if ui_cfg.stratz_api_token.is_some() {
+        let now = LocalCacheManager::now_unix();
+        let resolved_exp =
+            resolve_stratz_exp(ui_cfg.stratz_api_token.as_deref(), ui_cfg.stratz_token_exp);
+        if !is_stratz_exp_expired(resolved_exp, now) {
             cache_mgr.stratz_api_token = ui_cfg.stratz_api_token.clone();
         }
-        let db_status = cache_mgr.freshness_badge(LocalCacheManager::now_unix());
+        let db_status = cache_mgr.freshness_badge(now);
         Ok(Self {
             draft: DraftState {
                 bracket: initial_bracket,
@@ -190,7 +194,8 @@ impl AppSession {
             vision_owned: Vec::new(),
             onboarding_dismissed: ui_cfg.onboarding_dismissed,
             stratz_api_token: ui_cfg.stratz_api_token,
-            stratz_token_days_remaining: ui_cfg.stratz_token_days_remaining,
+            stratz_token_exp: resolved_exp,
+            pending_stratz_steam32_link: None,
         })
     }
 
@@ -202,10 +207,17 @@ impl AppSession {
     pub(crate) fn enable_config_persistence_for_path(&mut self, cfg_path: PathBuf) {
         if let Some(dir) = cfg_path.parent() {
             let ui_cfg = load_ui_config_from_dir(dir);
+            let now = LocalCacheManager::now_unix();
+            let resolved_exp =
+                resolve_stratz_exp(ui_cfg.stratz_api_token.as_deref(), ui_cfg.stratz_token_exp);
             self.onboarding_dismissed = ui_cfg.onboarding_dismissed;
             self.stratz_api_token = ui_cfg.stratz_api_token;
-            self.cache_mgr.stratz_api_token = self.stratz_api_token.clone();
-            self.stratz_token_days_remaining = ui_cfg.stratz_token_days_remaining;
+            self.stratz_token_exp = resolved_exp;
+            self.cache_mgr.stratz_api_token = if is_stratz_exp_expired(resolved_exp, now) {
+                None
+            } else {
+                self.stratz_api_token.clone()
+            };
         }
         self.config_path = Some(cfg_path);
     }
@@ -1083,25 +1095,52 @@ impl AppSession {
         (analysis, recs)
     }
 
-    fn persist_ui_config(&self) {
+    fn persist_ui_config(&mut self) -> Result<(), String> {
         if let Some(dir) = self.config_path.as_deref().and_then(Path::parent) {
             let cfg = UiConfig {
                 onboarding_dismissed: self.onboarding_dismissed,
                 stratz_api_token: self.stratz_api_token.clone(),
-                stratz_token_days_remaining: self.stratz_token_days_remaining,
+                stratz_token_exp: self.stratz_token_exp,
             };
-            let _ = save_ui_config_to_dir(dir, &cfg);
+            if let Err(err) = save_ui_config_to_dir(dir, &cfg) {
+                self.last_sync_notice = Some(format!(
+                    "Warning: failed to save ui_config.toml ({err}); changes apply to this session only."
+                ));
+                return Err(err);
+            }
         }
+        Ok(())
     }
 
     /// Persists the onboarding dismissal preference when config persistence is enabled.
-    pub fn set_onboarding_dismissed(&mut self, dismissed: bool) {
+    pub fn set_onboarding_dismissed(&mut self, dismissed: bool) -> Result<(), String> {
         self.onboarding_dismissed = dismissed;
-        self.persist_ui_config();
+        self.persist_ui_config()
+    }
+
+    /// Returns whole days remaining before the persisted STRATZ token expires at `now_unix_secs`,
+    /// or `None` when no token is set or the token is already expired.
+    pub fn stratz_token_days_remaining_at(&self, now_unix_secs: u64) -> Option<u32> {
+        self.stratz_api_token.as_ref()?;
+        let exp = resolve_stratz_exp(self.stratz_api_token.as_deref(), self.stratz_token_exp)?;
+        if exp > now_unix_secs {
+            Some(((exp - now_unix_secs) / 86_400) as u32)
+        } else {
+            None
+        }
+    }
+
+    /// Returns `true` when a STRATZ token is present and its expiry timestamp has passed.
+    pub fn is_stratz_token_expired_at(&self, now_unix_secs: u64) -> bool {
+        if self.stratz_api_token.is_none() {
+            return false;
+        }
+        let exp = resolve_stratz_exp(self.stratz_api_token.as_deref(), self.stratz_token_exp);
+        is_stratz_exp_expired(exp, now_unix_secs)
     }
 
     /// Validates a STRATZ JWT, persists it privately, wires it into `LocalCacheManager`,
-    /// and auto-links `SteamId` when present.
+    /// and links `SteamId` when no different explicit Steam account is already configured.
     pub fn apply_stratz_token(
         &mut self,
         token: &str,
@@ -1111,15 +1150,42 @@ impl AppSession {
         let cleaned = token.trim().to_string();
         self.stratz_api_token = Some(cleaned.clone());
         self.cache_mgr.stratz_api_token = Some(cleaned);
-        self.stratz_token_days_remaining = Some(info.days_remaining);
-        self.persist_ui_config();
+        self.stratz_token_exp = Some(info.exp);
+        let _ = self.persist_ui_config();
         if let Some(steam32) = info.steam32_id {
-            self.set_account_id(Some(steam32), true);
-            if let Some(path) = self.config_path.as_deref() {
-                let _ = save_account_config_to(path, AccountLinkConfig::Explicit(steam32));
+            let has_different_explicit = self.cache_mgr.explicit_override
+                && self
+                    .cache_mgr
+                    .player_account_id
+                    .is_some_and(|existing| existing != steam32);
+            if has_different_explicit {
+                self.pending_stratz_steam32_link = Some(steam32);
+            } else {
+                self.pending_stratz_steam32_link = None;
+                self.set_account_id(Some(steam32), true);
+                if let Some(path) = self.config_path.as_deref() {
+                    let _ = save_account_config_to(path, AccountLinkConfig::Explicit(steam32));
+                }
             }
+        } else {
+            self.pending_stratz_steam32_link = None;
         }
         Ok(info)
+    }
+
+    /// Confirms replacing the current Steam account with the pending STRATZ JWT `SteamId`.
+    pub fn confirm_pending_stratz_steam_link(&mut self) -> Option<u64> {
+        let steam32 = self.pending_stratz_steam32_link.take()?;
+        self.set_account_id(Some(steam32), true);
+        if let Some(path) = self.config_path.as_deref() {
+            let _ = save_account_config_to(path, AccountLinkConfig::Explicit(steam32));
+        }
+        Some(steam32)
+    }
+
+    /// Dismisses the pending STRATZ JWT `SteamId` prompt and keeps the current explicit account.
+    pub fn dismiss_pending_stratz_steam_link(&mut self) {
+        self.pending_stratz_steam32_link = None;
     }
 }
 
@@ -1138,7 +1204,15 @@ pub struct StratzTokenInfo {
 pub struct UiConfig {
     pub onboarding_dismissed: bool,
     pub stratz_api_token: Option<String>,
-    pub stratz_token_days_remaining: Option<u32>,
+    pub stratz_token_exp: Option<u64>,
+}
+
+fn resolve_stratz_exp(token: Option<&str>, explicit_exp: Option<u64>) -> Option<u64> {
+    explicit_exp.or_else(|| token.and_then(|t| parse_stratz_jwt_claims(t, 0).ok().map(|i| i.exp)))
+}
+
+fn is_stratz_exp_expired(exp: Option<u64>, now_unix_secs: u64) -> bool {
+    exp.is_some_and(|e| e <= now_unix_secs)
 }
 
 fn decode_base64url(input: &str) -> Result<Vec<u8>, String> {
@@ -1262,37 +1336,77 @@ pub fn load_ui_config_from_dir(config_dir: &Path) -> UiConfig {
                     cfg.stratz_api_token = Some(s.to_string());
                 }
             }
-            "stratz_token_days_remaining" => {
-                cfg.stratz_token_days_remaining = val.parse::<u32>().ok();
+            "stratz_token_exp" => {
+                cfg.stratz_token_exp = val.parse::<u64>().ok();
             }
             _ => {}
         }
     }
+    if cfg.stratz_token_exp.is_none() {
+        cfg.stratz_token_exp = resolve_stratz_exp(cfg.stratz_api_token.as_deref(), None);
+    }
     cfg
 }
 
-/// Persists `ui_config.toml` into `config_dir`, applying `0600` permissions on Unix when a token is stored.
+/// Persists `ui_config.toml` atomically into `config_dir`, creating an owner-only (`0600`) file on Unix before writing.
 pub fn save_ui_config_to_dir(config_dir: &Path, cfg: &UiConfig) -> Result<(), String> {
+    use std::io::Write;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     std::fs::create_dir_all(config_dir).map_err(|e| e.to_string())?;
-    let path = config_dir.join("ui_config.toml");
+    let target_path = config_dir.join("ui_config.toml");
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let tmp_path = config_dir.join(format!(
+        ".ui_config.toml.tmp.{}.{nanos}",
+        std::process::id()
+    ));
+
     let mut body = format!("onboarding_dismissed = {}\n", cfg.onboarding_dismissed);
     if let Some(token) = cfg.stratz_api_token.as_deref().filter(|t| !t.is_empty()) {
         let escaped = token.replace('"', "");
         body.push_str(&format!("stratz_api_token = \"{escaped}\"\n"));
     }
-    if let Some(days) = cfg.stratz_token_days_remaining {
-        body.push_str(&format!("stratz_token_days_remaining = {days}\n"));
+    if let Some(exp) = cfg.stratz_token_exp {
+        body.push_str(&format!("stratz_token_exp = {exp}\n"));
     }
-    std::fs::write(&path, body).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    if cfg
-        .stratz_api_token
-        .as_deref()
-        .is_some_and(|t| !t.is_empty())
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| e.to_string())?;
+
+    let write_res: Result<(), std::io::Error> = (|| {
+        #[cfg(unix)]
+        let mut file = {
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            let f = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp_path)?;
+            f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            f
+        };
+        #[cfg(not(unix))]
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp_path)?;
+
+        file.write_all(body.as_bytes())?;
+        file.flush()?;
+        file.sync_all()?;
+        Ok(())
+    })();
+
+    if let Err(err) = write_res {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(err.to_string());
+    }
+
+    if let Err(err) = std::fs::rename(&tmp_path, &target_path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(err.to_string());
     }
     Ok(())
 }

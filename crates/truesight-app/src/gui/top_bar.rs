@@ -491,14 +491,18 @@ impl TrueSightGuiApp {
                             }
                         });
                         ui.add_space(4.0);
-                        let stratz_label = match self.session.stratz_token_days_remaining {
-                            Some(days) => format!("STRATZ · Connected ({days}d remaining)"),
-                            None => "STRATZ · Not connected (optional)".to_string(),
-                        };
-                        let stratz_col = if self.session.stratz_token_days_remaining.is_some() {
-                            P_GEM
+                        let now = truesight_adapters::sync::LocalCacheManager::now_unix();
+                        let days_opt = self.session.stratz_token_days_remaining_at(now);
+                        let expired = self.session.is_stratz_token_expired_at(now);
+                        let (stratz_label, stratz_col) = if expired {
+                            (
+                                "STRATZ: Token expired (reconnect)".to_string(),
+                                super::theme::P_NEUTRAL,
+                            )
+                        } else if let Some(days) = days_opt {
+                            (format!("STRATZ · Connected ({days}d remaining)"), P_GEM)
                         } else {
-                            P_MUTED
+                            ("STRATZ · Not connected (optional)".to_string(), P_MUTED)
                         };
                         ui.label(RichText::new(stratz_label).size(9.5).color(stratz_col));
                         ui.horizontal(|ui| {
@@ -529,6 +533,7 @@ impl TrueSightGuiApp {
                                 self.try_paste_stratz_token();
                             }
                         });
+                        self.render_stratz_pending_link_prompt(ui);
                         if self.stratz_paste_open {
                             ui.add_space(2.0);
                             ui.horizontal(|ui| {
