@@ -54,6 +54,10 @@ pub enum DraftEvent {
     BanDetected {
         hero_id: HeroId,
     },
+    /// Local player's active inventory, backpack, stash, TP, and neutral item slugs parsed from GSI.
+    InventoryUpdated {
+        item_slugs: Vec<String>,
+    },
     DraftReset,
 }
 

@@ -1,3 +1,4 @@
+use crate::item_repo::SeededItemMetaRepository;
 use crate::meta_repo::SeededMetaRepository;
 use crate::platform::{
     PlatformEnv, detect_steam_vdf_in_candidates, resolve_cache_dir_for,
@@ -8,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
-use truesight_core::domain::{Bracket, HeroId};
+use truesight_core::domain::{Bracket, HeroId, HeroItemStat, ItemCatalogEntry, ItemId, ItemPhase};
 use truesight_core::ports::PortError;
 
 /// OpenDota `/api/heroStats` refreshes its rolling daily window once per 24h UTC.
@@ -509,6 +510,39 @@ impl LocalCacheManager {
         self.cache_dir.join("stratz_synergy.json")
     }
 
+    fn item_constants_json_path(&self) -> PathBuf {
+        self.cache_dir.join("item_constants.json")
+    }
+
+    fn hero_item_stats_json_path(&self) -> PathBuf {
+        self.cache_dir.join("hero_item_stats.json")
+    }
+
+    fn game_patch_path(&self) -> PathBuf {
+        self.cache_dir.join("game_patch.txt")
+    }
+
+    /// Reads the cached Dota 2 game patch version (e.g. `"7.40b"`), if persisted.
+    pub fn read_cached_game_patch(&self) -> Option<String> {
+        let content = fs::read_to_string(self.game_patch_path()).ok()?;
+        let trimmed = content.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    }
+
+    /// Persists the active Dota 2 game patch string atomically into the local cache.
+    pub fn write_cached_game_patch(&self, patch: &str) -> Result<(), PortError> {
+        let trimmed = patch.trim();
+        if trimmed.is_empty() {
+            return Err(PortError("Game patch string must not be empty".into()));
+        }
+        fs::create_dir_all(&self.cache_dir).map_err(|e| PortError(e.to_string()))?;
+        atomic_write_file(&self.game_patch_path(), trimmed)
+    }
+
     fn player_dir(&self) -> Option<PathBuf> {
         self.player_account_id
             .map(|id| self.cache_dir.join("players").join(id.to_string()))
@@ -844,6 +878,36 @@ impl LocalCacheManager {
         }
         if let Ok(s_json) = fs::read_to_string(self.stratz_synergy_json_path()) {
             repo.custom_pair_synergy = parse_stratz_with_synergy_json(&s_json);
+        }
+        repo
+    }
+
+    /// Builds an item repository from cached `item_constants.json` / `hero_item_stats.json`,
+    /// falling back seamlessly to embedded snapshots when offline or uncached.
+    pub fn build_item_repository(&self) -> SeededItemMetaRepository {
+        let mut repo = SeededItemMetaRepository::new();
+        repo.active_patch = self.read_cached_game_patch();
+        if let Ok(c_json) = fs::read_to_string(self.item_constants_json_path()) {
+            let parsed = parse_opendota_item_constants_json(&c_json);
+            if !parsed.is_empty() {
+                repo.custom_catalog = parsed;
+            }
+        }
+        if let Ok(s_json) = fs::read_to_string(self.hero_item_stats_json_path()) {
+            let mut stats = parse_stratz_hero_item_purchase_json(&s_json);
+            if stats.is_empty() {
+                stats = parse_opendota_item_timings_json(&s_json, &repo);
+            }
+            if !stats.is_empty() {
+                if let Some(hid) = extract_u64_field(&s_json, "\"heroId\"")
+                    .or_else(|| extract_u64_field(&s_json, "\"hero_id\""))
+                    .and_then(|v| u16::try_from(v).ok())
+                    .filter(|&v| v > 0)
+                {
+                    repo.custom_hero_stats
+                        .push((HeroId(hid), None, None, stats));
+                }
+            }
         }
         repo
     }
@@ -1327,4 +1391,398 @@ fn extract_jwt_exp_unverified(token: &str) -> Option<u64> {
     }
     let payload = std::str::from_utf8(&out).ok()?;
     extract_u64_field(payload, "\"exp\"")
+}
+
+fn extract_str_field<'a>(block: &'a str, key: &str) -> Option<&'a str> {
+    let idx = block.find(key)?;
+    let rest = block[idx + key.len()..].trim_start();
+    let rest = rest.strip_prefix(':')?.trim_start();
+    let rest = rest.strip_prefix('"')?;
+    let mut end = 0usize;
+    let bytes = rest.as_bytes();
+    while end < bytes.len() {
+        if bytes[end] == b'\\' {
+            end += 2;
+            continue;
+        }
+        if bytes[end] == b'"' {
+            return Some(&rest[..end]);
+        }
+        end += 1;
+    }
+    None
+}
+
+fn extract_u64_or_quoted_field(block: &str, key: &str) -> Option<u64> {
+    if let Some(v) = extract_u64_field(block, key) {
+        return Some(v);
+    }
+    extract_str_field(block, key)?.trim().parse::<u64>().ok()
+}
+
+fn extract_i64_field(block: &str, key: &str) -> Option<i64> {
+    let idx = block.find(key)?;
+    let rest = block[idx + key.len()..].trim_start();
+    let rest = rest.strip_prefix(':')?.trim_start();
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit() && c != '-')
+        .unwrap_or(rest.len());
+    rest[..end].parse::<i64>().ok()
+}
+
+fn phase_from_avg_mins(avg_mins: f32) -> ItemPhase {
+    if avg_mins < 10.0 {
+        ItemPhase::Early
+    } else if avg_mins <= 26.0 {
+        ItemPhase::Core
+    } else {
+        ItemPhase::Late
+    }
+}
+
+/// Parses OpenDota `/api/constants/items` object or STRATZ `constants.items` array into `ItemCatalogEntry` records.
+pub fn parse_opendota_item_constants_json(json: &str) -> Vec<ItemCatalogEntry> {
+    let trimmed = json.trim();
+    if trimmed.is_empty() || has_nonempty_graphql_errors(trimmed) {
+        return Vec::new();
+    }
+
+    if trimmed.contains("\"constants\"") && trimmed.contains("\"items\"") {
+        return parse_stratz_item_constants_json(trimmed);
+    }
+
+    let mut entries = Vec::new();
+    let bytes = trimmed.as_bytes();
+    let mut pos = 0usize;
+    while pos < bytes.len() {
+        let Some(rel_quote) = trimmed[pos..].find('"') else {
+            break;
+        };
+        let key_start = pos + rel_quote + 1;
+        let Some(rel_end) = trimmed[key_start..].find('"') else {
+            break;
+        };
+        let key = &trimmed[key_start..key_start + rel_end];
+        let after_key = trimmed[key_start + rel_end + 1..].trim_start();
+        if let Some(after_colon) = after_key.strip_prefix(':') {
+            let after_colon_trim = after_colon.trim_start();
+            if after_colon_trim.starts_with('{') {
+                let obj_offset = trimmed.len() - after_colon_trim.len();
+                if let Some((obj_slice, next_pos)) = extract_balanced_braces(trimmed, obj_offset) {
+                    if let Some(id_val) =
+                        extract_u64_field(obj_slice, "\"id\"").and_then(|v| u16::try_from(v).ok())
+                    {
+                        if id_val > 0 {
+                            let slug = key.strip_prefix("item_").unwrap_or(key).to_string();
+                            let display_name = extract_str_field(obj_slice, "\"dname\"")
+                                .unwrap_or(&slug)
+                                .to_string();
+                            let cost = extract_u64_field(obj_slice, "\"cost\"").unwrap_or(0) as u32;
+                            let is_recipe =
+                                slug.contains("recipe") || display_name.contains("Recipe");
+                            entries.push(ItemCatalogEntry {
+                                id: ItemId(id_val),
+                                slug,
+                                display_name,
+                                cost,
+                                components: Vec::new(),
+                                is_recipe,
+                                is_consumable_drop: cost == 0 && !is_recipe,
+                            });
+                        }
+                    }
+                    pos = next_pos;
+                    continue;
+                }
+            }
+        }
+        pos = key_start + rel_end + 1;
+    }
+    entries
+}
+
+fn parse_stratz_item_constants_json(json: &str) -> Vec<ItemCatalogEntry> {
+    let mut entries = Vec::new();
+    let Some(items_idx) = json.find("\"items\"") else {
+        return entries;
+    };
+    let rest = &json[items_idx..];
+    let Some(arr_start_rel) = rest.find('[') else {
+        return entries;
+    };
+    let mut pos = items_idx + arr_start_rel + 1;
+    let bytes = json.as_bytes();
+    while pos < bytes.len() {
+        match bytes[pos] {
+            b']' => break,
+            b'{' => {
+                let Some((obj_slice, next_pos)) = extract_balanced_braces(json, pos) else {
+                    break;
+                };
+                if let Some(id_val) =
+                    extract_u64_field(obj_slice, "\"id\"").and_then(|v| u16::try_from(v).ok())
+                {
+                    if id_val > 0 {
+                        let raw_name = extract_str_field(obj_slice, "\"name\"").unwrap_or("");
+                        let slug = raw_name
+                            .strip_prefix("item_")
+                            .unwrap_or(raw_name)
+                            .to_string();
+                        let display_name = extract_str_field(obj_slice, "\"displayName\"")
+                            .unwrap_or(&slug)
+                            .to_string();
+                        let cost = extract_u64_field(obj_slice, "\"cost\"").unwrap_or(0) as u32;
+                        let is_recipe =
+                            extract_bool_field(obj_slice, "\"isRecipe\"").unwrap_or(false);
+                        let mut components = Vec::new();
+                        let mut comp_search = obj_slice;
+                        while let Some(c_idx) = comp_search.find("\"componentId\"") {
+                            let sub = &comp_search[c_idx..];
+                            if let Some(cid) = extract_u64_field(sub, "\"componentId\"")
+                                .and_then(|v| u16::try_from(v).ok())
+                            {
+                                if cid > 0 {
+                                    components.push(ItemId(cid));
+                                }
+                            }
+                            comp_search = &comp_search[c_idx + "\"componentId\"".len()..];
+                        }
+                        entries.push(ItemCatalogEntry {
+                            id: ItemId(id_val),
+                            slug,
+                            display_name,
+                            cost,
+                            components,
+                            is_recipe,
+                            is_consumable_drop: cost == 0 && !is_recipe,
+                        });
+                    }
+                }
+                pos = next_pos;
+            }
+            _ => pos += 1,
+        }
+    }
+    entries
+}
+
+fn extract_balanced_braces(src: &str, start: usize) -> Option<(&str, usize)> {
+    let bytes = src.as_bytes();
+    if bytes.get(start).copied() != Some(b'{') {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut in_str = false;
+    let mut i = start;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_str {
+            if b == b'\\' {
+                i += 2;
+                continue;
+            }
+            if b == b'"' {
+                in_str = false;
+            }
+        } else {
+            match b {
+                b'"' => in_str = true,
+                b'{' => depth += 1,
+                b'}' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return Some((&src[start..=i], i + 1));
+                    }
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn extract_balanced_brackets(src: &str, start: usize) -> Option<(&str, usize)> {
+    let bytes = src.as_bytes();
+    if bytes.get(start).copied() != Some(b'[') {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut in_str = false;
+    let mut i = start;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_str {
+            if b == b'\\' {
+                i += 2;
+                continue;
+            }
+            if b == b'"' {
+                in_str = false;
+            }
+        } else {
+            match b {
+                b'"' => in_str = true,
+                b'[' => depth += 1,
+                b']' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return Some((&src[start..=i], i + 1));
+                    }
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Parses STRATZ `itemStartingPurchase` + `itemFullPurchase` JSON arrays into aggregated `HeroItemStat` rows.
+pub fn parse_stratz_hero_item_purchase_json(json: &str) -> Vec<HeroItemStat> {
+    if has_nonempty_graphql_errors(json) {
+        return Vec::new();
+    }
+
+    let mut buckets: Vec<(ItemId, ItemPhase, f64, u64, u64)> = Vec::new();
+
+    if let Some(start_idx) = json.find("\"itemStartingPurchase\"") {
+        if let Some(arr_rel) = json[start_idx..].find('[') {
+            if let Some((arr_slice, _)) = extract_balanced_brackets(json, start_idx + arr_rel) {
+                for obj_chunk in arr_slice.split('{').skip(1) {
+                    let Some(end) = obj_chunk.find('}') else {
+                        continue;
+                    };
+                    let block = &obj_chunk[..end];
+                    if extract_bool_field(block, "\"wasGiven\"") == Some(true) {
+                        continue;
+                    }
+                    let Some(id_val) =
+                        extract_u64_field(block, "\"itemId\"").and_then(|v| u16::try_from(v).ok())
+                    else {
+                        continue;
+                    };
+                    let matches = extract_u64_field(block, "\"matchCount\"").unwrap_or(0);
+                    let wins = extract_u64_field(block, "\"winCount\"").unwrap_or(0);
+                    if id_val == 0 || matches == 0 {
+                        continue;
+                    }
+                    upsert_item_stat_bucket(
+                        &mut buckets,
+                        ItemId(id_val),
+                        ItemPhase::Starting,
+                        0.0,
+                        matches,
+                        wins,
+                    );
+                }
+            }
+        }
+    }
+
+    if let Some(full_idx) = json.find("\"itemFullPurchase\"") {
+        if let Some(arr_rel) = json[full_idx..].find('[') {
+            if let Some((arr_slice, _)) = extract_balanced_brackets(json, full_idx + arr_rel) {
+                for obj_chunk in arr_slice.split('{').skip(1) {
+                    let Some(end) = obj_chunk.find('}') else {
+                        continue;
+                    };
+                    let block = &obj_chunk[..end];
+                    let Some(id_val) =
+                        extract_u64_field(block, "\"itemId\"").and_then(|v| u16::try_from(v).ok())
+                    else {
+                        continue;
+                    };
+                    let matches = extract_u64_field(block, "\"matchCount\"").unwrap_or(0);
+                    let wins = extract_u64_field(block, "\"winCount\"").unwrap_or(0);
+                    let time_secs = extract_i64_field(block, "\"time\"").unwrap_or(0).max(0);
+                    if id_val == 0 || matches == 0 {
+                        continue;
+                    }
+                    let avg_mins = time_secs as f32 / 60.0;
+                    let phase = phase_from_avg_mins(avg_mins);
+                    upsert_item_stat_bucket(
+                        &mut buckets,
+                        ItemId(id_val),
+                        phase,
+                        f64::from(avg_mins),
+                        matches,
+                        wins,
+                    );
+                }
+            }
+        }
+    }
+
+    buckets
+        .into_iter()
+        .map(
+            |(item_id, phase, weighted_mins, matches, wins)| HeroItemStat {
+                item_id,
+                phase,
+                avg_time_mins: if matches > 0 {
+                    (weighted_mins / matches as f64) as f32
+                } else {
+                    0.0
+                },
+                match_count: matches as u32,
+                win_count: wins as u32,
+            },
+        )
+        .collect()
+}
+
+fn upsert_item_stat_bucket(
+    buckets: &mut Vec<(ItemId, ItemPhase, f64, u64, u64)>,
+    item_id: ItemId,
+    phase: ItemPhase,
+    avg_mins: f64,
+    matches: u64,
+    wins: u64,
+) {
+    if let Some(entry) = buckets
+        .iter_mut()
+        .find(|(id, p, _, _, _)| *id == item_id && *p == phase)
+    {
+        entry.2 += avg_mins * matches as f64;
+        entry.3 += matches;
+        entry.4 += wins;
+    } else {
+        buckets.push((item_id, phase, avg_mins * matches as f64, matches, wins));
+    }
+}
+
+/// Parses OpenDota `/api/scenarios/itemTimings` JSON rows into `Vec<HeroItemStat>`.
+pub fn parse_opendota_item_timings_json(
+    json: &str,
+    catalog: &SeededItemMetaRepository,
+) -> Vec<HeroItemStat> {
+    let mut out = Vec::new();
+    for obj_chunk in json.split('{').skip(1) {
+        let Some(end) = obj_chunk.find('}') else {
+            continue;
+        };
+        let block = &obj_chunk[..end];
+        let Some(slug) = extract_str_field(block, "\"item\"") else {
+            continue;
+        };
+        let Some(entry) = catalog.item_by_slug(slug) else {
+            continue;
+        };
+        let time_secs = extract_i64_field(block, "\"time\"").unwrap_or(0).max(0);
+        let matches = extract_u64_or_quoted_field(block, "\"games\"").unwrap_or(0) as u32;
+        let wins = extract_u64_or_quoted_field(block, "\"wins\"").unwrap_or(0) as u32;
+        if matches == 0 {
+            continue;
+        }
+        let avg_time_mins = time_secs as f32 / 60.0;
+        out.push(HeroItemStat {
+            item_id: entry.id,
+            phase: phase_from_avg_mins(avg_time_mins),
+            avg_time_mins,
+            match_count: matches,
+            win_count: wins,
+        });
+    }
+    out
 }

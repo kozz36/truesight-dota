@@ -115,6 +115,54 @@ fn parse_gsi_events_from_root(root: &JsonVal) -> Vec<DraftEvent> {
                 hero_slug: slug.to_string(),
             });
         }
+        if let Some(items_node) = root.get("items") {
+            if matches!(items_node, JsonVal::Obj(_))
+                && items_node.get("team2").is_none()
+                && items_node.get("team3").is_none()
+                && items_node.get("player0").is_none()
+            {
+                const ITEM_SLOT_KEYS: &[&str] = &[
+                    "slot0",
+                    "slot1",
+                    "slot2",
+                    "slot3",
+                    "slot4",
+                    "slot5",
+                    "slot6",
+                    "slot7",
+                    "slot8",
+                    "stash0",
+                    "stash1",
+                    "stash2",
+                    "stash3",
+                    "stash4",
+                    "stash5",
+                    "teleport0",
+                    "teleport",
+                    "neutral0",
+                    "neutral",
+                ];
+                let mut saw_recognized_slot = false;
+                let mut item_slugs = Vec::new();
+                for &key in ITEM_SLOT_KEYS {
+                    if let Some(slot_obj) = items_node.get(key) {
+                        saw_recognized_slot = true;
+                        if let Some(raw_name) = slot_obj.get("name").and_then(JsonVal::as_str) {
+                            let trimmed = raw_name.trim();
+                            if !trimmed.is_empty() && trimmed != "item_empty" {
+                                let canonical = trimmed.strip_prefix("item_").unwrap_or(trimmed);
+                                if !canonical.is_empty() {
+                                    item_slugs.push(canonical.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+                if saw_recognized_slot {
+                    events.push(DraftEvent::InventoryUpdated { item_slugs });
+                }
+            }
+        }
     }
 
     if let Some(pick) = root.get("truesight_pick") {
@@ -453,6 +501,7 @@ struct GsiStateSnapshot {
     latest_player_mappings: Vec<(u64, Faction, String)>,
     latest_picks: [SideSlotPicks; 2],
     latest_bans: Vec<HeroId>,
+    latest_inventory: Option<Vec<String>>,
 }
 
 impl GsiStateSnapshot {
@@ -472,6 +521,7 @@ impl GsiStateSnapshot {
                     self.latest_player_mappings.clear();
                     self.latest_picks = Default::default();
                     self.latest_bans.clear();
+                    self.latest_inventory = None;
                     self.pending_reset_state = Some((state_name.clone(), *game_time_secs));
                 }
                 self.latest_game_state = Some((state_name.clone(), *game_time_secs));
@@ -520,6 +570,10 @@ impl GsiStateSnapshot {
                 if !self.latest_bans.contains(hero_id) && self.latest_bans.len() < 16 =>
             {
                 self.latest_bans.push(*hero_id);
+                false
+            }
+            DraftEvent::InventoryUpdated { item_slugs } => {
+                self.latest_inventory = Some(item_slugs.clone());
                 false
             }
             _ => false,
@@ -590,6 +644,14 @@ impl GsiStateSnapshot {
                     );
                 }
             }
+        }
+        if let Some(ref item_slugs) = self.latest_inventory {
+            upsert(
+                out,
+                DraftEvent::InventoryUpdated {
+                    item_slugs: item_slugs.clone(),
+                },
+            );
         }
         if let Some((ref state_name, game_time_secs)) = self.latest_game_state {
             upsert(
@@ -772,7 +834,8 @@ fn should_coalesce(existing: &DraftEvent, incoming: &DraftEvent) -> bool {
     match (existing, incoming) {
         (FactionDetected { .. }, FactionDetected { .. })
         | (PlayerSteamIdDetected { .. }, PlayerSteamIdDetected { .. })
-        | (LocalPlayerHeroDetected { .. }, LocalPlayerHeroDetected { .. }) => true,
+        | (LocalPlayerHeroDetected { .. }, LocalPlayerHeroDetected { .. })
+        | (InventoryUpdated { .. }, InventoryUpdated { .. }) => true,
         (
             PickDetected {
                 side: s1, slot: l1, ..

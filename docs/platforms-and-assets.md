@@ -35,6 +35,7 @@ TrueSight Dota listens on loopback `http://127.0.0.1:4001/` (`TRUESIGHT_GSI_ADDR
 - **Windows automatic helper**: Run `install-gsi.ps1` (bundled inside both `truesight-dota-windows-x86_64.msi` and `truesight-dota-windows-x86_64.zip`). It queries `HKCU\Software\Valve\Steam\SteamPath` plus `libraryfolders.vdf` and copies `gamestate_integration_truesight.cfg` into `<SteamLibrary>\steamapps\common\dota 2 beta\game\dota\cfg\gamestate_integration\`.
 - **Linux manual placement**: Copy `gamestate_integration_truesight.cfg` to `~/.local/share/Steam/steamapps/common/dota 2 beta/game/dota/cfg/gamestate_integration/gamestate_integration_truesight.cfg` (or `~/.steam/steam/...`).
 - **Steam launch option**: In Steam -> Dota 2 -> *Properties* -> *General* -> *Launch Options*, add `-gamestateintegration`.
+- **Upgrading from `<= v0.3.2`**: `"items" "1"` is enabled in `gamestate_integration_truesight.cfg` for local-player item build tracking. Existing users upgrading from `<= v0.3.2` should re-install `gamestate_integration_truesight.cfg` (run `install-gsi.ps1` on Windows or copy the updated file on Linux).
 
 ---
 
