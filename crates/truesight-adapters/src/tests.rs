@@ -387,6 +387,23 @@ fn local_cache_manager_enforces_24h_meta_ttl_1h_player_ttl_and_applies_cached_co
     ]"#;
     mgr.write_cached_files(Some(sample_meta_json), Some(sample_player_json), now)
         .unwrap();
+    assert!(
+        mgr.is_meta_stale(now + 3600),
+        "Meta cache without item_constants.json must remain stale"
+    );
+    let sample_item_constants =
+        r#"{"blink": {"id": 1, "dname": "Blink Dagger", "cost": 2250, "components": null}}"#;
+    mgr.publish_staged_cache_with_items(
+        Some(sample_meta_json),
+        None,
+        Some(sample_item_constants),
+        None,
+        Some(sample_player_json),
+        None,
+        None,
+        now,
+    )
+    .unwrap();
 
     assert!(
         !mgr.is_meta_stale(now + 3600),
@@ -5221,6 +5238,202 @@ fn item_sync_parsers_decode_stratz_opendota_and_fallback_offline() {
 
     mgr.write_cached_game_patch("7.40b").unwrap();
     assert_eq!(mgr.read_cached_game_patch().as_deref(), Some("7.40b"));
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn item_catalog_and_opendota_parser_preserve_components_and_canonical_ids() {
+    use crate::item_repo::SeededItemMetaRepository;
+    use crate::sync::parse_opendota_item_constants_json;
+    use std::collections::HashSet;
+    use truesight_core::domain::ItemId;
+    use truesight_core::ports::ItemMetaRepository;
+
+    let opendota_json = r#"{
+        "pers": {"id": 69, "dname": "Perseverance", "cost": 1400, "components": null},
+        "bfury": {"id": 145, "dname": "Battle Fury", "cost": 3900, "components": ["pers", "broadsword", "quelling_blade"]},
+        "pipe": {"id": 90, "dname": "Pipe of Insight", "cost": 3725, "components": ["ring_of_tarrasque", "item_cloak", "shawl", ""]}
+    }"#;
+    let parsed = parse_opendota_item_constants_json(opendota_json);
+    let bfury = parsed
+        .iter()
+        .find(|e| e.id == ItemId(145))
+        .expect("bfury should parse");
+    assert_eq!(
+        bfury.components,
+        vec![ItemId(69), ItemId(3), ItemId(11)],
+        "bfury components should resolve both in-payload and embedded fallback slugs"
+    );
+    let pipe = parsed
+        .iter()
+        .find(|e| e.id == ItemId(90))
+        .expect("pipe should parse");
+    assert_eq!(
+        pipe.components,
+        vec![ItemId(279), ItemId(31), ItemId(1848)],
+        "pipe components should strip item_ prefix and ignore empty strings"
+    );
+
+    let repo = SeededItemMetaRepository::default();
+    let soul_ring = repo
+        .item_catalog(ItemId(178))
+        .expect("178 must be Soul Ring");
+    assert_eq!(soul_ring.slug, "soul_ring");
+    assert_eq!(soul_ring.display_name, "Soul Ring");
+    assert_eq!(soul_ring.cost, 805);
+
+    let cloak = repo.item_catalog(ItemId(31)).expect("31 must be Cloak");
+    assert_eq!(cloak.slug, "cloak");
+    assert_eq!(cloak.display_name, "Cloak");
+    assert_eq!(cloak.cost, 900);
+
+    let relic = repo
+        .item_catalog(ItemId(54))
+        .expect("54 must be Sacred Relic");
+    assert_eq!(relic.slug, "relic");
+    assert_eq!(relic.display_name, "Sacred Relic");
+    assert_eq!(relic.cost, 3400);
+
+    let rapier = repo
+        .item_catalog(ItemId(133))
+        .expect("133 must be Divine Rapier");
+    assert_eq!(rapier.slug, "rapier");
+    assert_eq!(rapier.display_name, "Divine Rapier");
+    assert_eq!(rapier.cost, 5600);
+    assert_eq!(rapier.components, vec![ItemId(54), ItemId(51)]);
+
+    let mut seen_ids = HashSet::new();
+    let mut seen_slugs = HashSet::new();
+    for raw_id in 1..=5000u16 {
+        if let Some(entry) = repo.item_catalog(ItemId(raw_id)) {
+            assert!(seen_ids.insert(entry.id), "duplicate ItemId {:?}", entry.id);
+            assert!(
+                seen_slugs.insert(entry.slug.clone()),
+                "duplicate slug {}",
+                entry.slug
+            );
+            for comp_id in &entry.components {
+                let comp = repo.item_catalog(*comp_id).unwrap_or_else(|| {
+                    panic!(
+                        "component {:?} of {} ({:?}) missing from EMBEDDED_ITEM_CATALOG",
+                        comp_id, entry.slug, entry.id
+                    )
+                });
+                assert!(
+                    !comp.is_recipe,
+                    "component {:?} of {} must not be a recipe",
+                    comp_id, entry.slug
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn sync_fetches_and_atomically_publishes_item_constants_and_builds_from_empty_cache() {
+    use crate::sync::LocalCacheManager;
+    use truesight_core::domain::{Bracket, HeroId, ItemId, ItemPhase, Role};
+    use truesight_core::ports::ItemMetaRepository;
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_sync_items_empty_cache_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    let mgr = LocalCacheManager::with_optional_account(tmp_dir.clone(), None);
+    let now = 1_795_000_000_u64;
+    assert!(mgr.is_meta_stale(now), "empty cache must be stale");
+
+    let hero_stats_json = r#"[
+        {"id": 1, "1_pick": 1000, "1_win": 540, "2_pick": 1000, "2_win": 540, "3_pick": 1000, "3_win": 540, "4_pick": 1000, "4_win": 540, "5_pick": 1000, "5_win": 540, "6_pick": 1000, "6_win": 540, "7_pick": 1000, "7_win": 540}
+    ]"#;
+    let item_constants_json = r#"{
+        "pers": {"id": 69, "dname": "Perseverance", "cost": 1400, "components": null},
+        "broadsword": {"id": 3, "dname": "Broadsword", "cost": 1000, "components": null},
+        "quelling_blade": {"id": 11, "dname": "Quelling Blade", "cost": 100, "components": null},
+        "bfury": {"id": 145, "dname": "Battle Fury", "cost": 3900, "components": ["pers", "broadsword", "quelling_blade"]}
+    }"#;
+    let hero_item_timings_json = r#"[
+        {"hero_id": 1, "item": "bfury", "time": 840, "games": "100", "wins": "60"},
+        {"hero_id": 2, "item": "blink", "time": 720, "games": "80", "wins": "48"}
+    ]"#;
+
+    let msg = mgr
+        .sync_from_sources_with(
+            false,
+            now,
+            |url| match url {
+                "https://api.opendota.com/api/heroStats" => Ok(hero_stats_json.to_string()),
+                "https://api.opendota.com/api/constants/items" => {
+                    Ok(item_constants_json.to_string())
+                }
+                u if u.starts_with("https://api.opendota.com/api/scenarios/itemTimings") => {
+                    Ok(hero_item_timings_json.to_string())
+                }
+                other => Err(truesight_core::ports::PortError(format!(
+                    "unexpected URL: {other}"
+                ))),
+            },
+            |_token| Err(truesight_core::ports::PortError("no stratz token".into())),
+            |_token| Err(truesight_core::ports::PortError("no stratz token".into())),
+        )
+        .expect("sync_from_sources_with should succeed");
+
+    assert!(msg.contains("heroStats"), "sync message: {msg}");
+    assert!(msg.contains("itemConstants"), "sync message: {msg}");
+    assert!(msg.contains("itemBuilds"), "sync message: {msg}");
+    assert!(
+        mgr.item_constants_json_path().exists(),
+        "item_constants.json must be published atomically"
+    );
+    assert!(
+        mgr.hero_item_stats_json_path().exists(),
+        "hero_item_stats.json must be published atomically"
+    );
+    assert!(
+        !mgr.is_meta_stale(now + 60),
+        "cache must be fresh immediately after sync"
+    );
+
+    let repo = mgr.build_item_repository();
+    let bfury = repo
+        .item_catalog(ItemId(145))
+        .expect("Battle Fury should load from cached item_constants.json");
+    assert_eq!(bfury.cost, 3900);
+    assert_eq!(
+        bfury.components,
+        vec![ItemId(69), ItemId(3), ItemId(11)],
+        "cached item_constants.json must preserve resolved recipe components"
+    );
+
+    let am_stats = repo
+        .hero_item_stats(HeroId(1), Role::Carry, Bracket::Divine)
+        .expect("Anti-Mage item stats should load");
+    let am_bfury = am_stats
+        .iter()
+        .find(|s| s.item_id == ItemId(145))
+        .expect("Anti-Mage should have cached Battle Fury timing");
+    assert_eq!(am_bfury.phase, ItemPhase::Core);
+    assert!((am_bfury.avg_time_mins - 14.0).abs() < 0.01);
+    assert_eq!(am_bfury.match_count, 100);
+    assert_eq!(am_bfury.win_count, 60);
+
+    let axe_stats = repo
+        .hero_item_stats(HeroId(2), Role::Offlane, Bracket::Divine)
+        .expect("Axe item stats should load from multi-hero timings");
+    assert!(
+        axe_stats.iter().any(|s| s.item_id == ItemId(1)),
+        "multi-hero hero_item_stats.json should populate HeroId(2) too"
+    );
+
+    // Deleting item_constants.json must make is_meta_stale return true even within 24h TTL.
+    std::fs::remove_file(mgr.item_constants_json_path()).unwrap();
+    assert!(
+        mgr.is_meta_stale(now + 60),
+        "missing item_constants.json must mark meta cache stale"
+    );
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }

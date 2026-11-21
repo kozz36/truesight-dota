@@ -510,11 +510,11 @@ impl LocalCacheManager {
         self.cache_dir.join("stratz_synergy.json")
     }
 
-    fn item_constants_json_path(&self) -> PathBuf {
+    pub(crate) fn item_constants_json_path(&self) -> PathBuf {
         self.cache_dir.join("item_constants.json")
     }
 
-    fn hero_item_stats_json_path(&self) -> PathBuf {
+    pub(crate) fn hero_item_stats_json_path(&self) -> PathBuf {
         self.cache_dir.join("hero_item_stats.json")
     }
 
@@ -620,7 +620,9 @@ impl LocalCacheManager {
     pub fn is_meta_stale(&self, now_unix: u64) -> bool {
         let (meta_ts, _) = self.read_timestamps();
         match meta_ts {
-            Some(ts) if self.meta_json_path().exists() => {
+            Some(ts)
+                if self.meta_json_path().exists() && self.item_constants_json_path().exists() =>
+            {
                 now_unix.saturating_sub(ts) > META_TTL_SECS
             }
             _ => true,
@@ -647,6 +649,30 @@ impl LocalCacheManager {
         player_profile_json: Option<&str>,
         now_unix: u64,
     ) -> Result<(), PortError> {
+        self.publish_staged_cache_with_items(
+            meta_json,
+            stratz_json,
+            None,
+            None,
+            player_json,
+            player_matches_json,
+            player_profile_json,
+            now_unix,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn publish_staged_cache_with_items(
+        &self,
+        meta_json: Option<&str>,
+        stratz_json: Option<&str>,
+        item_constants_json: Option<&str>,
+        hero_item_stats_json: Option<&str>,
+        player_json: Option<&str>,
+        player_matches_json: Option<&str>,
+        player_profile_json: Option<&str>,
+        now_unix: u64,
+    ) -> Result<(), PortError> {
         let is_arr = |s: &str| {
             let t = s.trim();
             t.starts_with('[') && t.ends_with(']')
@@ -665,6 +691,33 @@ impl LocalCacheManager {
             return Err(PortError(
                 "Invalid or truncated STRATZ synergy JSON payload".into(),
             ));
+        }
+        let parsed_item_catalog = if let Some(ic) = item_constants_json {
+            let parsed = parse_opendota_item_constants_json(ic);
+            if parsed.is_empty() {
+                return Err(PortError(
+                    "Invalid or truncated item constants JSON payload".into(),
+                ));
+            }
+            Some(parsed)
+        } else {
+            None
+        };
+        if let Some(his) = hero_item_stats_json {
+            let mut validation_repo = SeededItemMetaRepository::new();
+            if let Some(ref catalog) = parsed_item_catalog {
+                validation_repo.custom_catalog = catalog.clone();
+            } else if let Ok(existing_ic) = fs::read_to_string(self.item_constants_json_path()) {
+                let parsed = parse_opendota_item_constants_json(&existing_ic);
+                if !parsed.is_empty() {
+                    validation_repo.custom_catalog = parsed;
+                }
+            }
+            if parse_hero_item_stats_grouped_by_hero(his, &validation_repo).is_empty() {
+                return Err(PortError(
+                    "Invalid or truncated hero item stats JSON payload".into(),
+                ));
+            }
         }
         if player_json.is_some_and(|p| {
             self.player_account_id.is_none()
@@ -694,7 +747,11 @@ impl LocalCacheManager {
             return Err(PortError("Sync superseded by newer generation".into()));
         }
 
-        if meta_json.is_some() || stratz_json.is_some() {
+        if meta_json.is_some()
+            || stratz_json.is_some()
+            || item_constants_json.is_some()
+            || hero_item_stats_json.is_some()
+        {
             fs::create_dir_all(&self.cache_dir).map_err(|e| PortError(e.to_string()))?;
         }
         if let Some(m_body) = meta_json {
@@ -708,6 +765,22 @@ impl LocalCacheManager {
         }
         if let Some(s_body) = stratz_json {
             atomic_write_file(&self.stratz_synergy_json_path(), s_body)?;
+            state.latest_committed_meta_gen =
+                state.latest_committed_meta_gen.max(self.sync_generation);
+        }
+        if let Some(ic_body) = item_constants_json {
+            atomic_write_file(&self.item_constants_json_path(), ic_body)?;
+            if meta_json.is_none() {
+                atomic_write_file(
+                    &self.metadata_path(),
+                    &format!("meta_sync_unix={now_unix}\n"),
+                )?;
+            }
+            state.latest_committed_meta_gen =
+                state.latest_committed_meta_gen.max(self.sync_generation);
+        }
+        if let Some(his_body) = hero_item_stats_json {
+            atomic_write_file(&self.hero_item_stats_json_path(), his_body)?;
             state.latest_committed_meta_gen =
                 state.latest_committed_meta_gen.max(self.sync_generation);
         }
@@ -746,12 +819,35 @@ impl LocalCacheManager {
 
     /// Synchronizes stale or forced endpoints from OpenDota (and optional STRATZ token) with a 6s timeout.
     pub fn sync_from_opendota(&self, force: bool) -> Result<String, PortError> {
+        self.sync_from_sources_with(
+            force,
+            Self::now_unix(),
+            fetch_url,
+            fetch_stratz_with_synergy_graphql,
+            fetch_stratz_hero_item_purchases_graphql,
+        )
+    }
+
+    /// Synchronizes stale or forced endpoints using injected OpenDota and STRATZ fetchers.
+    pub fn sync_from_sources_with<FUrl, FStratzSyn, FStratzItems>(
+        &self,
+        force: bool,
+        now_unix: u64,
+        mut fetch_opendota_url: FUrl,
+        mut fetch_stratz_synergy: FStratzSyn,
+        mut fetch_stratz_items: FStratzItems,
+    ) -> Result<String, PortError>
+    where
+        FUrl: FnMut(&str) -> Result<String, PortError>,
+        FStratzSyn: FnMut(&str) -> Result<String, PortError>,
+        FStratzItems: FnMut(&str) -> Result<String, PortError>,
+    {
         if self.is_cancelled() {
             return Err(PortError("Sync cancelled".into()));
         }
-        let now = Self::now_unix();
-        let need_meta = force || self.is_meta_stale(now);
-        let need_player = self.player_account_id.is_some() && (force || self.is_player_stale(now));
+        let need_meta = force || self.is_meta_stale(now_unix);
+        let need_player =
+            self.player_account_id.is_some() && (force || self.is_player_stale(now_unix));
         if !need_meta && !need_player {
             return Ok("DB cache is already fresh (Meta <24h, Player <1h).".into());
         }
@@ -767,21 +863,34 @@ impl LocalCacheManager {
         let (
             mut fetched_meta,
             mut fetched_stratz,
+            mut fetched_item_constants,
+            mut fetched_hero_items,
             mut fetched_player,
             mut fetched_matches,
             mut fetched_profile,
-        ) = (None, None, None, None, None);
+        ) = (None, None, None, None, None, None, None);
         let mut updated_parts = Vec::new();
+        let stratz_token = self.effective_stratz_token_at(now_unix);
 
         if need_meta {
-            let body = fetch_url("https://api.opendota.com/api/heroStats")?;
+            let body = fetch_opendota_url("https://api.opendota.com/api/heroStats")?;
             if is_arr(&body) && !parse_hero_stats_json(&body).is_empty() {
                 fetched_meta = Some(body);
                 updated_parts.push("heroStats (24h TTL)");
             }
             if !self.is_cancelled() {
-                if let Some(token) = self.effective_stratz_token() {
-                    if let Some(sb) = fetch_stratz_with_synergy_graphql(&token)
+                if let Some(ic_body) =
+                    fetch_opendota_url("https://api.opendota.com/api/constants/items")
+                        .ok()
+                        .filter(|b| !parse_opendota_item_constants_json(b).is_empty())
+                {
+                    fetched_item_constants = Some(ic_body);
+                    updated_parts.push("itemConstants (24h TTL)");
+                }
+            }
+            if !self.is_cancelled() {
+                if let Some(ref token) = stratz_token {
+                    if let Some(sb) = fetch_stratz_synergy(token)
                         .ok()
                         .filter(|s| !parse_stratz_with_synergy_json(s).is_empty())
                     {
@@ -790,10 +899,41 @@ impl LocalCacheManager {
                     }
                 }
             }
+            if !self.is_cancelled() {
+                let mut item_build_staged = false;
+                if let Some(ref token) = stratz_token {
+                    if let Some(sb) = fetch_stratz_items(token)
+                        .ok()
+                        .filter(|s| !parse_stratz_hero_item_purchase_json(s).is_empty())
+                    {
+                        fetched_hero_items = Some(sb);
+                        updated_parts.push("itemBuilds (24h TTL)");
+                        item_build_staged = true;
+                    }
+                }
+                if !item_build_staged {
+                    let mut catalog_repo = SeededItemMetaRepository::new();
+                    if let Some(ref ic_body) = fetched_item_constants {
+                        let parsed = parse_opendota_item_constants_json(ic_body);
+                        if !parsed.is_empty() {
+                            catalog_repo.custom_catalog = parsed;
+                        }
+                    }
+                    if let Some(ib_body) = fetch_opendota_url(
+                        "https://api.opendota.com/api/scenarios/itemTimings?hero_id=1",
+                    )
+                    .ok()
+                    .filter(|b| !parse_hero_item_stats_grouped_by_hero(b, &catalog_repo).is_empty())
+                    {
+                        fetched_hero_items = Some(ib_body);
+                        updated_parts.push("itemBuilds (24h TTL)");
+                    }
+                }
+            }
         }
         if need_player && !self.is_cancelled() {
             if let Some(account_id) = self.player_account_id {
-                let body = fetch_url(&format!(
+                let body = fetch_opendota_url(&format!(
                     "https://api.opendota.com/api/players/{account_id}/heroes"
                 ))?;
                 if is_arr(&body) {
@@ -801,7 +941,7 @@ impl LocalCacheManager {
                     updated_parts.push("player comfort (1h TTL)");
                 }
                 if !self.is_cancelled() {
-                    if let Some(mb) = fetch_url(&format!(
+                    if let Some(mb) = fetch_opendota_url(&format!(
                         "https://api.opendota.com/api/players/{account_id}/matches?limit=500"
                     ))
                     .ok()
@@ -811,7 +951,7 @@ impl LocalCacheManager {
                     }
                 }
                 if !self.is_cancelled() {
-                    if let Some(pb) = fetch_url(&format!(
+                    if let Some(pb) = fetch_opendota_url(&format!(
                         "https://api.opendota.com/api/players/{account_id}"
                     ))
                     .ok()
@@ -823,13 +963,15 @@ impl LocalCacheManager {
             }
         }
 
-        self.publish_staged_cache(
+        self.publish_staged_cache_with_items(
             fetched_meta.as_deref(),
             fetched_stratz.as_deref(),
+            fetched_item_constants.as_deref(),
+            fetched_hero_items.as_deref(),
             fetched_player.as_deref(),
             fetched_matches.as_deref(),
             fetched_profile.as_deref(),
-            now,
+            now_unix,
         )?;
         if updated_parts.is_empty() {
             Ok("Synced OpenDota cache.".into())
@@ -894,18 +1036,9 @@ impl LocalCacheManager {
             }
         }
         if let Ok(s_json) = fs::read_to_string(self.hero_item_stats_json_path()) {
-            let mut stats = parse_stratz_hero_item_purchase_json(&s_json);
-            if stats.is_empty() {
-                stats = parse_opendota_item_timings_json(&s_json, &repo);
-            }
-            if !stats.is_empty() {
-                if let Some(hid) = extract_u64_field(&s_json, "\"heroId\"")
-                    .or_else(|| extract_u64_field(&s_json, "\"hero_id\""))
-                    .and_then(|v| u16::try_from(v).ok())
-                    .filter(|&v| v > 0)
-                {
-                    repo.custom_hero_stats
-                        .push((HeroId(hid), None, None, stats));
+            for (hero_id, stats) in parse_hero_item_stats_grouped_by_hero(&s_json, &repo) {
+                if !stats.is_empty() {
+                    repo.custom_hero_stats.push((hero_id, None, None, stats));
                 }
             }
         }
@@ -1364,6 +1497,25 @@ fn fetch_stratz_with_synergy_graphql(token: &str) -> Result<String, PortError> {
     })
 }
 
+fn fetch_stratz_hero_item_purchases_graphql(token: &str) -> Result<String, PortError> {
+    let auth_header = format!("Authorization: Bearer {token}");
+    let query = r#"{"query":"{ heroStats { itemStartingPurchase(heroId: 1) { itemId time instance matchCount winCount wasGiven } itemFullPurchase(heroId: 1) { itemId time instance matchCount winCount } } }"}"#;
+    run_curl(
+        "https://api.stratz.com/graphql",
+        &[
+            "-H",
+            "Content-Type: application/json",
+            "-H",
+            STRATZ_USER_AGENT_HEADER,
+            "-H",
+            &auth_header,
+            "-d",
+            query,
+        ],
+        "STRATZ item builds fetch",
+    )
+}
+
 fn extract_jwt_exp_unverified(token: &str) -> Option<u64> {
     let payload_b64 = token.trim().split('.').nth(1)?;
     let clean = payload_b64.trim_end_matches('=');
@@ -1440,6 +1592,55 @@ fn phase_from_avg_mins(avg_mins: f32) -> ItemPhase {
     }
 }
 
+/// Extracts a JSON string array field (e.g. `"components": ["pers", "broadsword"]`),
+/// ignoring `null` or empty strings `""` and stripping any `"item_"` prefix.
+fn extract_str_array_field(block: &str, key: &str) -> Vec<String> {
+    let Some(idx) = block.find(key) else {
+        return Vec::new();
+    };
+    let rest = block[idx + key.len()..].trim_start();
+    let Some(rest) = rest.strip_prefix(':') else {
+        return Vec::new();
+    };
+    let rest = rest.trim_start();
+    if !rest.starts_with('[') {
+        return Vec::new();
+    }
+    let Some((arr_slice, _)) = extract_balanced_brackets(rest, 0) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let bytes = arr_slice.as_bytes();
+    let mut pos = 1usize;
+    while pos < bytes.len() {
+        if bytes[pos] == b'"' {
+            pos += 1;
+            let start = pos;
+            while pos < bytes.len() {
+                if bytes[pos] == b'\\' {
+                    pos += 2;
+                    continue;
+                }
+                if bytes[pos] == b'"' {
+                    break;
+                }
+                pos += 1;
+            }
+            if pos <= bytes.len() {
+                let raw = arr_slice[start..pos].trim();
+                let slug = raw.strip_prefix("item_").unwrap_or(raw).trim();
+                if !slug.is_empty() {
+                    out.push(slug.to_string());
+                }
+            }
+            pos += 1;
+        } else {
+            pos += 1;
+        }
+    }
+    out
+}
+
 /// Parses OpenDota `/api/constants/items` object or STRATZ `constants.items` array into `ItemCatalogEntry` records.
 pub fn parse_opendota_item_constants_json(json: &str) -> Vec<ItemCatalogEntry> {
     let trimmed = json.trim();
@@ -1451,7 +1652,7 @@ pub fn parse_opendota_item_constants_json(json: &str) -> Vec<ItemCatalogEntry> {
         return parse_stratz_item_constants_json(trimmed);
     }
 
-    let mut entries = Vec::new();
+    let mut staged: Vec<(ItemCatalogEntry, Vec<String>)> = Vec::new();
     let bytes = trimmed.as_bytes();
     let mut pos = 0usize;
     while pos < bytes.len() {
@@ -1480,15 +1681,20 @@ pub fn parse_opendota_item_constants_json(json: &str) -> Vec<ItemCatalogEntry> {
                             let cost = extract_u64_field(obj_slice, "\"cost\"").unwrap_or(0) as u32;
                             let is_recipe =
                                 slug.contains("recipe") || display_name.contains("Recipe");
-                            entries.push(ItemCatalogEntry {
-                                id: ItemId(id_val),
-                                slug,
-                                display_name,
-                                cost,
-                                components: Vec::new(),
-                                is_recipe,
-                                is_consumable_drop: cost == 0 && !is_recipe,
-                            });
+                            let raw_components =
+                                extract_str_array_field(obj_slice, "\"components\"");
+                            staged.push((
+                                ItemCatalogEntry {
+                                    id: ItemId(id_val),
+                                    slug,
+                                    display_name,
+                                    cost,
+                                    components: Vec::new(),
+                                    is_recipe,
+                                    is_consumable_drop: cost == 0 && !is_recipe,
+                                },
+                                raw_components,
+                            ));
                         }
                     }
                     pos = next_pos;
@@ -1498,7 +1704,28 @@ pub fn parse_opendota_item_constants_json(json: &str) -> Vec<ItemCatalogEntry> {
         }
         pos = key_start + rel_end + 1;
     }
-    entries
+
+    let fallback_repo = SeededItemMetaRepository::new();
+    let mut slug_to_id = std::collections::HashMap::with_capacity(staged.len());
+    for (entry, _) in &staged {
+        slug_to_id.insert(entry.slug.to_ascii_lowercase(), entry.id);
+    }
+
+    staged
+        .into_iter()
+        .map(|(mut entry, raw_components)| {
+            entry.components = raw_components
+                .into_iter()
+                .filter_map(|comp_slug| {
+                    slug_to_id
+                        .get(&comp_slug.to_ascii_lowercase())
+                        .copied()
+                        .or_else(|| fallback_repo.item_by_slug(&comp_slug).map(|e| e.id))
+                })
+                .collect();
+            entry
+        })
+        .collect()
 }
 
 fn parse_stratz_item_constants_json(json: &str) -> Vec<ItemCatalogEntry> {
@@ -1785,4 +2012,96 @@ pub fn parse_opendota_item_timings_json(
         });
     }
     out
+}
+
+/// Parses STRATZ or OpenDota hero item stats JSON and groups rows by `HeroId`.
+fn parse_hero_item_stats_grouped_by_hero(
+    json: &str,
+    catalog: &SeededItemMetaRepository,
+) -> Vec<(HeroId, Vec<HeroItemStat>)> {
+    let mut grouped: std::collections::BTreeMap<u16, Vec<HeroItemStat>> =
+        std::collections::BTreeMap::new();
+
+    if json.contains("\"itemStartingPurchase\"") || json.contains("\"itemFullPurchase\"") {
+        let trimmed = json.trim_start();
+        if trimmed.starts_with('[') {
+            let bytes = trimmed.as_bytes();
+            let mut pos = 1usize;
+            while pos < bytes.len() {
+                match bytes[pos] {
+                    b']' => break,
+                    b'{' => {
+                        let Some((obj_slice, next_pos)) = extract_balanced_braces(trimmed, pos)
+                        else {
+                            break;
+                        };
+                        if let Some(hid) = extract_u64_field(obj_slice, "\"heroId\"")
+                            .or_else(|| extract_u64_field(obj_slice, "\"hero_id\""))
+                            .and_then(|v| u16::try_from(v).ok())
+                            .filter(|&v| v > 0)
+                        {
+                            let stats = parse_stratz_hero_item_purchase_json(obj_slice);
+                            if !stats.is_empty() {
+                                grouped.entry(hid).or_default().extend(stats);
+                            }
+                        }
+                        pos = next_pos;
+                    }
+                    _ => pos += 1,
+                }
+            }
+        } else {
+            let stats = parse_stratz_hero_item_purchase_json(json);
+            if !stats.is_empty() {
+                if let Some(hid) = extract_u64_field(json, "\"heroId\"")
+                    .or_else(|| extract_u64_field(json, "\"hero_id\""))
+                    .and_then(|v| u16::try_from(v).ok())
+                    .filter(|&v| v > 0)
+                {
+                    grouped.entry(hid).or_default().extend(stats);
+                }
+            }
+        }
+    }
+
+    if grouped.is_empty() && !has_nonempty_graphql_errors(json) {
+        for obj_chunk in json.split('{').skip(1) {
+            let Some(end) = obj_chunk.find('}') else {
+                continue;
+            };
+            let block = &obj_chunk[..end];
+            let Some(hid) = extract_u64_field(block, "\"hero_id\"")
+                .or_else(|| extract_u64_field(block, "\"heroId\""))
+                .and_then(|v| u16::try_from(v).ok())
+                .filter(|&v| v > 0)
+            else {
+                continue;
+            };
+            let Some(slug) = extract_str_field(block, "\"item\"") else {
+                continue;
+            };
+            let Some(entry) = catalog.item_by_slug(slug) else {
+                continue;
+            };
+            let time_secs = extract_i64_field(block, "\"time\"").unwrap_or(0).max(0);
+            let matches = extract_u64_or_quoted_field(block, "\"games\"").unwrap_or(0) as u32;
+            let wins = extract_u64_or_quoted_field(block, "\"wins\"").unwrap_or(0) as u32;
+            if matches == 0 {
+                continue;
+            }
+            let avg_time_mins = time_secs as f32 / 60.0;
+            grouped.entry(hid).or_default().push(HeroItemStat {
+                item_id: entry.id,
+                phase: phase_from_avg_mins(avg_time_mins),
+                avg_time_mins,
+                match_count: matches,
+                win_count: wins,
+            });
+        }
+    }
+
+    grouped
+        .into_iter()
+        .map(|(hid, stats)| (HeroId(hid), stats))
+        .collect()
 }
