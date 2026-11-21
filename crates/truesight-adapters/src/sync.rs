@@ -564,7 +564,7 @@ impl LocalCacheManager {
         }
     }
 
-    fn publish_staged_cache(
+    pub(crate) fn publish_staged_cache(
         &self,
         meta_json: Option<&str>,
         stratz_json: Option<&str>,
@@ -1162,13 +1162,12 @@ pub fn parse_stratz_with_synergy_json(json: &str) -> Vec<(HeroId, HeroId, f32, u
         let matches = extract_u64_field(block, "\"matchCount\"")
             .or_else(|| extract_u64_field(block, "\"matches\""))
             .unwrap_or(400) as u32;
-        let syn = if let Some(s) = extract_f32_field(block, "\"synergy\"")
-            .or_else(|| extract_f32_field(block, "\"with_synergy\""))
-        {
-            // STRATZ returns percentage points (e.g. 2.445 for +2.445%), while legacy
-            // synthetic test fixtures may pass small ratio deltas (|s| <= 0.15).
-            let scaled = if s.abs() > 0.15 { s / 100.0 } else { s };
-            scaled.clamp(-0.15, 0.15)
+        let syn = if let Some(s) = extract_f32_field(block, "\"synergy\"") {
+            // STRATZ always reports `"synergy"` in percentage points (-100..+100).
+            (s / 100.0).clamp(-0.15, 0.15)
+        } else if let Some(s) = extract_f32_field(block, "\"with_synergy\"") {
+            // Explicit probability-ratio field used by synthetic ratio fixtures.
+            s.clamp(-0.15, 0.15)
         } else if let Some(wins) = extract_u64_field(block, "\"wins\"")
             .or_else(|| extract_u64_field(block, "\"winCount\""))
         {
@@ -1186,17 +1185,41 @@ pub fn parse_stratz_with_synergy_json(json: &str) -> Vec<(HeroId, HeroId, f32, u
     rows
 }
 
-fn fetch_stratz_with_synergy_graphql(token: &str) -> Result<String, PortError> {
-    let auth_header = format!("Authorization: Bearer {token}");
+/// Fetches STRATZ `matchUp` synergy batches using `fetch_batch`, failing the entire refresh if
+/// any chunk fails or returns zero parseable synergy rows so partial responses never overwrite cache.
+pub(crate) fn fetch_stratz_with_synergy_batches_with<F>(
+    mut fetch_batch: F,
+) -> Result<String, PortError>
+where
+    F: FnMut(&[u16]) -> Result<String, PortError>,
+{
     let hero_ids: Vec<u16> = crate::snapshot_data::OPENDOTA_HERO_SNAPSHOT
         .iter()
         .map(|row| row.id)
         .collect();
     let mut responses = Vec::new();
-    let mut last_err = None;
     for chunk in hero_ids.chunks(32) {
+        let body = fetch_batch(chunk)?;
+        if parse_stratz_with_synergy_json(&body).is_empty() {
+            return Err(PortError(
+                "STRATZ GraphQL batch returned no parseable synergy rows".to_string(),
+            ));
+        }
+        responses.push(body);
+    }
+    if responses.is_empty() {
+        return Err(PortError(
+            "STRATZ GraphQL fetch returned no data".to_string(),
+        ));
+    }
+    Ok(format!("[{}]", responses.join(",")))
+}
+
+fn fetch_stratz_with_synergy_graphql(token: &str) -> Result<String, PortError> {
+    let auth_header = format!("Authorization: Bearer {token}");
+    fetch_stratz_with_synergy_batches_with(|chunk| {
         let payload = stratz_matchup_graphql_payload(chunk);
-        match run_curl(
+        run_curl(
             "https://api.stratz.com/graphql",
             &[
                 "-H",
@@ -1209,14 +1232,6 @@ fn fetch_stratz_with_synergy_graphql(token: &str) -> Result<String, PortError> {
                 &payload,
             ],
             "STRATZ GraphQL fetch",
-        ) {
-            Ok(body) => responses.push(body),
-            Err(err) => last_err = Some(err),
-        }
-    }
-    if responses.is_empty() {
-        return Err(last_err
-            .unwrap_or_else(|| PortError("STRATZ GraphQL fetch returned no data".to_string())));
-    }
-    Ok(format!("[{}]", responses.join(",")))
+        )
+    })
 }

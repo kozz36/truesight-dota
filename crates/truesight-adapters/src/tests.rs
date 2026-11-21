@@ -892,7 +892,7 @@ fn stratz_synergy_override_updates_matchup_matrix_while_preserving_symmetry() {
     use crate::sync::parse_stratz_with_synergy_json;
 
     let stratz_json = r#"[
-        {"heroId1": 1, "heroId2": 97, "synergy": 0.042, "matchCount": 12500}
+        {"heroId1": 1, "heroId2": 97, "synergy": 4.2, "matchCount": 12500}
     ]"#;
     let parsed = parse_stratz_with_synergy_json(stratz_json);
     assert_eq!(parsed.len(), 1);
@@ -4809,9 +4809,10 @@ fn parse_stratz_with_synergy_json_scales_percentage_points_and_preserves_ratio_c
         parsed[3].2
     );
 
-    // Backward compatibility with ratio-formatted synthetic fixtures where |s| <= 0.15
+    // Explicit probability-ratio field (`with_synergy`) is preserved without /100 scaling,
+    // whereas `"synergy"` is always STRATZ percentage points (e.g. 0.10 -> 0.001).
     let legacy_ratio_json =
-        r#"[{"heroId1": 1, "heroId2": 97, "synergy": 0.042, "matchCount": 12500}]"#;
+        r#"[{"heroId1": 1, "heroId2": 97, "with_synergy": 0.042, "matchCount": 12500}]"#;
     let legacy_parsed = parse_stratz_with_synergy_json(legacy_ratio_json);
     assert_eq!(legacy_parsed.len(), 1);
     assert!(
@@ -4819,4 +4820,83 @@ fn parse_stratz_with_synergy_json_scales_percentage_points_and_preserves_ratio_c
         "got {}",
         legacy_parsed[0].2
     );
+
+    let small_pct_json = r#"[{"heroId1": 1, "heroId2": 97, "synergy": 0.10, "matchCount": 12500}]"#;
+    let small_pct_parsed = parse_stratz_with_synergy_json(small_pct_json);
+    assert_eq!(small_pct_parsed.len(), 1);
+    assert!(
+        (small_pct_parsed[0].2 - 0.001).abs() < 1e-6,
+        "expected 0.10 percentage points to parse as 0.001, got {}",
+        small_pct_parsed[0].2
+    );
+}
+
+#[test]
+fn fetch_stratz_with_synergy_batches_fails_closed_and_preserves_existing_cache() {
+    use crate::sync::{
+        LocalCacheManager, fetch_stratz_with_synergy_batches_with, parse_stratz_with_synergy_json,
+    };
+    use truesight_core::ports::PortError;
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_stratz_partial_refresh_test_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let cache = LocalCacheManager::with_optional_account(tmp_dir.clone(), None);
+    let initial_complete =
+        r#"[{"heroId1": 1, "heroId2": 57, "synergy": 2.445, "matchCount": 3444}]"#;
+    cache
+        .publish_staged_cache(
+            None,
+            Some(initial_complete),
+            None,
+            None,
+            None,
+            1_800_000_000,
+        )
+        .expect("initial cache persist should succeed");
+
+    // Batch 1 succeeds, batch 2 fails with a transport error -> whole refresh must fail.
+    let mut call_idx = 0usize;
+    let err_res = fetch_stratz_with_synergy_batches_with(|_chunk| {
+        call_idx += 1;
+        if call_idx == 1 {
+            Ok(r#"{"data":{"heroStats":{"matchUp":[{"heroId":1,"with":[{"heroId1":1,"heroId2":97,"matchCount":1200,"synergy":3.5,"winCount":650}]}]}}}"#.to_string())
+        } else {
+            Err(PortError("simulated batch 2 timeout".to_string()))
+        }
+    });
+    assert!(
+        err_res.is_err(),
+        "partial batch failure must fail the entire STRATZ refresh"
+    );
+
+    // Batch 1 succeeds, batch 2 returns empty/unparseable JSON -> whole refresh must fail.
+    let mut empty_idx = 0usize;
+    let empty_res = fetch_stratz_with_synergy_batches_with(|_chunk| {
+        empty_idx += 1;
+        if empty_idx == 1 {
+            Ok(r#"{"data":{"heroStats":{"matchUp":[{"heroId":1,"with":[{"heroId1":1,"heroId2":97,"matchCount":1200,"synergy":3.5,"winCount":650}]}]}}}"#.to_string())
+        } else {
+            Ok("{}".to_string())
+        }
+    });
+    assert!(
+        empty_res.is_err(),
+        "empty/malformed batch response must fail the entire STRATZ refresh"
+    );
+
+    // Existing stratz_synergy.json cache must remain intact.
+    let cached_after = std::fs::read_to_string(tmp_dir.join("stratz_synergy.json"))
+        .expect("cached stratz_synergy.json should still exist");
+    assert_eq!(cached_after, initial_complete);
+    let parsed_cached = parse_stratz_with_synergy_json(&cached_after);
+    assert_eq!(parsed_cached.len(), 1);
+    assert!((parsed_cached[0].2 - 0.02445).abs() < 1e-5);
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
 }
