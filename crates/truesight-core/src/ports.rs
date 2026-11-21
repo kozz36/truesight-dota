@@ -1,4 +1,4 @@
-use crate::domain::{Bracket, Faction, HeroId, Role, Side};
+use crate::domain::{Bracket, Faction, HeroId, HeroItemStat, ItemCatalogEntry, ItemId, Role, Side};
 use crate::math::MatchupMatrix;
 use core::fmt;
 
@@ -7,6 +7,20 @@ pub trait StatsRepository {
     type Error: core::error::Error;
 
     fn load_matrix(&self, bracket: Bracket) -> Result<MatchupMatrix, Self::Error>;
+}
+
+/// Driven port for item catalog metadata and role/bracket hero item build statistics.
+pub trait ItemMetaRepository {
+    /// Looks up static catalog metadata (cost, components, recipe/drop flags) for an item.
+    fn item_catalog(&self, item_id: ItemId) -> Option<ItemCatalogEntry>;
+
+    /// Loads empirical item purchase statistics for a hero in a given role and medal bracket.
+    fn hero_item_stats(
+        &self,
+        hero_id: HeroId,
+        role: Role,
+        bracket: Bracket,
+    ) -> Result<Vec<HeroItemStat>, PortError>;
 }
 
 /// Driving/Driven port for live draft events (GSI game state, manual quick-pick, or Phase 2 vision).

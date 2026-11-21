@@ -750,3 +750,384 @@ fn composition_rules_cover_all_six_structural_cases() {
     ]);
     assert!((evaluate_team_composition(&p6, &m6) - 0.005).abs() < 1e-6);
 }
+
+// ---------------------------------------------------------------------------
+// Item-build recommender & counter-trait table tests (#67)
+// ---------------------------------------------------------------------------
+
+struct MockItemRepo {
+    catalog: Vec<crate::domain::ItemCatalogEntry>,
+    stats: Vec<crate::domain::HeroItemStat>,
+}
+
+impl crate::ports::ItemMetaRepository for MockItemRepo {
+    fn item_catalog(
+        &self,
+        item_id: crate::domain::ItemId,
+    ) -> Option<crate::domain::ItemCatalogEntry> {
+        self.catalog.iter().find(|e| e.id == item_id).cloned()
+    }
+
+    fn hero_item_stats(
+        &self,
+        _hero_id: HeroId,
+        _role: Role,
+        _bracket: crate::domain::Bracket,
+    ) -> Result<Vec<crate::domain::HeroItemStat>, crate::ports::PortError> {
+        Ok(self.stats.clone())
+    }
+}
+
+fn catalog_entry(
+    id: u16,
+    name: &str,
+    cost: u32,
+    components: &[u16],
+    is_recipe: bool,
+    is_consumable_drop: bool,
+) -> crate::domain::ItemCatalogEntry {
+    crate::domain::ItemCatalogEntry {
+        id: crate::domain::ItemId(id),
+        slug: name.to_lowercase().replace(' ', "_"),
+        display_name: name.to_string(),
+        cost,
+        components: components
+            .iter()
+            .copied()
+            .map(crate::domain::ItemId)
+            .collect(),
+        is_recipe,
+        is_consumable_drop,
+    }
+}
+
+fn item_stat(
+    id: u16,
+    phase: crate::domain::ItemPhase,
+    avg_time_mins: f32,
+    match_count: u32,
+    win_count: u32,
+) -> crate::domain::HeroItemStat {
+    crate::domain::HeroItemStat {
+        item_id: crate::domain::ItemId(id),
+        phase,
+        avg_time_mins,
+        match_count,
+        win_count,
+    }
+}
+
+#[test]
+fn counter_trait_table_is_consistent_and_patch_versioned() {
+    use crate::domain::{
+        COUNTER_TRAIT_DATA_TOML, COUNTER_TRAIT_TABLE_PATCH, COUNTER_TRAIT_TABLE_REVIEWED_AT,
+        CounterTrait, ItemId, all_referenced_counter_item_ids, counter_items_for_trait,
+        counter_trait_table_patch, counter_trait_table_reviewed_at, hero_counter_traits,
+    };
+
+    assert_eq!(COUNTER_TRAIT_TABLE_PATCH, "7.40");
+    assert_eq!(COUNTER_TRAIT_TABLE_REVIEWED_AT, "2026-11-21");
+    assert_eq!(counter_trait_table_patch(), COUNTER_TRAIT_TABLE_PATCH);
+    assert_eq!(
+        counter_trait_table_reviewed_at(),
+        COUNTER_TRAIT_TABLE_REVIEWED_AT
+    );
+    assert!(COUNTER_TRAIT_DATA_TOML.contains("patch = \"7.40\""));
+    assert!(COUNTER_TRAIT_DATA_TOML.contains("reviewed_at = \"2026-11-21\""));
+
+    let all_traits = [
+        CounterTrait::Evasion,
+        CounterTrait::HeavyMagicDisable,
+        CounterTrait::HighHealingRegen,
+        CounterTrait::EtherealGhostSave,
+        CounterTrait::CriticalPassives,
+        CounterTrait::IllusionsSummons,
+        CounterTrait::Invisibility,
+        CounterTrait::HighPhysicalBurst,
+    ];
+
+    let all_referenced = all_referenced_counter_item_ids();
+    for (idx, a) in all_referenced.iter().enumerate() {
+        for b in &all_referenced[idx + 1..] {
+            assert_ne!(
+                a, b,
+                "duplicate ItemId {a:?} in all_referenced_counter_item_ids"
+            );
+        }
+    }
+
+    for trait_kind in all_traits {
+        assert!(!trait_kind.label().is_empty());
+        let items = counter_items_for_trait(trait_kind);
+        assert!(
+            !items.is_empty(),
+            "trait {trait_kind:?} must map to at least one counter item"
+        );
+        for id in items {
+            assert!(
+                all_referenced.contains(id),
+                "counter item {id:?} missing from all_referenced_counter_item_ids"
+            );
+        }
+    }
+
+    let pa_traits = hero_counter_traits(HeroId(44));
+    assert!(pa_traits.contains(&CounterTrait::Evasion));
+    assert!(pa_traits.contains(&CounterTrait::CriticalPassives));
+    assert!(counter_items_for_trait(CounterTrait::Evasion).contains(&ItemId(135)));
+    assert!(counter_items_for_trait(CounterTrait::CriticalPassives).contains(&ItemId(249)));
+}
+
+#[test]
+fn recommend_item_build_is_deterministic_and_excludes_drops_and_recipes() {
+    use crate::domain::{Bracket, ItemId, ItemPhase};
+    use crate::math::recommend_item_build;
+
+    let repo = MockItemRepo {
+        catalog: vec![
+            catalog_entry(11, "Quelling Blade", 100, &[], false, false),
+            catalog_entry(63, "Power Treads", 1400, &[29, 25], false, false),
+            catalog_entry(147, "Manta Style", 4600, &[170, 20], false, false),
+            catalog_entry(4205, "Great Healing Lotus", 0, &[], false, true),
+            catalog_entry(999, "Manta Recipe", 500, &[], true, false),
+        ],
+        stats: vec![
+            item_stat(11, ItemPhase::Starting, 0.0, 900, 480),
+            item_stat(4205, ItemPhase::Early, 6.0, 1200, 700),
+            item_stat(999, ItemPhase::Core, 19.0, 1100, 620),
+            item_stat(63, ItemPhase::Early, 8.0, 800, 430),
+            item_stat(147, ItemPhase::Core, 20.0, 750, 420),
+        ],
+    };
+
+    let enemies = [None; 5];
+    let b1 = recommend_item_build(
+        &repo,
+        HeroId(1),
+        Role::Carry,
+        Bracket::Legend,
+        &enemies,
+        &[],
+        300,
+    )
+    .expect("build should succeed");
+    let b2 = recommend_item_build(
+        &repo,
+        HeroId(1),
+        Role::Carry,
+        Bracket::Legend,
+        &enemies,
+        &[],
+        300,
+    )
+    .expect("build should succeed");
+
+    assert_eq!(b1, b2);
+    assert_eq!(b1.starting_items, vec![ItemId(11)]);
+    assert!(
+        b1.steps
+            .iter()
+            .all(|s| s.item_id != ItemId(4205) && s.item_id != ItemId(999))
+    );
+    assert_eq!(
+        b1.steps.iter().map(|s| s.item_id).collect::<Vec<_>>(),
+        vec![ItemId(63), ItemId(147)]
+    );
+    assert_eq!(b1.next_unowned_index, Some(0));
+}
+
+#[test]
+fn recommend_item_build_marks_owned_and_advances_next_unowned_index() {
+    use crate::domain::{Bracket, ItemId, ItemPhase};
+    use crate::math::recommend_item_build;
+
+    let repo = MockItemRepo {
+        catalog: vec![
+            catalog_entry(63, "Power Treads", 1400, &[], false, false),
+            catalog_entry(147, "Manta Style", 4600, &[], false, false),
+            catalog_entry(139, "Butterfly", 4975, &[], false, false),
+        ],
+        stats: vec![
+            item_stat(63, ItemPhase::Early, 8.0, 800, 430),
+            item_stat(147, ItemPhase::Core, 20.0, 750, 420),
+            item_stat(139, ItemPhase::Late, 31.0, 600, 350),
+        ],
+    };
+
+    let enemies = [None; 5];
+    let b_one = recommend_item_build(
+        &repo,
+        HeroId(1),
+        Role::Carry,
+        Bracket::Ancient,
+        &enemies,
+        &[ItemId(63)],
+        900,
+    )
+    .unwrap();
+    assert!(b_one.steps[0].owned);
+    assert!(!b_one.steps[1].owned);
+    assert_eq!(b_one.next_unowned_index, Some(1));
+
+    let b_all = recommend_item_build(
+        &repo,
+        HeroId(1),
+        Role::Carry,
+        Bracket::Ancient,
+        &enemies,
+        &[ItemId(63), ItemId(147), ItemId(139)],
+        2400,
+    )
+    .unwrap();
+    assert!(b_all.steps.iter().all(|s| s.owned));
+    assert_eq!(b_all.next_unowned_index, None);
+}
+
+#[test]
+fn recommend_item_build_prioritizes_partially_built_items() {
+    use crate::domain::{Bracket, ItemId, ItemPhase};
+    use crate::math::recommend_item_build;
+
+    let repo = MockItemRepo {
+        catalog: vec![
+            catalog_entry(145, "Battle Fury", 4100, &[65, 69], false, false),
+            catalog_entry(158, "Mjollnir", 5500, &[166, 55], false, false),
+        ],
+        stats: vec![
+            item_stat(145, ItemPhase::Core, 16.0, 500, 265),
+            item_stat(158, ItemPhase::Core, 16.0, 500, 265),
+        ],
+    };
+
+    let enemies = [None; 5];
+    // Player owns Hyperstone (55), a component of Mjollnir (158).
+    let build = recommend_item_build(
+        &repo,
+        HeroId(1),
+        Role::Carry,
+        Bracket::Divine,
+        &enemies,
+        &[ItemId(55)],
+        700,
+    )
+    .unwrap();
+
+    assert_eq!(build.steps[0].item_id, ItemId(158));
+    assert_eq!(build.steps[0].owned_components, 1);
+    assert_eq!(build.steps[0].total_components, 2);
+    assert_eq!(build.steps[0].variants[0].item_id, ItemId(145));
+    assert!(build.steps[0].score > build.steps[0].variants[0].score);
+}
+
+#[test]
+fn recommend_item_build_base_meta_vs_enemy_counter_traits() {
+    use crate::domain::{Bracket, CounterTrait, ItemId, ItemPhase};
+    use crate::math::recommend_item_build;
+
+    let repo = MockItemRepo {
+        catalog: vec![
+            catalog_entry(63, "Power Treads", 1400, &[], false, false),
+            catalog_entry(147, "Manta Style", 4600, &[], false, false),
+            catalog_entry(139, "Butterfly", 4975, &[], false, false),
+            catalog_entry(135, "Monkey King Bar", 4700, &[], false, false),
+            catalog_entry(249, "Silver Edge", 5450, &[], false, false),
+        ],
+        stats: vec![
+            item_stat(63, ItemPhase::Early, 8.0, 900, 480),
+            item_stat(147, ItemPhase::Core, 20.0, 850, 470),
+            item_stat(139, ItemPhase::Late, 30.0, 700, 390),
+            item_stat(135, ItemPhase::Situational, 29.0, 220, 112),
+            item_stat(249, ItemPhase::Situational, 28.0, 200, 102),
+        ],
+    };
+
+    let no_counter_enemies = [Some(HeroId(1)), None, None, None, None];
+    let base_build = recommend_item_build(
+        &repo,
+        HeroId(1),
+        Role::Carry,
+        Bracket::Immortal,
+        &no_counter_enemies,
+        &[],
+        1200,
+    )
+    .unwrap();
+    assert!(base_build.steps.iter().all(|s| s.counter_trait.is_none()));
+    let base_mkb_score = base_build
+        .steps
+        .iter()
+        .find(|s| s.item_id == ItemId(135))
+        .map(|s| s.score)
+        .unwrap_or(0.0);
+
+    // Enemy Phantom Assassin (44) brings Evasion + CriticalPassives + HighPhysicalBurst.
+    let pa_enemies = [Some(HeroId(44)), None, None, None, None];
+    let counter_build = recommend_item_build(
+        &repo,
+        HeroId(1),
+        Role::Carry,
+        Bracket::Immortal,
+        &pa_enemies,
+        &[],
+        1200,
+    )
+    .unwrap();
+
+    let mkb_step = counter_build
+        .steps
+        .iter()
+        .find(|s| s.item_id == ItemId(135))
+        .expect("MKB should be promoted into build against PA");
+    assert_eq!(mkb_step.counter_trait, Some(CounterTrait::Evasion));
+    assert!(mkb_step.score > base_mkb_score);
+
+    let silver_edge_present = counter_build.steps.iter().any(|s| {
+        s.item_id == ItemId(249) && s.counter_trait == Some(CounterTrait::CriticalPassives)
+    }) || counter_build.steps.iter().any(|s| {
+        s.variants.iter().any(|v| {
+            v.item_id == ItemId(249) && v.counter_trait == Some(CounterTrait::CriticalPassives)
+        })
+    });
+    assert!(
+        silver_edge_present,
+        "Silver Edge should promote into build/variants against PA"
+    );
+}
+
+#[test]
+fn recommend_item_build_classifies_same_phase_variants_with_fewer_than_six_candidates() {
+    use crate::domain::{Bracket, ItemId, ItemPhase};
+    use crate::math::recommend_item_build;
+
+    let repo = MockItemRepo {
+        catalog: vec![
+            catalog_entry(160, "Eye of Skadi", 5300, &[], false, false),
+            catalog_entry(139, "Butterfly", 4975, &[], false, false),
+        ],
+        stats: vec![
+            item_stat(160, ItemPhase::Late, 32.0, 600, 340),
+            item_stat(139, ItemPhase::Late, 31.0, 600, 340),
+        ],
+    };
+
+    let enemies = [None; 5];
+    let build = recommend_item_build(
+        &repo,
+        HeroId(1),
+        Role::Carry,
+        Bracket::Immortal,
+        &enemies,
+        &[],
+        1500,
+    )
+    .expect("build should succeed");
+
+    assert_eq!(
+        build.steps.len(),
+        1,
+        "two same-phase equal-score alternatives must collapse into 1 primary step + 1 variant"
+    );
+    assert_eq!(build.steps[0].item_id, ItemId(139));
+    assert_eq!(build.steps[0].variants.len(), 1);
+    assert_eq!(build.steps[0].variants[0].item_id, ItemId(160));
+}

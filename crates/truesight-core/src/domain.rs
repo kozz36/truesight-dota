@@ -1,4 +1,5 @@
 use core::fmt;
+use std::sync::OnceLock;
 
 pub const MAX_HEROES: usize = 160;
 pub const TEAM_SIZE: usize = 5;
@@ -351,3 +352,340 @@ impl fmt::Display for DomainError {
 }
 
 impl core::error::Error for DomainError {}
+
+/// Compact zero-cost identifier for a Dota 2 item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ItemId(pub u16);
+
+/// Game phase bucket for a recommended item build step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ItemPhase {
+    Starting,
+    Early,
+    Core,
+    Late,
+    Situational,
+}
+
+/// Tactical enemy mechanic or threat countered by specific item choices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CounterTrait {
+    Evasion,
+    HeavyMagicDisable,
+    HighHealingRegen,
+    EtherealGhostSave,
+    CriticalPassives,
+    IllusionsSummons,
+    Invisibility,
+    HighPhysicalBurst,
+}
+
+impl CounterTrait {
+    /// All counter-trait variants in canonical index order.
+    pub const ALL: [Self; 8] = [
+        Self::Evasion,
+        Self::HeavyMagicDisable,
+        Self::HighHealingRegen,
+        Self::EtherealGhostSave,
+        Self::CriticalPassives,
+        Self::IllusionsSummons,
+        Self::Invisibility,
+        Self::HighPhysicalBurst,
+    ];
+
+    /// Human-readable short label for UI and CLI display.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Evasion => "Evasion",
+            Self::HeavyMagicDisable => "Heavy Magic / Disable",
+            Self::HighHealingRegen => "High Healing / Regen",
+            Self::EtherealGhostSave => "Ethereal / Ghost Save",
+            Self::CriticalPassives => "Critical Passives",
+            Self::IllusionsSummons => "Illusions / Summons",
+            Self::Invisibility => "Invisibility",
+            Self::HighPhysicalBurst => "High Physical Burst",
+        }
+    }
+
+    #[inline]
+    const fn index(self) -> usize {
+        match self {
+            Self::Evasion => 0,
+            Self::HeavyMagicDisable => 1,
+            Self::HighHealingRegen => 2,
+            Self::EtherealGhostSave => 3,
+            Self::CriticalPassives => 4,
+            Self::IllusionsSummons => 5,
+            Self::Invisibility => 6,
+            Self::HighPhysicalBurst => 7,
+        }
+    }
+
+    /// Parses a snake_case slug from `data/counter_traits.toml` into a `CounterTrait`.
+    pub fn from_slug(slug: &str) -> Option<Self> {
+        match slug {
+            "evasion" => Some(Self::Evasion),
+            "heavy_magic_disable" => Some(Self::HeavyMagicDisable),
+            "high_healing_regen" => Some(Self::HighHealingRegen),
+            "ethereal_ghost_save" => Some(Self::EtherealGhostSave),
+            "critical_passives" => Some(Self::CriticalPassives),
+            "illusions_summons" => Some(Self::IllusionsSummons),
+            "invisibility" => Some(Self::Invisibility),
+            "high_physical_burst" => Some(Self::HighPhysicalBurst),
+            _ => None,
+        }
+    }
+}
+
+/// Static catalog metadata for a Dota 2 item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemCatalogEntry {
+    pub id: ItemId,
+    pub slug: String,
+    pub display_name: String,
+    pub cost: u32,
+    pub components: Vec<ItemId>,
+    pub is_recipe: bool,
+    pub is_consumable_drop: bool,
+}
+
+/// Empirical purchase statistics for a hero item in a specific role and bracket.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HeroItemStat {
+    pub item_id: ItemId,
+    pub phase: ItemPhase,
+    pub avg_time_mins: f32,
+    pub match_count: u32,
+    pub win_count: u32,
+}
+
+/// Alternative item option within the same phase and score tolerance of a primary step.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BuildVariant {
+    pub item_id: ItemId,
+    pub score: f32,
+    pub avg_time_mins: f32,
+    pub counter_trait: Option<CounterTrait>,
+}
+
+/// Single primary step in a sequential item build recommendation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BuildStep {
+    pub item_id: ItemId,
+    pub phase: ItemPhase,
+    pub avg_time_mins: f32,
+    pub score: f32,
+    pub owned: bool,
+    pub owned_components: usize,
+    pub total_components: usize,
+    pub counter_trait: Option<CounterTrait>,
+    pub variants: Vec<BuildVariant>,
+}
+
+/// Complete recommended item progression for a hero, role, bracket, and enemy matchup.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecommendedBuild {
+    pub target_patch: &'static str,
+    pub hero_id: HeroId,
+    pub role: Role,
+    pub bracket: Bracket,
+    pub starting_items: Vec<ItemId>,
+    pub steps: Vec<BuildStep>,
+    pub next_unowned_index: Option<usize>,
+}
+
+/// Compile-time embedded contents of the patch-versioned counter-trait data file.
+pub const COUNTER_TRAIT_DATA_TOML: &str = include_str!("../../../data/counter_traits.toml");
+
+/// Dota 2 patch version against which the curated counter-trait tables are maintained.
+pub const COUNTER_TRAIT_TABLE_PATCH: &str = "7.40";
+
+/// ISO-8601 review date of the curated counter-trait tables in `data/counter_traits.toml`.
+pub const COUNTER_TRAIT_TABLE_REVIEWED_AT: &str = "2026-11-21";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CounterTraitTable {
+    patch: String,
+    reviewed_at: String,
+    traits: [Vec<ItemId>; 8],
+    heroes: Vec<(u16, Vec<CounterTrait>)>,
+    all_referenced_items: Vec<ItemId>,
+}
+
+impl CounterTraitTable {
+    fn empty() -> Self {
+        Self {
+            patch: String::new(),
+            reviewed_at: String::new(),
+            traits: Default::default(),
+            heroes: Vec::new(),
+            all_referenced_items: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TomlSection {
+    Root,
+    Traits,
+    Heroes,
+}
+
+fn strip_toml_comment(line: &str) -> &str {
+    let mut in_quotes = false;
+    let mut escaped = false;
+    for (idx, ch) in line.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && in_quotes {
+            escaped = true;
+            continue;
+        }
+        if ch == '"' {
+            in_quotes = !in_quotes;
+        } else if ch == '#' && !in_quotes {
+            return &line[..idx];
+        }
+    }
+    line
+}
+
+fn parse_quoted_str(raw: &str) -> Result<String, &'static str> {
+    let trimmed = raw.trim();
+    let inner = trimmed
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .ok_or("expected double-quoted TOML string")?;
+    Ok(inner.to_owned())
+}
+
+fn parse_array_elements(raw: &str) -> Result<Vec<&str>, &'static str> {
+    let trimmed = raw.trim();
+    let inner = trimmed
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .ok_or("expected TOML array `[...]`")?;
+    let mut items = Vec::new();
+    for part in inner.split(',') {
+        let token = part.trim();
+        if !token.is_empty() {
+            items.push(token);
+        }
+    }
+    Ok(items)
+}
+
+fn parse_counter_trait_toml(raw: &str) -> Result<CounterTraitTable, &'static str> {
+    let mut table = CounterTraitTable::empty();
+    let mut section = TomlSection::Root;
+
+    for raw_line in raw.lines() {
+        let line = strip_toml_comment(raw_line).trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            let header = line[1..line.len() - 1].trim();
+            section = match header {
+                "traits" => TomlSection::Traits,
+                "heroes" => TomlSection::Heroes,
+                _ => return Err("unknown TOML section in counter_traits.toml"),
+            };
+            continue;
+        }
+        let (key, value) = line
+            .split_once('=')
+            .ok_or("expected `key = value` in counter_traits.toml")?;
+        let key = key.trim();
+        let value = value.trim();
+
+        match section {
+            TomlSection::Root => match key {
+                "patch" => table.patch = parse_quoted_str(value)?,
+                "reviewed_at" => table.reviewed_at = parse_quoted_str(value)?,
+                _ => return Err("unknown root key in counter_traits.toml"),
+            },
+            TomlSection::Traits => {
+                let trait_kind =
+                    CounterTrait::from_slug(key).ok_or("unknown counter trait slug in [traits]")?;
+                let mut items = Vec::new();
+                for token in parse_array_elements(value)? {
+                    let id: u16 = token
+                        .parse()
+                        .map_err(|_| "invalid item ID integer in [traits]")?;
+                    items.push(ItemId(id));
+                }
+                table.traits[trait_kind.index()] = items;
+            }
+            TomlSection::Heroes => {
+                let hero_id: u16 = key
+                    .parse()
+                    .map_err(|_| "invalid hero ID integer in [heroes]")?;
+                let mut traits = Vec::new();
+                for token in parse_array_elements(value)? {
+                    let slug = parse_quoted_str(token)?;
+                    let trait_kind = CounterTrait::from_slug(&slug)
+                        .ok_or("unknown counter trait slug in [heroes]")?;
+                    traits.push(trait_kind);
+                }
+                table.heroes.push((hero_id, traits));
+            }
+        }
+    }
+
+    if table.patch.is_empty() || table.reviewed_at.is_empty() {
+        return Err("counter_traits.toml must define non-empty `patch` and `reviewed_at`");
+    }
+
+    table.heroes.sort_unstable_by_key(|(id, _)| *id);
+
+    let mut all_items: Vec<ItemId> = table
+        .traits
+        .iter()
+        .flat_map(|items| items.iter().copied())
+        .collect();
+    all_items.sort_unstable();
+    all_items.dedup();
+    table.all_referenced_items = all_items;
+
+    Ok(table)
+}
+
+fn counter_trait_table() -> &'static CounterTraitTable {
+    static TABLE: OnceLock<CounterTraitTable> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        parse_counter_trait_toml(COUNTER_TRAIT_DATA_TOML)
+            .unwrap_or_else(|_| CounterTraitTable::empty())
+    })
+}
+
+/// Returns the patch string parsed from `data/counter_traits.toml`.
+pub fn counter_trait_table_patch() -> &'static str {
+    counter_trait_table().patch.as_str()
+}
+
+/// Returns the ISO-8601 review date parsed from `data/counter_traits.toml`.
+pub fn counter_trait_table_reviewed_at() -> &'static str {
+    counter_trait_table().reviewed_at.as_str()
+}
+
+/// Maps a Dota 2 hero ID to the tactical counter traits they present to opponents.
+pub fn hero_counter_traits(hero_id: HeroId) -> &'static [CounterTrait] {
+    let heroes = &counter_trait_table().heroes;
+    match heroes.binary_search_by_key(&hero_id.0, |(id, _)| *id) {
+        Ok(idx) => heroes[idx].1.as_slice(),
+        Err(_) => &[],
+    }
+}
+
+/// Maps a counter trait to canonical OpenDota/STRATZ item IDs that answer it.
+pub fn counter_items_for_trait(trait_kind: CounterTrait) -> &'static [ItemId] {
+    counter_trait_table().traits[trait_kind.index()].as_slice()
+}
+
+/// Deduplicated slice of all item IDs referenced by `counter_items_for_trait` for CI catalog validation.
+pub fn all_referenced_counter_item_ids() -> &'static [ItemId] {
+    counter_trait_table().all_referenced_items.as_slice()
+}
