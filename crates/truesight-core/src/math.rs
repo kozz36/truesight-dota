@@ -1,7 +1,8 @@
 use crate::domain::{
     Bracket, BuildStep, BuildVariant, CounterTrait, DomainError, DraftPick, DraftState, HeroId,
-    HeroItemStat, HeroProfile, ItemId, ItemPhase, MAX_HEROES, PairStats, RecommendedBuild, Role,
-    TEAM_SIZE, counter_items_for_trait, counter_trait_table_patch, hero_counter_traits,
+    HeroItemStat, HeroProfile, ItemId, ItemPhase, MAX_HEROES, OptionalBuildItem, PairStats,
+    RecommendedBuild, Role, TEAM_SIZE, counter_items_for_trait, counter_trait_table_patch,
+    hero_counter_traits, is_counter_item_eligible_for_role,
 };
 use crate::ports::{ItemMetaRepository, PortError};
 
@@ -604,8 +605,18 @@ const ITEM_VARIANT_TIME_WINDOW_MINS: f32 = 6.0;
 /// Maximum number of primary progression steps in a recommended `[item 1] > [item 2] > ...` bar.
 const MAX_PRIMARY_BUILD_STEPS: usize = 6;
 
+/// Maximum number of same-phase alternative variants shown beneath one primary step.
+const MAX_VARIANTS_PER_STEP: usize = 3;
+
+/// Maximum number of optional/counter items surfaced in the separate Optional section.
+const MAX_OPTIONAL_BUILD_ITEMS: usize = 6;
+
 /// Pure, deterministic item-build recommender combining empirical role/bracket item stats,
 /// component completion state, and patch-versioned enemy counter-trait bonuses.
+///
+/// Timed core progression (`Early`, `Core`, `Late`) is separated strictly from role-filtered
+/// enemy counter-trait suggestions (`optional_items`) so situational items like Gem/Dust/Pipe
+/// never displace core hero builds or leak carry/offlane items onto unrelated roles.
 pub fn recommend_item_build(
     repo: &dyn ItemMetaRepository,
     hero_id: HeroId,
@@ -637,12 +648,31 @@ pub fn recommend_item_build(
     }
 
     let mut starting: Vec<HeroItemStat> = Vec::new();
-    let mut progression_stats: Vec<HeroItemStat> = Vec::new();
+    let mut timed_core_stats: Vec<HeroItemStat> = Vec::new();
+    let mut situational_stats: Vec<HeroItemStat> = Vec::new();
     for stat in deduped {
-        if stat.phase == ItemPhase::Starting {
-            starting.push(stat);
-        } else {
-            progression_stats.push(stat);
+        match stat.phase {
+            ItemPhase::Starting => starting.push(stat),
+            ItemPhase::Early | ItemPhase::Core | ItemPhase::Late => {
+                // Detection items must never displace timed progression steps; route role-eligible
+                // ones to Optional/Counters, and reject role-ineligible synced counter items.
+                if matches!(stat.item_id.0, 30 | 40 | 43) {
+                    if is_counter_item_eligible_for_role(stat.item_id, role) {
+                        situational_stats.push(HeroItemStat {
+                            phase: ItemPhase::Situational,
+                            ..stat
+                        });
+                    }
+                    continue;
+                }
+                let is_counter_item =
+                    crate::domain::all_referenced_counter_item_ids().contains(&stat.item_id);
+                if is_counter_item && !is_counter_item_eligible_for_role(stat.item_id, role) {
+                    continue;
+                }
+                timed_core_stats.push(stat);
+            }
+            ItemPhase::Situational => situational_stats.push(stat),
         }
     }
 
@@ -651,10 +681,10 @@ pub fn recommend_item_build(
             .cmp(&a.match_count)
             .then_with(|| a.item_id.cmp(&b.item_id))
     });
-    let starting_items: Vec<ItemId> = starting.into_iter().map(|s| s.item_id).collect();
+    let starting_items: Vec<ItemId> = starting.into_iter().take(5).map(|s| s.item_id).collect();
 
-    // Score each progression candidate deterministically.
-    let mut scored: Vec<BuildStep> = progression_stats
+    // Score each timed progression candidate (`Early`, `Core`, `Late`) deterministically.
+    let mut scored: Vec<BuildStep> = timed_core_stats
         .into_iter()
         .map(|stat| {
             let owned = owned_items.contains(&stat.item_id);
@@ -697,7 +727,7 @@ pub fn recommend_item_build(
     });
 
     // Classify same-phase alternatives into variants BEFORE applying MAX_PRIMARY_BUILD_STEPS,
-    // so even with fewer than 6 candidates, competing same-phase alternatives collapse into 1 step.
+    // so competing same-phase alternatives collapse into 1 primary step + compact variants.
     let mut clustered: Vec<BuildStep> = Vec::with_capacity(scored.len());
     let mut unowned_candidates: Vec<BuildStep> = Vec::with_capacity(scored.len());
     for step in scored {
@@ -726,7 +756,7 @@ pub fn recommend_item_build(
     }
 
     // Select primary steps (always keeping owned items, capping at MAX_PRIMARY_BUILD_STEPS
-    // with up to 2 per phase on the first pass so the bar spans Early -> Core -> Late).
+    // with up to 2 per timed phase so Early -> Core -> Late columns stay populated).
     let mut is_primary = vec![false; clustered.len()];
     let mut primary_count = 0_usize;
     let mut phase_counts = [0_usize; 5];
@@ -773,7 +803,7 @@ pub fn recommend_item_build(
         }
     }
 
-    // Attach any remaining unchosen primary steps as variants if within ITEM_VARIANT_SCORE_EPSILON.
+    // Attach remaining unchosen primary steps as variants if within ITEM_VARIANT_SCORE_EPSILON.
     for cand in remainder {
         if let Some(step) = steps.iter_mut().find(|step| {
             step.phase == cand.phase
@@ -794,6 +824,7 @@ pub fn recommend_item_build(
                 .total_cmp(&a.score)
                 .then_with(|| a.item_id.cmp(&b.item_id))
         });
+        step.variants.truncate(MAX_VARIANTS_PER_STEP);
     }
 
     // Order primary build sequence by effective timing window.
@@ -805,6 +836,70 @@ pub fn recommend_item_build(
             .then_with(|| a.item_id.cmp(&b.item_id))
     });
 
+    // Build separate role-filtered Optional / Counters section (never shown if no enemy trait matches).
+    let mut optional_candidates: Vec<OptionalBuildItem> = Vec::new();
+    for stat in situational_stats {
+        let already_in_core = starting_items.contains(&stat.item_id)
+            || steps.iter().any(|s| {
+                s.item_id == stat.item_id || s.variants.iter().any(|v| v.item_id == stat.item_id)
+            });
+        if already_in_core {
+            continue;
+        }
+        let owned = owned_items.contains(&stat.item_id);
+        let (matching_enemy_traits, counter_trait) =
+            evaluate_enemy_counter_traits(stat.item_id, enemies);
+        if !owned
+            && (matching_enemy_traits == 0
+                || !is_counter_item_eligible_for_role(stat.item_id, role))
+        {
+            continue;
+        }
+        let (owned_components, total_components) =
+            count_owned_components(repo, stat.item_id, owned_items);
+        let component_bonus = if !owned && total_components > 0 {
+            0.06 * (owned_components as f32 / total_components as f32)
+        } else {
+            0.0
+        };
+        let shrunk_wr = (stat.win_count as f32 + 30.0 * 0.50) / (stat.match_count as f32 + 30.0);
+        let volume_score = 0.02 * (1.0 + stat.match_count as f32).ln();
+        let counter_bonus = 0.09 * (matching_enemy_traits as f32);
+        let score = shrunk_wr + volume_score + component_bonus + counter_bonus;
+        optional_candidates.push(OptionalBuildItem {
+            item_id: stat.item_id,
+            avg_time_mins: stat.avg_time_mins,
+            score,
+            owned,
+            owned_components,
+            total_components,
+            counter_trait,
+        });
+    }
+    optional_candidates.sort_by(|a, b| {
+        b.owned
+            .cmp(&a.owned)
+            .then_with(|| b.score.total_cmp(&a.score))
+            .then_with(|| a.avg_time_mins.total_cmp(&b.avg_time_mins))
+            .then_with(|| a.item_id.cmp(&b.item_id))
+    });
+
+    // Keep at most 2 detection items (e.g. Dust + Sentry/Gem) so invisibility doesn't flood Optional.
+    let mut invis_count = 0_usize;
+    let mut optional_items: Vec<OptionalBuildItem> = Vec::with_capacity(MAX_OPTIONAL_BUILD_ITEMS);
+    for item in optional_candidates {
+        if optional_items.len() >= MAX_OPTIONAL_BUILD_ITEMS {
+            break;
+        }
+        if item.counter_trait == Some(CounterTrait::Invisibility) && !item.owned {
+            if invis_count >= 2 {
+                continue;
+            }
+            invis_count += 1;
+        }
+        optional_items.push(item);
+    }
+
     let next_unowned_index = steps.iter().position(|s| !s.owned);
 
     Ok(RecommendedBuild {
@@ -814,6 +909,7 @@ pub fn recommend_item_build(
         bracket,
         starting_items,
         steps,
+        optional_items,
         next_unowned_index,
     })
 }

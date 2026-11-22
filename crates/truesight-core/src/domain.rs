@@ -482,6 +482,18 @@ pub struct BuildStep {
     pub variants: Vec<BuildVariant>,
 }
 
+/// Situational or enemy-counter item presented separately from the timed core progression.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OptionalBuildItem {
+    pub item_id: ItemId,
+    pub avg_time_mins: f32,
+    pub score: f32,
+    pub owned: bool,
+    pub owned_components: usize,
+    pub total_components: usize,
+    pub counter_trait: Option<CounterTrait>,
+}
+
 /// Complete recommended item progression for a hero, role, bracket, and enemy matchup.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecommendedBuild {
@@ -491,7 +503,37 @@ pub struct RecommendedBuild {
     pub bracket: Bracket,
     pub starting_items: Vec<ItemId>,
     pub steps: Vec<BuildStep>,
+    pub optional_items: Vec<OptionalBuildItem>,
     pub next_unowned_index: Option<usize>,
+}
+
+/// Returns whether a counter-trait item makes sense for `role` so carries are not shown
+/// team-aura utility (e.g. Pipe) and supports are not shown carry DPS items (e.g. Battle Fury / MKB).
+#[must_use]
+pub const fn is_counter_item_eligible_for_role(item_id: ItemId, role: Role) -> bool {
+    match item_id.0 {
+        // Carry / semi-carry DPS & anti-evasion/passive damage items
+        145 => matches!(role, Role::Carry),
+        135 | 158 | 160 | 225 | 249 | 250 => matches!(role, Role::Carry | Role::Mid),
+        // Core teamfight BKB & armor/anti-heal scaling
+        112 => matches!(role, Role::Carry | Role::Offlane),
+        116 => matches!(role, Role::Carry | Role::Mid | Role::Offlane),
+        119 => matches!(role, Role::Mid | Role::Offlane),
+        // Offlane team mitigation & initiation/utility
+        90 | 242 => matches!(role, Role::Offlane),
+        210 => matches!(role, Role::Offlane | Role::SoftSupport),
+        // Support & utility aura/dispel/heal-reduction items
+        226 => matches!(role, Role::Offlane | Role::SoftSupport | Role::HardSupport),
+        267 => matches!(
+            role,
+            Role::Mid | Role::Offlane | Role::SoftSupport | Role::HardSupport
+        ),
+        // Detection items: Dust for active gankers/cores, Gem for frontline/supports, Sentry for supports
+        40 => true,
+        30 => matches!(role, Role::Offlane | Role::SoftSupport | Role::HardSupport),
+        43 => matches!(role, Role::SoftSupport | Role::HardSupport),
+        _ => true,
+    }
 }
 
 /// Compile-time embedded contents of the patch-versioned counter-trait data file.
