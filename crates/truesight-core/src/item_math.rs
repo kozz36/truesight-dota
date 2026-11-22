@@ -160,9 +160,14 @@ pub fn recommend_item_build(
             let volume_score = 0.06 * (1.0 + stat.match_count as f32).ln();
             let score = shrunk_wr + volume_score + component_bonus + counter_bonus;
 
+            let step_phase = if is_early_boots(stat.item_id) && stat.avg_time_mins <= 16.0 {
+                ItemPhase::Early
+            } else {
+                stat.phase
+            };
             BuildStep {
                 item_id: stat.item_id,
-                phase: stat.phase,
+                phase: step_phase,
                 avg_time_mins: stat.avg_time_mins,
                 score,
                 owned,
@@ -194,11 +199,22 @@ pub fn recommend_item_build(
     }
 
     for cand in unowned_candidates {
-        if let Some(primary) = clustered.iter_mut().find(|step| {
-            step.phase == cand.phase
-                && (step.score - cand.score).abs() <= ITEM_VARIANT_SCORE_EPSILON
-                && (step.avg_time_mins - cand.avg_time_mins).abs() <= ITEM_VARIANT_TIME_WINDOW_MINS
-        }) {
+        let matches_boot = |step: &BuildStep| {
+            is_early_boots(step.item_id)
+                || (is_any_boots(step.item_id)
+                    && (step.phase == cand.phase || step.phase == ItemPhase::Early))
+        };
+        let matched = if is_early_boots(cand.item_id) && clustered.iter().any(matches_boot) {
+            clustered.iter_mut().find(|step| matches_boot(step))
+        } else {
+            clustered.iter_mut().find(|step| {
+                step.phase == cand.phase
+                    && (step.score - cand.score).abs() <= ITEM_VARIANT_SCORE_EPSILON
+                    && (step.avg_time_mins - cand.avg_time_mins).abs()
+                        <= ITEM_VARIANT_TIME_WINDOW_MINS
+            })
+        };
+        if let Some(primary) = matched {
             primary.variants.push(BuildVariant {
                 item_id: cand.item_id,
                 score: cand.score,
@@ -471,6 +487,16 @@ fn effective_step_time(step: &BuildStep, game_mins: f32) -> f32 {
         0.0
     };
     step.avg_time_mins - counter_pull - component_pull - overdue_pull
+}
+
+#[inline]
+const fn is_early_boots(item_id: ItemId) -> bool {
+    matches!(item_id.0, 50 | 63 | 180 | 214)
+}
+
+#[inline]
+const fn is_any_boots(item_id: ItemId) -> bool {
+    matches!(item_id.0, 48 | 50 | 63 | 180 | 214 | 220 | 231 | 931)
 }
 
 #[inline]

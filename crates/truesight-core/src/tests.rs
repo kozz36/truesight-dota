@@ -1549,3 +1549,117 @@ fn recommend_item_build_suppresses_tiny_sample_noise_and_redundant_subcomponents
         build.steps
     );
 }
+
+#[test]
+fn recommend_item_build_groups_mutually_exclusive_early_boots_as_variants() {
+    use crate::domain::{Bracket, ItemId, ItemPhase};
+    use crate::math::recommend_item_build;
+
+    let enemies = [None; 5];
+
+    // 1. High-gap Power Treads (700) vs Phase Boots (120) -> 1 Early boot step with variant.
+    let carry_repo = MockItemRepo {
+        catalog: vec![
+            catalog_entry(63, "Power Treads", 1400, &[], false, false),
+            catalog_entry(50, "Phase Boots", 1450, &[], false, false),
+            catalog_entry(168, "Desolator", 3500, &[], false, false),
+        ],
+        stats: vec![
+            item_stat(63, ItemPhase::Early, 8.0, 700, 380),
+            item_stat(50, ItemPhase::Early, 8.5, 120, 55),
+            item_stat(168, ItemPhase::Core, 20.0, 500, 275),
+        ],
+    };
+    let carry_build = recommend_item_build(
+        &carry_repo,
+        HeroId(32),
+        Role::Carry,
+        Bracket::Ancient,
+        &enemies,
+        &[],
+        600,
+    )
+    .unwrap();
+    let early_boot_primaries: Vec<_> = carry_build
+        .steps
+        .iter()
+        .filter(|s| matches!(s.item_id.0, 50 | 63 | 180 | 214))
+        .collect();
+    assert_eq!(
+        early_boot_primaries.len(),
+        1,
+        "mutually exclusive Early boots must collapse into 1 primary step: {:?}",
+        carry_build.steps
+    );
+    assert_eq!(early_boot_primaries[0].item_id, ItemId(63));
+    assert!(
+        early_boot_primaries[0]
+            .variants
+            .iter()
+            .any(|v| v.item_id == ItemId(50)),
+        "Phase Boots must attach as variant of Power Treads: {:?}",
+        early_boot_primaries[0].variants
+    );
+
+    // 2. Tranquil Boots (Early 7.5m) vs Arcane Boots (Core 13m) -> collapses into 1 primary boot.
+    let support_repo = MockItemRepo {
+        catalog: vec![
+            catalog_entry(180, "Arcane Boots", 1500, &[], false, false),
+            catalog_entry(214, "Tranquil Boots", 900, &[], false, false),
+            catalog_entry(254, "Glimmer Cape", 2150, &[], false, false),
+        ],
+        stats: vec![
+            item_stat(180, ItemPhase::Core, 13.0, 420, 230),
+            item_stat(214, ItemPhase::Early, 7.5, 210, 108),
+            item_stat(254, ItemPhase::Core, 20.0, 460, 260),
+        ],
+    };
+    let sup_build = recommend_item_build(
+        &support_repo,
+        HeroId(5),
+        Role::HardSupport,
+        Bracket::Ancient,
+        &enemies,
+        &[],
+        720,
+    )
+    .unwrap();
+    assert_eq!(
+        sup_build
+            .steps
+            .iter()
+            .filter(|s| matches!(s.item_id.0, 180 | 214))
+            .count(),
+        1,
+        "Tranquil + Arcane must collapse even across Early/Core threshold: {:?}",
+        sup_build.steps
+    );
+
+    // 3. When player already owns Phase Boots (50), Phase Boots is primary and next_unowned advances.
+    let owned_build = recommend_item_build(
+        &carry_repo,
+        HeroId(32),
+        Role::Carry,
+        Bracket::Ancient,
+        &enemies,
+        &[ItemId(50)],
+        600,
+    )
+    .unwrap();
+    let owned_boots: Vec<_> = owned_build
+        .steps
+        .iter()
+        .filter(|s| matches!(s.item_id.0, 50 | 63))
+        .collect();
+    assert_eq!(owned_boots.len(), 1);
+    assert_eq!(owned_boots[0].item_id, ItemId(50));
+    assert!(owned_boots[0].owned);
+    assert!(
+        owned_boots[0]
+            .variants
+            .iter()
+            .any(|v| v.item_id == ItemId(63))
+    );
+    assert_eq!(owned_build.next_unowned_index, Some(1));
+    assert_eq!(owned_build.steps[1].item_id, ItemId(168));
+}

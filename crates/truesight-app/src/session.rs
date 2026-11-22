@@ -2099,13 +2099,13 @@ impl OverlayGeometry {
 }
 
 impl OverlayGeometry {
-    /// Default geometry for the ultra-compact icon-only Build overlay.
+    /// Default geometry for the compact phased Build overlay.
     pub const fn default_build() -> Self {
         Self {
             x: 24.0,
             y: 112.0,
-            width: 390.0,
-            height: 136.0,
+            width: 420.0,
+            height: 168.0,
             click_through: false,
         }
     }

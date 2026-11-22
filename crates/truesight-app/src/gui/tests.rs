@@ -1656,6 +1656,38 @@ fn collect_painted_texts(shape: &egui::epaint::Shape, out: &mut Vec<String>) {
     }
 }
 
+fn assert_overlay_labels_single_line_in_viewport(
+    shape: &egui::epaint::Shape,
+    vp: egui::Vec2,
+    targets: &[&str],
+) {
+    match shape {
+        egui::epaint::Shape::Text(ts) => {
+            let txt = ts.galley.text();
+            if targets.contains(&txt) {
+                assert_eq!(
+                    ts.galley.rows.len(),
+                    1,
+                    "Label '{txt}' at {vp:?} must stay single-line (not vertically wrapped), got {} rows",
+                    ts.galley.rows.len()
+                );
+                assert!(
+                    ts.pos.y < vp.y,
+                    "Label '{txt}' pos.y ({}) must stay inside viewport height {}",
+                    ts.pos.y,
+                    vp.y
+                );
+            }
+        }
+        egui::epaint::Shape::Vec(shapes) => {
+            for inner in shapes {
+                assert_overlay_labels_single_line_in_viewport(inner, vp, targets);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[test]
 fn gui_overlay_syncs_and_clamps_live_viewport_geometry() {
     let mut session = AppSession::new().unwrap();
@@ -3336,8 +3368,13 @@ fn gui_overlay_switches_independent_picks_and_build_geometries_and_renders_icon_
     assert_eq!(app.session.overlay_geometry.width, 420.0);
     assert_eq!(app.session.overlay_geometry.height, 260.0);
 
-    // 3. Direct responsive checks of icon-only Build overlay at 240x110, 390x136, and 540x180.
-    for vp in [vec2(240.0, 110.0), vec2(390.0, 136.0), vec2(540.0, 180.0)] {
+    // 3. Direct responsive checks of phased Build overlay across compact -> expanded viewports.
+    for vp in [
+        vec2(240.0, 110.0),
+        vec2(390.0, 136.0),
+        vec2(420.0, 168.0),
+        vec2(540.0, 190.0),
+    ] {
         let mut out_opt = None;
         let screen_rect = Rect::from_min_size(pos2(0.0, 0.0), vp);
         let full = ctx.run(
@@ -3362,15 +3399,28 @@ fn gui_overlay_switches_independent_picks_and_build_geometries_and_renders_icon_
         let mut texts = Vec::new();
         for c in &full.shapes {
             collect_painted_texts(&c.shape, &mut texts);
+            assert_overlay_labels_single_line_in_viewport(
+                &c.shape,
+                vp,
+                &["EARLY", "CORE", "LATE", "START", "OPT", "OPT · CNT"],
+            );
         }
+        assert!(
+            texts.iter().any(|t| t == "EARLY") && texts.iter().any(|t| t == "CORE"),
+            "Build overlay at {vp:?} must render framed phase headers (EARLY/CORE): {texts:?}"
+        );
         assert!(
             texts.iter().any(|t| t.ends_with('m') && t.len() <= 4),
             "Build overlay at {vp:?} must paint overlaid timing pills (e.g. '7m'); got {texts:?}"
         );
-        if vp.y >= 130.0 {
+        if vp.y >= 136.0 {
             assert!(
-                texts.iter().any(|t| t == "OPT"),
-                "Build overlay at {vp:?} with Riki enemy must render compact OPT strip; got {texts:?}"
+                texts.iter().any(|t| t == "OPT" || t == "OPT · CNT"),
+                "Build overlay at {vp:?} with Riki enemy must render framed OPT counter bar; got {texts:?}"
+            );
+            assert!(
+                texts.iter().any(|t| t == "START"),
+                "Build overlay at {vp:?} must display starting items (START); got {texts:?}"
             );
         }
     }

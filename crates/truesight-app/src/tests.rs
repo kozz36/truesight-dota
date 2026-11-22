@@ -3772,8 +3772,8 @@ fn active_build_hero_evicts_stale_local_hero_and_persists_independent_build_over
     assert_eq!(legacy.overlay_geometry.height, 290.0);
     assert_eq!(legacy.build_overlay_geometry.x, 140.0);
     assert_eq!(legacy.build_overlay_geometry.y, 220.0);
-    assert_eq!(legacy.build_overlay_geometry.width, 390.0);
-    assert_eq!(legacy.build_overlay_geometry.height, 136.0);
+    assert_eq!(legacy.build_overlay_geometry.width, 420.0);
+    assert_eq!(legacy.build_overlay_geometry.height, 168.0);
 
     // 2. Resizing Picks vs Build geometries persists independently via set_active_overlay_geometry.
     let cfg_path = tmp_dir.join("config.toml");
