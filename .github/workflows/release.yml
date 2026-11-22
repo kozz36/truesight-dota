@@ -160,6 +160,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
             release-artifacts/truesight-dota-linux-x86_64.tar.gz
             release-artifacts/truesight-dota-windows-x86_64.msi
