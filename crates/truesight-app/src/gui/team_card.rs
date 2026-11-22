@@ -504,10 +504,8 @@ impl TrueSightGuiApp {
                     if is_ally {
                         self.session.draft.target_role =
                             Role::ALL.get(slot).copied().unwrap_or(Role::Carry);
-                        if !self.session.local_player_hero_from_gsi
-                            && let Some(pick) = current_pick
-                        {
-                            self.session.local_player_hero = Some(pick.hero_id);
+                        if let Some(pick) = current_pick {
+                            self.session.select_build_view_hero(pick.hero_id);
                         }
                     }
                     let target = PickerTarget::Slot(side, slot);

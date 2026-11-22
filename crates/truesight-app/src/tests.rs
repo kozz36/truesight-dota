@@ -3829,3 +3829,270 @@ fn active_build_hero_evicts_stale_local_hero_and_persists_independent_build_over
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+#[test]
+fn build_view_browsing_preserves_vision_replacement_without_setting_local_identity() {
+    use truesight_core::domain::{HeroId, Side};
+    use truesight_core::ports::DraftEvent;
+
+    let mut session = AppSession::new().unwrap();
+    // Vision detects two allies with zero GSI local-player identity.
+    session.apply_vision_events(vec![
+        DraftEvent::PickDetected {
+            side: Side::Allies,
+            slot: 0,
+            hero_id: HeroId(1), // Anti-Mage
+            role: None,
+        },
+        DraftEvent::PickDetected {
+            side: Side::Allies,
+            slot: 1,
+            hero_id: HeroId(88), // Nyx Assassin
+            role: None,
+        },
+    ]);
+    assert_eq!(session.local_player_hero, None);
+
+    // Browse the second ally's build; this must NOT hijack local_player_hero.
+    session.select_build_view_hero(HeroId(88));
+    assert_eq!(session.build_view_hero, Some(HeroId(88)));
+    assert_eq!(session.local_player_hero, None);
+    assert_eq!(
+        session.active_build_hero().map(|(h, _)| h),
+        Some(HeroId(88))
+    );
+
+    // Subsequent confirmed vision replacement in portrait slot 1 replaces HeroId(88) with HeroId(50).
+    session.apply_vision_events(vec![DraftEvent::PickDetected {
+        side: Side::Allies,
+        slot: 1,
+        hero_id: HeroId(50), // Dazzle
+        role: None,
+    }]);
+    assert!(
+        !session
+            .draft
+            .allies
+            .iter()
+            .flatten()
+            .any(|p| p.hero_id == HeroId(88)),
+        "browsing a vision-owned ally must not shield it from confirmed vision replacement"
+    );
+    assert!(
+        session
+            .draft
+            .allies
+            .iter()
+            .flatten()
+            .any(|p| p.hero_id == HeroId(50)),
+        "confirmed vision replacement hero (Dazzle) must occupy the allied draft"
+    );
+    assert_eq!(session.build_view_hero, None);
+}
+
+#[test]
+fn item_build_refresh_triggers_on_gsi_entry_and_queues_while_sync_in_flight() {
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    };
+    use std::time::Duration;
+    use truesight_adapters::sync::LocalCacheManager;
+    use truesight_core::domain::{Bracket, HeroId, ItemId, Role, Side};
+    use truesight_core::ports::{DraftEvent, ItemMetaRepository};
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_item_refresh_queue_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    let cache_dir = tmp_dir.join("cache");
+    std::fs::create_dir_all(&cache_dir).unwrap();
+    let cfg_path = tmp_dir.join("config.toml");
+
+    let mgr = LocalCacheManager::with_optional_account(cache_dir.clone(), None);
+    let mut session = AppSession::with_cache_and_config(mgr, Some(cfg_path)).unwrap();
+    session.set_slot_manual(Side::Allies, 3, HeroId(88)); // Nyx Assassin (uncached)
+    session.select_build_view_hero(HeroId(88));
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let recorded_targets: Arc<Mutex<Vec<Vec<HeroId>>>> = Arc::new(Mutex::new(Vec::new()));
+    let (gate_tx, gate_rx) = mpsc::sync_channel::<()>(1);
+    let gate_rx = Arc::new(Mutex::new(gate_rx));
+    let block_next_call = Arc::new(Mutex::new(false));
+    let (blocked_started_tx, blocked_started_rx) = mpsc::sync_channel::<()>(2);
+    let fail_next_call = Arc::new(Mutex::new(false));
+
+    let calls_bg = Arc::clone(&calls);
+    let targets_bg = Arc::clone(&recorded_targets);
+    let cache_dir_bg = cache_dir.clone();
+    let gate_rx_bg = Arc::clone(&gate_rx);
+    let block_bg = Arc::clone(&block_next_call);
+    let blocked_started_bg = blocked_started_tx.clone();
+    let fail_bg = Arc::clone(&fail_next_call);
+
+    session.set_background_sync_runner(move |bg_mgr, _force| {
+        calls_bg.fetch_add(1, Ordering::SeqCst);
+        targets_bg
+            .lock()
+            .unwrap()
+            .push(bg_mgr.target_item_hero_ids.clone());
+        let should_block = {
+            let mut flag = block_bg.lock().unwrap();
+            let v = *flag;
+            *flag = false;
+            v
+        };
+        if should_block {
+            let _ = blocked_started_bg.send(());
+            let _ = gate_rx_bg.lock().unwrap().recv();
+        }
+        let should_fail = bg_mgr.target_item_hero_ids.contains(&HeroId(121)) && {
+            let mut flag = fail_bg.lock().unwrap();
+            let v = *flag;
+            *flag = false;
+            v
+        };
+        if should_fail {
+            return Err("Simulated offline failure".into());
+        }
+        let mut entries = Vec::new();
+        for hid in &bg_mgr.target_item_hero_ids {
+            entries.push(format!(
+                r#"{{"heroId":{},"itemStartingPurchase":[],"itemFullPurchase":[{{"itemId":1,"time":13,"matchCount":3210,"winCount":1850}}]}}"#,
+                hid.0
+            ));
+        }
+        let existing_path = cache_dir_bg.join("hero_item_stats.json");
+        let existing_inner = std::fs::read_to_string(&existing_path)
+            .ok()
+            .map(|s| {
+                s.trim()
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .to_string()
+            })
+            .filter(|s| !s.is_empty());
+        if let Some(prev) = existing_inner {
+            entries.insert(0, prev);
+        }
+        std::fs::write(&existing_path, format!("[{}]", entries.join(",")))
+            .map_err(|e| e.to_string())?;
+        Ok("Item cache synced".into())
+    });
+
+    // 1. Automatic GSI transition into PRE_GAME must trigger item refresh for uncached active hero.
+    session.apply_event(DraftEvent::GameRulesStateChanged {
+        state_name: "DOTA_GAMERULES_STATE_PRE_GAME".into(),
+        game_time_secs: -30,
+    });
+    assert!(
+        session.sync_in_flight,
+        "GSI transition to PRE_GAME must trigger item refresh for uncached active build hero"
+    );
+    for _ in 0..100 {
+        session.poll_live_sources(None, None);
+        if !session.sync_in_flight {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!session.sync_in_flight);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(
+        recorded_targets.lock().unwrap()[0].contains(&HeroId(88)),
+        "first sync must target active build hero Nyx Assassin (88)"
+    );
+    let nyx_stats = session
+        .item_repo
+        .hero_item_stats(HeroId(88), Role::SoftSupport, Bracket::Ancient)
+        .unwrap();
+    assert!(
+        nyx_stats
+            .iter()
+            .any(|s| s.item_id == ItemId(1) && s.match_count == 3210),
+        "poll_sync_completion must reload session.item_repo with synced stats: {nyx_stats:?}"
+    );
+
+    // Repeating GAME_IN_PROGRESS once already in Build view & cached must not spam extra syncs.
+    session.apply_event(DraftEvent::GameRulesStateChanged {
+        state_name: "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS".into(),
+        game_time_secs: 5,
+    });
+    assert!(!session.sync_in_flight);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    // 2. Manual Build toggle while another sync is in flight must stay pending and run once on completion.
+    session.toggle_post_draft_build_view(); // Switch back to Picks
+    assert!(!session.is_post_draft_build_view());
+    *block_next_call.lock().unwrap() = true;
+    assert!(session.start_background_sync(true));
+    blocked_started_rx
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap();
+    session.set_slot_manual(Side::Allies, 4, HeroId(50)); // Dazzle (uncached)
+    session.select_build_view_hero(HeroId(50));
+    session.toggle_post_draft_build_view(); // Manual entry into Build view during in-flight sync
+    assert!(session.is_post_draft_build_view());
+    gate_tx.send(()).unwrap();
+
+    for _ in 0..100 {
+        session.poll_live_sources(None, None);
+        if !session.sync_in_flight && calls.load(Ordering::SeqCst) >= 3 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        3,
+        "manual Build entry during in-flight sync must queue and drain exactly one follow-up sync"
+    );
+    assert!(
+        recorded_targets.lock().unwrap()[2].contains(&HeroId(50)),
+        "queued follow-up sync must target Dazzle (50)"
+    );
+
+    // 3. GSI-driven Build entry during an in-flight sync must also queue cleanly and never loop on error.
+    session.apply_event(DraftEvent::GameRulesStateChanged {
+        state_name: "DOTA_GAMERULES_STATE_HERO_SELECTION".into(),
+        game_time_secs: 0,
+    });
+    assert!(!session.is_post_draft_build_view());
+    *block_next_call.lock().unwrap() = true;
+    assert!(session.start_background_sync(true));
+    blocked_started_rx
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap();
+
+    session.set_slot_manual(Side::Allies, 1, HeroId(121)); // Grimstroke (uncached)
+    session.select_build_view_hero(HeroId(121));
+    *fail_next_call.lock().unwrap() = true; // Next follow-up fails to verify no retry loop
+    session.apply_event(DraftEvent::GameRulesStateChanged {
+        state_name: "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS".into(),
+        game_time_secs: 120,
+    });
+    assert!(session.is_post_draft_build_view());
+    gate_tx.send(()).unwrap();
+
+    for _ in 0..100 {
+        session.poll_live_sources(None, None);
+        if !session.sync_in_flight && calls.load(Ordering::SeqCst) >= 5 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!session.sync_in_flight);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        5,
+        "GSI Build entry during in-flight sync must launch one queued refresh and stop on error"
+    );
+    assert!(
+        recorded_targets.lock().unwrap()[4].contains(&HeroId(121)),
+        "GSI queued refresh must target Grimstroke (121)"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}

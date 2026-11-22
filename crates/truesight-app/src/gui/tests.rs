@@ -3339,3 +3339,49 @@ fn gui_overlay_switches_independent_picks_and_build_geometries_and_renders_icon_
         }
     }
 }
+
+#[test]
+fn gui_clicking_second_ally_sets_build_view_hero_without_setting_local_player_hero() {
+    let mut session = AppSession::new().unwrap();
+    assert!(execute_command(&mut session, "ally 1 anti-mage").unwrap());
+    assert!(execute_command(&mut session, "ally 4 nyx assassin").unwrap());
+    session.local_player_hero = None;
+    session.local_player_hero_from_gsi = false;
+
+    let mut app = TrueSightGuiApp::new(session, None, None);
+    app.onboarding_open = false;
+    let ctx = egui::Context::default();
+    let viewport = vec2(1468.0, 960.0);
+    let r = render_at_viewport(&mut app, &ctx, viewport);
+    let slot4 = &r.ally_slots[3];
+    let click_pos = pos2(slot4.row.min.x + 24.0, slot4.row.center().y);
+
+    for pressed in [true, false] {
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), viewport)),
+            events: vec![
+                egui::Event::PointerMoved(click_pos),
+                egui::Event::PointerButton {
+                    pos: click_pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            let _ = app.render_frame(ctx);
+        });
+    }
+
+    assert_eq!(
+        app.session.build_view_hero,
+        Some(HeroId(88)),
+        "clicking ally P4 (Nyx) must select build_view_hero"
+    );
+    assert_eq!(
+        app.session.local_player_hero, None,
+        "clicking an ally without GSI identity must never assign local_player_hero"
+    );
+}

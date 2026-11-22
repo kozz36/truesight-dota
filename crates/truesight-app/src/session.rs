@@ -63,7 +63,10 @@ pub struct AppSession {
     pub manually_dismissed: Vec<HeroId>,
     pub local_player_hero: Option<HeroId>,
     pub local_player_hero_from_gsi: bool,
+    /// Optional allied hero explicitly clicked/selected for browsing item builds without altering local-player identity.
+    pub build_view_hero: Option<HeroId>,
     pub sync_in_flight: bool,
+    pending_item_build_refresh: bool,
     pub last_sync_notice: Option<String>,
     sync_generation: u64,
     sync_rx: Option<Receiver<SyncCompletion>>,
@@ -215,7 +218,9 @@ impl AppSession {
             manually_dismissed: Vec::new(),
             local_player_hero: None,
             local_player_hero_from_gsi: false,
+            build_view_hero: None,
             sync_in_flight: false,
+            pending_item_build_refresh: false,
             last_sync_notice: None,
             sync_generation: 0,
             sync_rx: None,
@@ -497,12 +502,14 @@ impl AppSession {
                 self.cache_mgr
                     .freshness_badge(LocalCacheManager::now_unix())
             );
+            self.drain_pending_item_build_refresh();
             return true;
         };
 
         if done.generation != self.sync_generation
             || done.account_id != self.cache_mgr.player_account_id
         {
+            self.drain_pending_item_build_refresh();
             return true;
         }
 
@@ -516,6 +523,11 @@ impl AppSession {
                 match loaded {
                     Ok(m) if m.heroes().count() > 0 => {
                         self.matrix = m;
+                        self.item_repo = self.cache_mgr.build_item_repository();
+                        self.active_game_patch = self
+                            .cache_mgr
+                            .read_cached_game_patch()
+                            .unwrap_or_else(|| counter_trait_table_patch().to_string());
                         self.db_status = self
                             .cache_mgr
                             .freshness_badge(LocalCacheManager::now_unix());
@@ -546,7 +558,17 @@ impl AppSession {
                 self.last_sync_notice = Some(format!("Sync notice: {e} (using last valid model)"));
             }
         }
+        self.drain_pending_item_build_refresh();
         true
+    }
+
+    fn drain_pending_item_build_refresh(&mut self) {
+        if self.pending_item_build_refresh {
+            self.pending_item_build_refresh = false;
+            if self.is_post_draft_build_view() {
+                let _ = self.request_item_build_refresh_if_uncached();
+            }
+        }
     }
 
     pub fn sync_db(&mut self, force: bool) -> Result<String, String> {
@@ -565,6 +587,11 @@ impl AppSession {
         {
             self.matrix = m;
         }
+        self.item_repo = self.cache_mgr.build_item_repository();
+        self.active_game_patch = self
+            .cache_mgr
+            .read_cached_game_patch()
+            .unwrap_or_else(|| counter_trait_table_patch().to_string());
         self.db_status = self
             .cache_mgr
             .freshness_badge(LocalCacheManager::now_unix());
@@ -664,6 +691,8 @@ impl AppSession {
         self.manually_dismissed.clear();
         self.local_player_hero = None;
         self.local_player_hero_from_gsi = false;
+        self.build_view_hero = None;
+        self.pending_item_build_refresh = false;
         self.vision_reset_pending = true;
         self.vision_slots = [[None; TEAM_SIZE]; 2];
         self.vision_owned.clear();
@@ -791,6 +820,9 @@ impl AppSession {
             if self.side_picks(opposite)[idx].map(|p| p.hero_id) == Some(hero_id) {
                 self.side_picks_mut(opposite)[idx] = None;
                 self.side_locked_mut(opposite)[idx] = false;
+                if opposite == Side::Allies && self.build_view_hero == Some(hero_id) {
+                    self.build_view_hero = None;
+                }
             }
         }
         for b in &mut self.draft.bans {
@@ -828,12 +860,13 @@ impl AppSession {
         });
         self.side_picks_mut(side)[slot] = pick;
         self.side_locked_mut(side)[slot] = true;
-        if side == Side::Allies
-            && !self.local_player_hero_from_gsi
-            && replaced_hero.is_some()
-            && self.local_player_hero == replaced_hero
-        {
-            self.local_player_hero = Some(hero_id);
+        if side == Side::Allies && replaced_hero.is_some() {
+            if !self.local_player_hero_from_gsi && self.local_player_hero == replaced_hero {
+                self.local_player_hero = Some(hero_id);
+            }
+            if self.build_view_hero == replaced_hero {
+                self.build_view_hero = Some(hero_id);
+            }
         }
         self.sync_local_player_target_role();
         self.sync_target_item_heroes_to_cache();
@@ -850,9 +883,14 @@ impl AppSession {
             if !self.manually_dismissed.contains(&pick.hero_id) {
                 self.manually_dismissed.push(pick.hero_id);
             }
-            if side == Side::Allies && self.local_player_hero == Some(pick.hero_id) {
-                self.local_player_hero = None;
-                self.local_player_hero_from_gsi = false;
+            if side == Side::Allies {
+                if self.local_player_hero == Some(pick.hero_id) {
+                    self.local_player_hero = None;
+                    self.local_player_hero_from_gsi = false;
+                }
+                if self.build_view_hero == Some(pick.hero_id) {
+                    self.build_view_hero = None;
+                }
             }
         }
         self.sync_target_item_heroes_to_cache();
@@ -864,6 +902,7 @@ impl AppSession {
                 state_name,
                 game_time_secs,
             } => {
+                let was_build_view = self.is_post_draft_build_view();
                 self.last_gsi_state = format!("{state_name} (t={game_time_secs}s)");
                 let entered_wait_for_players = state_name
                     == "DOTA_GAMERULES_STATE_WAIT_FOR_PLAYERS_TO_LOAD"
@@ -884,6 +923,9 @@ impl AppSession {
                 }
                 self.game_time_secs = game_time_secs;
                 self.last_rules_state = Some(state_name);
+                if !was_build_view && self.is_post_draft_build_view() {
+                    let _ = self.request_item_build_refresh_if_uncached();
+                }
             }
             DraftEvent::FactionDetected { faction } => {
                 self.set_ally_faction(faction);
@@ -898,11 +940,18 @@ impl AppSession {
             }
             DraftEvent::LocalPlayerHeroDetected { hero_slug } => {
                 if let Some(id) = self.find_hero(&hero_slug) {
+                    let hero_changed = self.local_player_hero != Some(id);
                     self.local_player_hero = Some(id);
                     self.local_player_hero_from_gsi = true;
+                    if hero_changed {
+                        self.build_view_hero = None;
+                    }
                     self.apply_side_pick(Side::Allies, 0, id, None);
                     self.sync_local_player_target_role();
                     self.sync_target_item_heroes_to_cache();
+                    if hero_changed && self.is_post_draft_build_view() {
+                        let _ = self.request_item_build_refresh_if_uncached();
+                    }
                 }
             }
             DraftEvent::PlayerHeroMapped {
@@ -913,10 +962,17 @@ impl AppSession {
                 if self.cache_mgr.player_account_id == Some(steam32) {
                     self.set_ally_faction(faction);
                     if let Some(id) = self.find_hero(&hero_slug) {
+                        let hero_changed = self.local_player_hero != Some(id);
                         self.local_player_hero = Some(id);
                         self.local_player_hero_from_gsi = true;
+                        if hero_changed {
+                            self.build_view_hero = None;
+                        }
                         self.sync_local_player_target_role();
                         self.sync_target_item_heroes_to_cache();
+                        if hero_changed && self.is_post_draft_build_view() {
+                            let _ = self.request_item_build_refresh_if_uncached();
+                        }
                     }
                 }
             }
@@ -1024,6 +1080,9 @@ impl AppSession {
                         && self.local_player_hero != Some(pick.hero_id)
                     {
                         self.side_picks_mut(side)[slot] = None;
+                        if side == Side::Allies && self.build_view_hero == Some(pick.hero_id) {
+                            self.build_view_hero = None;
+                        }
                     }
                 }
             }
@@ -1223,19 +1282,43 @@ impl AppSession {
         ))
     }
 
+    /// Requests a background item-build refresh when live persistence is configured and active
+    /// target heroes lack cached item stats. If another sync is already in flight, keeps the
+    /// request pending until `poll_sync_completion` drains it.
+    pub fn request_item_build_refresh_if_uncached(&mut self) -> bool {
+        self.sync_target_item_heroes_to_cache();
+        if self.config_path.is_none() || !self.cache_mgr.is_target_item_heroes_uncached() {
+            self.pending_item_build_refresh = false;
+            return false;
+        }
+        if self.sync_in_flight {
+            self.pending_item_build_refresh = true;
+            return false;
+        }
+        self.pending_item_build_refresh = false;
+        self.start_background_sync(false)
+    }
+
+    /// Selects an allied hero to inspect in the item build view without altering `local_player_hero`
+    /// or vision replacement authority. Schedules an item refresh if already in Build view.
+    pub fn select_build_view_hero(&mut self, hero_id: HeroId) {
+        let changed = self.build_view_hero != Some(hero_id);
+        self.build_view_hero = Some(hero_id);
+        self.sync_target_item_heroes_to_cache();
+        if changed && self.is_post_draft_build_view() {
+            let _ = self.request_item_build_refresh_if_uncached();
+        }
+    }
+
     /// Toggles between the post-draft item build view and the suggested picks view, syncing
     /// target hero item stats in the background when live persistence is active and uncached.
     pub fn toggle_post_draft_build_view(&mut self) {
         let next = !self.is_post_draft_build_view();
         self.post_draft_view_override = Some(next);
         if next {
-            self.sync_target_item_heroes_to_cache();
-            if self.config_path.is_some()
-                && !self.sync_in_flight
-                && self.cache_mgr.is_target_item_heroes_uncached()
-            {
-                let _ = self.start_background_sync(false);
-            }
+            let _ = self.request_item_build_refresh_if_uncached();
+        } else {
+            self.pending_item_build_refresh = false;
         }
     }
 
@@ -1247,6 +1330,19 @@ impl AppSession {
 
     /// Resolves the active allied hero and role for item build recommendations.
     pub fn active_build_hero(&self) -> Option<(HeroId, Role)> {
+        if let Some(browse_id) = self.build_view_hero
+            && let Some(found) = self
+                .draft
+                .allies
+                .iter()
+                .enumerate()
+                .find_map(|(idx, slot)| {
+                    slot.filter(|p| p.hero_id == browse_id)
+                        .map(|p| (browse_id, p.role.unwrap_or(Role::ALL[idx])))
+                })
+        {
+            return Some(found);
+        }
         if let Some(local_id) = self.local_player_hero
             && let Some(found) = self
                 .draft

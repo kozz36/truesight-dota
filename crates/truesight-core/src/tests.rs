@@ -1294,3 +1294,192 @@ fn recommend_item_build_classifies_same_phase_variants_with_fewer_than_six_candi
     assert_eq!(build.steps[0].variants.len(), 1);
     assert_eq!(build.steps[0].variants[0].item_id, ItemId(160));
 }
+
+#[test]
+fn recommend_item_build_preserves_owned_role_ineligible_counters_under_optional() {
+    use crate::domain::{Bracket, ItemId, ItemPhase};
+    use crate::math::recommend_item_build;
+
+    let enemies_no_traits = [None; 5];
+
+    // 1a. Carry with Gem in Core stats: owned -> Optional (owned = true), never steps; unowned -> excluded.
+    let carry_with_core_gem = MockItemRepo {
+        catalog: vec![
+            catalog_entry(63, "Power Treads", 1400, &[], false, false),
+            catalog_entry(147, "Manta Style", 4550, &[], false, false),
+            catalog_entry(30, "Gem of True Sight", 900, &[], false, false),
+        ],
+        stats: vec![
+            item_stat(63, ItemPhase::Early, 7.0, 1200, 640),
+            item_stat(147, ItemPhase::Core, 20.0, 1100, 610),
+            item_stat(30, ItemPhase::Core, 15.0, 900, 500),
+        ],
+    };
+    let carry_owned_core = recommend_item_build(
+        &carry_with_core_gem,
+        HeroId(95),
+        Role::Carry,
+        Bracket::Ancient,
+        &enemies_no_traits,
+        &[ItemId(30)],
+        1020,
+    )
+    .unwrap();
+    assert!(
+        carry_owned_core
+            .steps
+            .iter()
+            .all(|s| s.item_id != ItemId(30)),
+        "owned Gem must not sit in timed steps"
+    );
+    assert!(
+        carry_owned_core
+            .optional_items
+            .iter()
+            .any(|o| o.item_id == ItemId(30) && o.owned),
+        "owned Gem on Carry must remain visible under Optional: {:?}",
+        carry_owned_core.optional_items
+    );
+    let carry_unowned_core = recommend_item_build(
+        &carry_with_core_gem,
+        HeroId(95),
+        Role::Carry,
+        Bracket::Ancient,
+        &enemies_no_traits,
+        &[],
+        1020,
+    )
+    .unwrap();
+    assert!(
+        carry_unowned_core
+            .steps
+            .iter()
+            .all(|s| s.item_id != ItemId(30))
+            && carry_unowned_core
+                .optional_items
+                .iter()
+                .all(|o| o.item_id != ItemId(30)),
+        "unowned Gem on Carry without invisibility traits must not be recommended"
+    );
+
+    // 1b. Carry when Gem is omitted from stats (role-filtered repository): still preserved when owned!
+    let carry_omitted_gem = MockItemRepo {
+        catalog: carry_with_core_gem.catalog.clone(),
+        stats: vec![
+            item_stat(63, ItemPhase::Early, 7.0, 1200, 640),
+            item_stat(147, ItemPhase::Core, 20.0, 1100, 610),
+        ],
+    };
+    let carry_owned_omitted = recommend_item_build(
+        &carry_omitted_gem,
+        HeroId(95),
+        Role::Carry,
+        Bracket::Ancient,
+        &enemies_no_traits,
+        &[ItemId(30)],
+        1020,
+    )
+    .unwrap();
+    assert!(
+        carry_owned_omitted
+            .steps
+            .iter()
+            .all(|s| s.item_id != ItemId(30))
+            && carry_owned_omitted
+                .optional_items
+                .iter()
+                .any(|o| o.item_id == ItemId(30) && o.owned),
+        "owned Gem omitted from stats must still appear in Optional on Carry: {:?}",
+        carry_owned_omitted.optional_items
+    );
+
+    // 2. Soft Support with BKB (116): owned -> Optional (owned = true), never steps; unowned -> excluded.
+    let sup_with_core_bkb = MockItemRepo {
+        catalog: vec![
+            catalog_entry(180, "Arcane Boots", 1500, &[], false, false),
+            catalog_entry(232, "Aether Lens", 2275, &[], false, false),
+            catalog_entry(116, "Black King Bar", 4050, &[], false, false),
+        ],
+        stats: vec![
+            item_stat(180, ItemPhase::Early, 7.5, 1200, 640),
+            item_stat(232, ItemPhase::Core, 18.0, 1100, 600),
+            item_stat(116, ItemPhase::Core, 24.0, 800, 440),
+        ],
+    };
+    let sup_owned_core = recommend_item_build(
+        &sup_with_core_bkb,
+        HeroId(88),
+        Role::SoftSupport,
+        Bracket::Ancient,
+        &enemies_no_traits,
+        &[ItemId(116)],
+        1440,
+    )
+    .unwrap();
+    assert!(
+        sup_owned_core
+            .steps
+            .iter()
+            .all(|s| s.item_id != ItemId(116)),
+        "owned role-ineligible BKB must not appear in timed steps on Pos 4"
+    );
+    assert!(
+        sup_owned_core
+            .optional_items
+            .iter()
+            .any(|o| o.item_id == ItemId(116) && o.owned),
+        "owned BKB on Soft Support must stay visible under Optional: {:?}",
+        sup_owned_core.optional_items
+    );
+    let sup_unowned_core = recommend_item_build(
+        &sup_with_core_bkb,
+        HeroId(88),
+        Role::SoftSupport,
+        Bracket::Ancient,
+        &enemies_no_traits,
+        &[],
+        1440,
+    )
+    .unwrap();
+    assert!(
+        sup_unowned_core
+            .steps
+            .iter()
+            .all(|s| s.item_id != ItemId(116))
+            && sup_unowned_core
+                .optional_items
+                .iter()
+                .all(|o| o.item_id != ItemId(116)),
+        "unowned role-ineligible BKB on Pos 4 must not be recommended"
+    );
+
+    let sup_omitted_bkb = MockItemRepo {
+        catalog: sup_with_core_bkb.catalog,
+        stats: vec![
+            item_stat(180, ItemPhase::Early, 7.5, 1200, 640),
+            item_stat(232, ItemPhase::Core, 18.0, 1100, 600),
+        ],
+    };
+    let sup_owned_omitted = recommend_item_build(
+        &sup_omitted_bkb,
+        HeroId(88),
+        Role::SoftSupport,
+        Bracket::Ancient,
+        &enemies_no_traits,
+        &[ItemId(116)],
+        1440,
+    )
+    .unwrap();
+    assert!(
+        sup_owned_omitted
+            .steps
+            .iter()
+            .all(|s| s.item_id != ItemId(116))
+            && sup_owned_omitted
+                .optional_items
+                .iter()
+                .any(|o| o.item_id == ItemId(116) && o.owned),
+        "owned BKB omitted from stats must still appear in Optional on Pos 4: {:?}",
+        sup_owned_omitted.optional_items
+    );
+}
