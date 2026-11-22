@@ -62,6 +62,7 @@ pub struct AppSession {
     pub enemy_locked_slots: [bool; TEAM_SIZE],
     pub manually_dismissed: Vec<HeroId>,
     pub local_player_hero: Option<HeroId>,
+    pub local_player_hero_from_gsi: bool,
     pub sync_in_flight: bool,
     pub last_sync_notice: Option<String>,
     sync_generation: u64,
@@ -84,6 +85,7 @@ pub struct AppSession {
     pub active_game_patch: String,
     pub overlay_mode: bool,
     pub overlay_geometry: OverlayGeometry,
+    pub build_overlay_geometry: OverlayGeometry,
     pub active_monitor_rect: Option<MonitorRect>,
     pub known_monitors: Vec<MonitorRect>,
     pub active_capture_strip_rect: Option<(f32, f32, f32, f32)>,
@@ -212,6 +214,7 @@ impl AppSession {
             enemy_locked_slots: [false; TEAM_SIZE],
             manually_dismissed: Vec::new(),
             local_player_hero: None,
+            local_player_hero_from_gsi: false,
             sync_in_flight: false,
             last_sync_notice: None,
             sync_generation: 0,
@@ -236,6 +239,7 @@ impl AppSession {
             active_game_patch,
             overlay_mode: ui_cfg.overlay_mode,
             overlay_geometry: ui_cfg.overlay_geometry,
+            build_overlay_geometry: ui_cfg.build_overlay_geometry,
             active_monitor_rect: None,
             known_monitors: Vec::new(),
             active_capture_strip_rect: None,
@@ -259,6 +263,7 @@ impl AppSession {
             self.stratz_token_exp = resolved_exp;
             self.overlay_mode = ui_cfg.overlay_mode;
             self.overlay_geometry = ui_cfg.overlay_geometry;
+            self.build_overlay_geometry = ui_cfg.build_overlay_geometry;
             self.ui_language = ui_cfg.ui_language;
             if is_stratz_exp_expired(resolved_exp, now) {
                 self.cache_mgr.stratz_api_token = None;
@@ -658,6 +663,7 @@ impl AppSession {
         self.enemy_locked_slots = [false; TEAM_SIZE];
         self.manually_dismissed.clear();
         self.local_player_hero = None;
+        self.local_player_hero_from_gsi = false;
         self.vision_reset_pending = true;
         self.vision_slots = [[None; TEAM_SIZE]; 2];
         self.vision_owned.clear();
@@ -815,12 +821,20 @@ impl AppSession {
 
         self.remove_hero_from_opposite_and_bans(side, hero_id);
 
+        let replaced_hero = self.side_picks(side)[slot].map(|p| p.hero_id);
         let pick = Some(DraftPick {
             hero_id,
             role: Role::ALL.get(slot).copied(),
         });
         self.side_picks_mut(side)[slot] = pick;
         self.side_locked_mut(side)[slot] = true;
+        if side == Side::Allies
+            && !self.local_player_hero_from_gsi
+            && replaced_hero.is_some()
+            && self.local_player_hero == replaced_hero
+        {
+            self.local_player_hero = Some(hero_id);
+        }
         self.sync_local_player_target_role();
         self.sync_target_item_heroes_to_cache();
     }
@@ -838,6 +852,7 @@ impl AppSession {
             }
             if side == Side::Allies && self.local_player_hero == Some(pick.hero_id) {
                 self.local_player_hero = None;
+                self.local_player_hero_from_gsi = false;
             }
         }
         self.sync_target_item_heroes_to_cache();
@@ -884,6 +899,7 @@ impl AppSession {
             DraftEvent::LocalPlayerHeroDetected { hero_slug } => {
                 if let Some(id) = self.find_hero(&hero_slug) {
                     self.local_player_hero = Some(id);
+                    self.local_player_hero_from_gsi = true;
                     self.apply_side_pick(Side::Allies, 0, id, None);
                     self.sync_local_player_target_role();
                     self.sync_target_item_heroes_to_cache();
@@ -898,6 +914,7 @@ impl AppSession {
                     self.set_ally_faction(faction);
                     if let Some(id) = self.find_hero(&hero_slug) {
                         self.local_player_hero = Some(id);
+                        self.local_player_hero_from_gsi = true;
                         self.sync_local_player_target_role();
                         self.sync_target_item_heroes_to_cache();
                     }
@@ -1185,6 +1202,7 @@ impl AppSession {
                 stratz_token_exp: self.stratz_token_exp,
                 overlay_mode: self.overlay_mode,
                 overlay_geometry: self.overlay_geometry,
+                build_overlay_geometry: self.build_overlay_geometry,
                 ui_language: self.ui_language,
             };
             if let Err(err) = save_ui_config_to_dir(dir, &cfg) {
@@ -1205,9 +1223,20 @@ impl AppSession {
         ))
     }
 
-    /// Toggles between the post-draft item build view and the suggested picks view.
+    /// Toggles between the post-draft item build view and the suggested picks view, syncing
+    /// target hero item stats in the background when live persistence is active and uncached.
     pub fn toggle_post_draft_build_view(&mut self) {
-        self.post_draft_view_override = Some(!self.is_post_draft_build_view());
+        let next = !self.is_post_draft_build_view();
+        self.post_draft_view_override = Some(next);
+        if next {
+            self.sync_target_item_heroes_to_cache();
+            if self.config_path.is_some()
+                && !self.sync_in_flight
+                && self.cache_mgr.is_target_item_heroes_uncached()
+            {
+                let _ = self.start_background_sync(false);
+            }
+        }
     }
 
     /// Returns `true` when the active game patch differs from the embedded counter-trait table patch.
@@ -1218,18 +1247,18 @@ impl AppSession {
 
     /// Resolves the active allied hero and role for item build recommendations.
     pub fn active_build_hero(&self) -> Option<(HeroId, Role)> {
-        if let Some(local_id) = self.local_player_hero {
-            let role = self
+        if let Some(local_id) = self.local_player_hero
+            && let Some(found) = self
                 .draft
                 .allies
                 .iter()
                 .enumerate()
                 .find_map(|(idx, slot)| {
                     slot.filter(|p| p.hero_id == local_id)
-                        .map(|p| p.role.unwrap_or(Role::ALL[idx]))
+                        .map(|p| (local_id, p.role.unwrap_or(Role::ALL[idx])))
                 })
-                .unwrap_or(self.draft.target_role);
-            return Some((local_id, role));
+        {
+            return Some(found);
         }
         if let Some(pick) = self.draft.allies[self.draft.target_role.index()] {
             return Some((pick.hero_id, pick.role.unwrap_or(self.draft.target_role)));
@@ -1493,25 +1522,49 @@ impl AppSession {
     /// and physical `capture_strip_rect_px`, scaling logical point bounds (`280..520` x `160..360`)
     /// by `pixels_per_point`.
     pub fn clamp_overlay_geometry_with_optional_monitor_scaled(
-        mut geom_px: OverlayGeometry,
+        geom_px: OverlayGeometry,
         monitor_px: Option<MonitorRect>,
         fallback_monitor_size_px: Option<(f32, f32)>,
         capture_strip_rect_px: Option<(f32, f32, f32, f32)>,
         pixels_per_point: f32,
     ) -> OverlayGeometry {
+        Self::clamp_overlay_geometry_with_optional_monitor_min_scaled(
+            geom_px,
+            monitor_px,
+            fallback_monitor_size_px,
+            capture_strip_rect_px,
+            pixels_per_point,
+            280.0,
+            160.0,
+        )
+    }
+
+    /// Clamps physical desktop pixel `geom_px` against optional physical monitor bounds,
+    /// enforcing custom logical minimum bounds `(min_w_pts, min_h_pts)` scaled by `pixels_per_point`.
+    pub fn clamp_overlay_geometry_with_optional_monitor_min_scaled(
+        mut geom_px: OverlayGeometry,
+        monitor_px: Option<MonitorRect>,
+        fallback_monitor_size_px: Option<(f32, f32)>,
+        capture_strip_rect_px: Option<(f32, f32, f32, f32)>,
+        pixels_per_point: f32,
+        min_w_pts: f32,
+        min_h_pts: f32,
+    ) -> OverlayGeometry {
         let ppp = Self::sanitize_pixels_per_point(pixels_per_point);
         if let Some(mon) = monitor_px {
-            return Self::clamp_overlay_geometry_in_monitor_scaled(
+            return Self::clamp_overlay_geometry_in_monitor_with_min_scaled(
                 geom_px,
                 mon,
                 capture_strip_rect_px,
                 ppp,
+                min_w_pts,
+                min_h_pts,
             );
         }
 
-        let min_w_px = 280.0 * ppp;
+        let min_w_px = min_w_pts * ppp;
         let max_w_cap_px = 840.0 * ppp;
-        let min_h_px = 160.0 * ppp;
+        let min_h_px = min_h_pts * ppp;
         let max_h_cap_px = 720.0 * ppp;
         let min_mon_w_px = 640.0 * ppp;
         let min_mon_h_px = 480.0 * ppp;
@@ -1618,15 +1671,35 @@ impl AppSession {
     /// monitor origins) and prevents it from intersecting physical `capture_strip_rect_px`,
     /// scaling logical point bounds (`280..840` x `160..720`) by `pixels_per_point`.
     pub fn clamp_overlay_geometry_in_monitor_scaled(
-        mut geom_px: OverlayGeometry,
+        geom_px: OverlayGeometry,
         monitor_px: MonitorRect,
         capture_strip_rect_px: Option<(f32, f32, f32, f32)>,
         pixels_per_point: f32,
     ) -> OverlayGeometry {
+        Self::clamp_overlay_geometry_in_monitor_with_min_scaled(
+            geom_px,
+            monitor_px,
+            capture_strip_rect_px,
+            pixels_per_point,
+            280.0,
+            160.0,
+        )
+    }
+
+    /// Clamps physical desktop pixel `geom_px` within physical `monitor_px`, enforcing custom
+    /// logical minimum bounds `(min_w_pts, min_h_pts)` scaled by `pixels_per_point`.
+    pub fn clamp_overlay_geometry_in_monitor_with_min_scaled(
+        mut geom_px: OverlayGeometry,
+        monitor_px: MonitorRect,
+        capture_strip_rect_px: Option<(f32, f32, f32, f32)>,
+        pixels_per_point: f32,
+        min_w_pts: f32,
+        min_h_pts: f32,
+    ) -> OverlayGeometry {
         let ppp = Self::sanitize_pixels_per_point(pixels_per_point);
-        let min_w_px = 280.0 * ppp;
+        let min_w_px = min_w_pts * ppp;
         let max_w_cap_px = 840.0 * ppp;
-        let min_h_px = 160.0 * ppp;
+        let min_h_px = min_h_pts * ppp;
         let max_h_cap_px = 720.0 * ppp;
         let min_mon_w_px = 640.0 * ppp;
         let min_mon_h_px = 480.0 * ppp;
@@ -1718,6 +1791,7 @@ impl AppSession {
         self.overlay_mode = enabled;
         if !enabled {
             self.overlay_geometry.click_through = false;
+            self.build_overlay_geometry.click_through = false;
         }
         let _ = self.persist_ui_config();
     }
@@ -1725,12 +1799,36 @@ impl AppSession {
     /// Enables or disables mouse click-through on the overlay window and persists the preference.
     pub fn set_overlay_click_through(&mut self, click_through: bool) {
         self.overlay_geometry.click_through = click_through;
+        self.build_overlay_geometry.click_through = click_through;
         let _ = self.persist_ui_config();
     }
 
-    /// Updates and persists the overlay window geometry.
+    /// Updates and persists the Picks overlay window geometry.
     pub fn set_overlay_geometry(&mut self, geom: OverlayGeometry) {
         self.overlay_geometry = geom;
+        let _ = self.persist_ui_config();
+    }
+
+    /// Returns the geometry corresponding to the active overlay mode (`build_overlay_geometry` in
+    /// post-draft Build view, `overlay_geometry` in Suggested Picks view), preserving shared `click_through`.
+    pub fn active_overlay_geometry(&self) -> OverlayGeometry {
+        let mut geom = if self.is_post_draft_build_view() {
+            self.build_overlay_geometry
+        } else {
+            self.overlay_geometry
+        };
+        geom.click_through = self.overlay_geometry.click_through;
+        geom
+    }
+
+    /// Updates and persists geometry only for the currently active overlay mode (`Picks` vs `Build`).
+    pub fn set_active_overlay_geometry(&mut self, mut geom: OverlayGeometry) {
+        geom.click_through = self.overlay_geometry.click_through;
+        if self.is_post_draft_build_view() {
+            self.build_overlay_geometry = geom;
+        } else {
+            self.overlay_geometry = geom;
+        }
         let _ = self.persist_ui_config();
     }
 
@@ -1904,6 +2002,19 @@ impl OverlayGeometry {
     }
 }
 
+impl OverlayGeometry {
+    /// Default geometry for the ultra-compact icon-only Build overlay.
+    pub const fn default_build() -> Self {
+        Self {
+            x: 24.0,
+            y: 112.0,
+            width: 390.0,
+            height: 136.0,
+            click_through: false,
+        }
+    }
+}
+
 impl Default for OverlayGeometry {
     fn default() -> Self {
         Self {
@@ -1960,14 +2071,29 @@ impl UiLanguage {
 }
 
 /// Persisted UI onboarding, overlay, language, and STRATZ token state stored in `ui_config.toml`.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct UiConfig {
     pub onboarding_dismissed: bool,
     pub stratz_api_token: Option<String>,
     pub stratz_token_exp: Option<u64>,
     pub overlay_mode: bool,
     pub overlay_geometry: OverlayGeometry,
+    pub build_overlay_geometry: OverlayGeometry,
     pub ui_language: UiLanguage,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            onboarding_dismissed: false,
+            stratz_api_token: None,
+            stratz_token_exp: None,
+            overlay_mode: false,
+            overlay_geometry: OverlayGeometry::default(),
+            build_overlay_geometry: OverlayGeometry::default_build(),
+            ui_language: UiLanguage::default(),
+        }
+    }
 }
 
 fn resolve_stratz_exp(token: Option<&str>, explicit_exp: Option<u64>) -> Option<u64> {
@@ -2081,6 +2207,8 @@ pub fn load_ui_config_from_dir(config_dir: &Path) -> UiConfig {
         return UiConfig::default();
     };
     let mut cfg = UiConfig::default();
+    let mut has_build_x = false;
+    let mut has_build_y = false;
     for line in raw.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -2123,6 +2251,28 @@ pub fn load_ui_config_from_dir(config_dir: &Path) -> UiConfig {
                     cfg.overlay_geometry.height = h;
                 }
             }
+            "build_overlay_x" => {
+                if let Ok(x) = val.parse::<f32>() {
+                    cfg.build_overlay_geometry.x = x;
+                    has_build_x = true;
+                }
+            }
+            "build_overlay_y" => {
+                if let Ok(y) = val.parse::<f32>() {
+                    cfg.build_overlay_geometry.y = y;
+                    has_build_y = true;
+                }
+            }
+            "build_overlay_width" => {
+                if let Ok(w) = val.parse::<f32>() {
+                    cfg.build_overlay_geometry.width = w;
+                }
+            }
+            "build_overlay_height" => {
+                if let Ok(h) = val.parse::<f32>() {
+                    cfg.build_overlay_geometry.height = h;
+                }
+            }
             "overlay_click_through" => cfg.overlay_geometry.click_through = val == "true",
             "ui_language" => {
                 if let Some(lang) = UiLanguage::parse(val) {
@@ -2132,6 +2282,13 @@ pub fn load_ui_config_from_dir(config_dir: &Path) -> UiConfig {
             _ => {}
         }
     }
+    if !has_build_x {
+        cfg.build_overlay_geometry.x = cfg.overlay_geometry.x;
+    }
+    if !has_build_y {
+        cfg.build_overlay_geometry.y = cfg.overlay_geometry.y;
+    }
+    cfg.build_overlay_geometry.click_through = cfg.overlay_geometry.click_through;
     if cfg.stratz_token_exp.is_none() {
         cfg.stratz_token_exp = resolve_stratz_exp(cfg.stratz_api_token.as_deref(), None);
     }
@@ -2166,6 +2323,22 @@ pub fn save_ui_config_to_dir(config_dir: &Path, cfg: &UiConfig) -> Result<(), St
     body.push_str(&format!(
         "overlay_click_through = {}\n",
         cfg.overlay_geometry.click_through
+    ));
+    body.push_str(&format!(
+        "build_overlay_x = {}\n",
+        cfg.build_overlay_geometry.x
+    ));
+    body.push_str(&format!(
+        "build_overlay_y = {}\n",
+        cfg.build_overlay_geometry.y
+    ));
+    body.push_str(&format!(
+        "build_overlay_width = {}\n",
+        cfg.build_overlay_geometry.width
+    ));
+    body.push_str(&format!(
+        "build_overlay_height = {}\n",
+        cfg.build_overlay_geometry.height
     ));
     body.push_str(&format!(
         "ui_language = \"{}\"\n",

@@ -3455,9 +3455,8 @@ fn variant_selection_persists_across_step_reorder_by_original_item_id() {
         .iter()
         .enumerate()
         .skip(1)
-        .take(1)
         .find_map(|(idx, s)| s.variants.first().map(|v| (idx, s.item_id, v.item_id)))
-        .expect("expected step 1 to have a variant");
+        .expect("expected a later step to have a variant");
 
     let earlier_variant_id = build_before.steps[0]
         .variants
@@ -3747,6 +3746,86 @@ fn ui_config_persists_ui_language_and_defaults_to_english_when_missing() {
             "ui_language {lang:?} must round-trip through ui_config.toml"
         );
     }
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn active_build_hero_evicts_stale_local_hero_and_persists_independent_build_overlay_geometry() {
+    use crate::session::{OverlayGeometry, load_ui_config_from_dir};
+    use truesight_adapters::sync::LocalCacheManager;
+    use truesight_core::domain::{HeroId, Role, Side};
+
+    let tmp_dir =
+        std::env::temp_dir().join(format!("truesight_build_geom_cfg_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    // 1. Legacy ui_config.toml without build_overlay_* seeds build X/Y from Picks and uses 390x136 default.
+    std::fs::write(
+        tmp_dir.join("ui_config.toml"),
+        "overlay_x = 140\noverlay_y = 220\noverlay_width = 430\noverlay_height = 290\n",
+    )
+    .unwrap();
+    let legacy = load_ui_config_from_dir(&tmp_dir);
+    assert_eq!(legacy.overlay_geometry.width, 430.0);
+    assert_eq!(legacy.overlay_geometry.height, 290.0);
+    assert_eq!(legacy.build_overlay_geometry.x, 140.0);
+    assert_eq!(legacy.build_overlay_geometry.y, 220.0);
+    assert_eq!(legacy.build_overlay_geometry.width, 390.0);
+    assert_eq!(legacy.build_overlay_geometry.height, 136.0);
+
+    // 2. Resizing Picks vs Build geometries persists independently via set_active_overlay_geometry.
+    let cfg_path = tmp_dir.join("config.toml");
+    let mgr = LocalCacheManager::with_optional_account(tmp_dir.join("cache"), None);
+    let mut session = AppSession::with_cache_and_config(mgr, Some(cfg_path.clone())).unwrap();
+    let picks_geom = OverlayGeometry {
+        x: 50.0,
+        y: 120.0,
+        width: 440.0,
+        height: 270.0,
+        click_through: false,
+    };
+    session.set_active_overlay_geometry(picks_geom);
+    session.toggle_post_draft_build_view();
+    assert!(session.is_post_draft_build_view());
+    let build_geom = OverlayGeometry {
+        x: 90.0,
+        y: 150.0,
+        width: 520.0,
+        height: 128.0,
+        click_through: false,
+    };
+    session.set_active_overlay_geometry(build_geom);
+
+    let reloaded_mgr = LocalCacheManager::with_optional_account(tmp_dir.join("cache"), None);
+    let reloaded = AppSession::with_cache_and_config(reloaded_mgr, Some(cfg_path)).unwrap();
+    assert_eq!(reloaded.overlay_geometry, picks_geom);
+    assert_eq!(reloaded.build_overlay_geometry, build_geom);
+
+    // 3. Stale local_player_hero must update when slot hero is replaced or evicted, never staying stuck.
+    session.set_slot_manual(Side::Allies, 3, HeroId(121)); // Grimstroke Pos 4
+    session.local_player_hero = Some(HeroId(121));
+    assert_eq!(
+        session.active_build_hero(),
+        Some((HeroId(121), Role::SoftSupport))
+    );
+    session.set_slot_manual(Side::Allies, 3, HeroId(50)); // Replaced with Dazzle Pos 4
+    assert_eq!(
+        session.active_build_hero(),
+        Some((HeroId(50), Role::SoftSupport)),
+        "replacing manual local hero slot must update active_build_hero instead of keeping Grimstroke"
+    );
+
+    // Even if local_player_hero pointed to a hero not in allies, active_build_hero falls back cleanly.
+    session.local_player_hero = Some(HeroId(121));
+    session.draft.target_role = Role::Carry;
+    session.set_slot_manual(Side::Allies, 0, HeroId(95)); // Troll Warlord Pos 1
+    assert_eq!(
+        session.active_build_hero(),
+        Some((HeroId(95), Role::Carry)),
+        "evicted local_player_hero not in draft must fall back to active target_role hero"
+    );
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }

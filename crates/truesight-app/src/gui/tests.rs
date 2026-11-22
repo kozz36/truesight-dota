@@ -1749,6 +1749,14 @@ fn gui_overlay_keeps_next_badge_visible_for_fifth_step() {
         .map(|e| e.display_name)
         .unwrap();
 
+    let fifth_timing = format!(
+        "{}m",
+        build_with_fifth_next.steps[4]
+            .avg_time_mins
+            .round()
+            .max(1.0) as u32
+    );
+
     let mut app = TrueSightGuiApp::new(session, None, None);
     let ctx = egui::Context::default();
     let mut full_output = None;
@@ -1779,8 +1787,12 @@ fn gui_overlay_keeps_next_badge_visible_for_fifth_step() {
         "overlay must render NEXT badge even when next_unowned_index is 4; painted texts: {texts:?}"
     );
     assert!(
-        texts.iter().any(|t| t.contains(&fifth_item_name)),
-        "overlay must render 5th step '{fifth_item_name}'; painted texts: {texts:?}"
+        texts.iter().any(|t| t == &fifth_timing),
+        "overlay must paint overlaid timing '{fifth_timing}' on the 5th step icon; painted texts: {texts:?}"
+    );
+    assert!(
+        !texts.iter().any(|t| t == &fifth_item_name),
+        "icon-only build overlay must omit verbose item label '{fifth_item_name}'; painted texts: {texts:?}"
     );
 }
 
@@ -2328,7 +2340,10 @@ fn overlay_drag_and_resize_handles_emit_start_drag_and_begin_resize_commands() {
     assert!(!initial.drag_started);
     assert!(!initial.resize_started);
     assert_eq!(app.textures.heroes.len(), 127);
-    assert_eq!(app.textures.items.len(), 110);
+    assert_eq!(
+        app.textures.items.len(),
+        truesight_adapters::item_repo::embedded_item_ids().len()
+    );
     let draft_tex_meshes: usize = initial_full
         .shapes
         .iter()
@@ -3137,5 +3152,190 @@ fn wayland_portal_shortcut_syntax_binding_status_and_cancel_handling() {
             extract_assigned_trigger_from_pairs(&cleared_pairs, "toggle_overlay_pass"),
             None
         );
+    }
+}
+
+#[test]
+fn gui_build_bar_renders_three_timed_phases_and_role_filtered_optional_section() {
+    let mut session = AppSession::new().unwrap();
+    assert!(execute_command(&mut session, "ally 4 nyx assassin").unwrap());
+    assert!(execute_command(&mut session, "enemy 1 phantom assassin").unwrap());
+    assert!(execute_command(&mut session, "enemy 3 riki").unwrap());
+    assert!(execute_command(&mut session, "enemy 5 shadow shaman").unwrap());
+    session.draft.target_role = Role::SoftSupport;
+    session.local_player_hero = Some(HeroId(88));
+    session.toggle_post_draft_build_view();
+    assert!(session.is_post_draft_build_view());
+
+    let mut app = TrueSightGuiApp::new(session, None, None);
+    app.onboarding_open = false;
+    let ctx = egui::Context::default();
+
+    // Check full desktop 3-column integration (1468x960) plus 2+1 (460x760) & stacked (320x860)
+    // responsive breakpoints directly on the build card.
+    let (r, desktop_out) = render_at_viewport_with_output(&mut app, &ctx, vec2(1468.0, 960.0));
+    assert!(
+        r.suggested.width() > 0.0 && r.suggested.height() > 0.0,
+        "build card must occupy non-zero rect on desktop"
+    );
+    let mut outputs = vec![(vec2(1468.0, 960.0), desktop_out)];
+    for card_vp in [vec2(460.0, 760.0), vec2(320.0, 860.0)] {
+        let card_out = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), card_vp)),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(ctx, |ui| {
+                        let _ = app.render_item_build_card(ui);
+                    });
+            },
+        );
+        outputs.push((card_vp, card_out));
+    }
+    for (vp, out) in outputs {
+        let mut texts = Vec::new();
+        for c in &out.shapes {
+            collect_painted_texts(&c.shape, &mut texts);
+        }
+        assert!(texts.iter().any(|t| t == "EARLY"), "{vp:?}: {texts:?}");
+        assert!(texts.iter().any(|t| t == "CORE"), "{vp:?}: {texts:?}");
+        assert!(texts.iter().any(|t| t == "LATE"), "{vp:?}: {texts:?}");
+        assert!(
+            texts.iter().any(|t| t == "OPTIONAL / COUNTERS"),
+            "{vp:?}: {texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|t| t == "Lotus Orb" || t == "Dust of Appearance"),
+            "Pos 4 Nyx vs Shaman + Riki should display role-eligible Optional counters at {vp:?}: {texts:?}"
+        );
+        for forbidden in [
+            "Pipe of Insight",
+            "Battle Fury",
+            "Monkey King Bar",
+            "Eye of Skadi",
+        ] {
+            assert!(
+                !texts.iter().any(|t| t == forbidden),
+                "Pos 4 Nyx must not display carry/offlane counter '{forbidden}' at {vp:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn gui_overlay_switches_independent_picks_and_build_geometries_and_renders_icon_only_build() {
+    let mut session = make_5v5_gui_session();
+    assert!(execute_command(&mut session, "enemy 4 riki").unwrap());
+    session.overlay_mode = true;
+    session.overlay_geometry = crate::session::OverlayGeometry {
+        x: 60.0,
+        y: 140.0,
+        width: 420.0,
+        height: 260.0,
+        click_through: false,
+    };
+    session.build_overlay_geometry = crate::session::OverlayGeometry {
+        x: 80.0,
+        y: 160.0,
+        width: 500.0,
+        height: 142.0,
+        click_through: false,
+    };
+
+    let mut app = TrueSightGuiApp::new(session, None, None);
+    app.onboarding_open = false;
+    app.native_monitors_probed = true;
+    let ctx = egui::Context::default();
+
+    let overlay_id = egui::ViewportId::from_hash_of("truesight_compact_overlay");
+    let picks_vp = egui::ViewportInfo {
+        monitor_size: Some(vec2(1920.0, 1080.0)),
+        outer_rect: Some(Rect::from_min_size(pos2(60.0, 140.0), vec2(420.0, 260.0))),
+        inner_rect: Some(Rect::from_min_size(pos2(60.0, 140.0), vec2(420.0, 260.0))),
+        ..Default::default()
+    };
+    let mut raw_picks = egui::RawInput {
+        screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1180.0, 700.0))),
+        ..Default::default()
+    };
+    raw_picks
+        .viewports
+        .insert(egui::ViewportId::ROOT, picks_vp.clone());
+    raw_picks.viewports.insert(overlay_id, picks_vp);
+
+    // 1. Frame in Picks mode initializes last_overlay_is_post_draft = Some(false).
+    let _ = ctx.run(raw_picks.clone(), |ctx| {
+        let _ = app.render_frame(ctx);
+    });
+    assert_eq!(app.last_overlay_is_post_draft, Some(false));
+    assert_eq!(app.session.overlay_geometry.width, 420.0);
+
+    // 2. Toggle to Build mode: must preserve Picks 420x260 and command Build 500x142 + min 220x104
+    // on the immediate transition frame.
+    app.session.toggle_post_draft_build_view();
+    let switch_out = ctx.run(raw_picks, |ctx| {
+        let _ = app.render_frame(ctx);
+    });
+    let cmds = &switch_out
+        .viewport_output
+        .get(&overlay_id)
+        .or_else(|| switch_out.viewport_output.get(&egui::ViewportId::ROOT))
+        .expect("overlay viewport output")
+        .commands;
+    assert!(
+        cmds.iter()
+            .any(|c| matches!(c, egui::ViewportCommand::MinInnerSize(s) if (s.x - 220.0).abs() < 0.5 && (s.y - 104.0).abs() < 0.5)),
+        "Build overlay transition must relax min inner size to 220x104: {cmds:?}"
+    );
+    assert!(
+        cmds.iter()
+            .any(|c| matches!(c, egui::ViewportCommand::InnerSize(s) if (s.x - 500.0).abs() < 0.5 && (s.y - 142.0).abs() < 0.5)),
+        "Build overlay transition must apply saved Build dimensions 500x142: {cmds:?}"
+    );
+    assert_eq!(app.session.overlay_geometry.width, 420.0);
+    assert_eq!(app.session.overlay_geometry.height, 260.0);
+
+    // 3. Direct responsive checks of icon-only Build overlay at 240x110, 390x136, and 540x180.
+    for vp in [vec2(240.0, 110.0), vec2(390.0, 136.0), vec2(540.0, 180.0)] {
+        let mut out_opt = None;
+        let screen_rect = Rect::from_min_size(pos2(0.0, 0.0), vp);
+        let full = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(screen_rect),
+                ..Default::default()
+            },
+            |vctx| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(vctx, |ui| {
+                        out_opt = Some(app.render_overlay_panel(ui));
+                    });
+            },
+        );
+        let panel_out = out_opt.expect("overlay panel output");
+        assert!(
+            screen_rect.contains_rect(panel_out.resize_handle),
+            "resize handle {:?} must stay inside Build overlay viewport {vp:?}",
+            panel_out.resize_handle
+        );
+        let mut texts = Vec::new();
+        for c in &full.shapes {
+            collect_painted_texts(&c.shape, &mut texts);
+        }
+        assert!(
+            texts.iter().any(|t| t.ends_with('m') && t.len() <= 4),
+            "Build overlay at {vp:?} must paint overlaid timing pills (e.g. '7m'); got {texts:?}"
+        );
+        if vp.y >= 130.0 {
+            assert!(
+                texts.iter().any(|t| t == "OPT"),
+                "Build overlay at {vp:?} with Riki enemy must render compact OPT strip; got {texts:?}"
+            );
+        }
     }
 }
