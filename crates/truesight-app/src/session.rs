@@ -788,6 +788,7 @@ impl AppSession {
         if slot_a >= TEAM_SIZE || slot_b >= TEAM_SIZE || slot_a == slot_b {
             return;
         }
+        let prev_active_hero = self.active_build_hero().map(|(h, _)| h);
         let (pick_a, pick_b) = {
             let picks = self.side_picks_mut(side);
             picks.swap(slot_a, slot_b);
@@ -809,6 +810,8 @@ impl AppSession {
         locked[slot_a] = pick_a.is_some();
         locked[slot_b] = pick_b.is_some();
         self.sync_local_player_target_role();
+        self.sync_target_item_heroes_to_cache();
+        self.refresh_item_build_if_hero_changed(prev_active_hero);
     }
 
     fn remove_hero_from_opposite_and_bans(&mut self, side: Side, hero_id: HeroId) {
@@ -837,6 +840,7 @@ impl AppSession {
         if slot >= TEAM_SIZE {
             return;
         }
+        let prev_active_hero = self.active_build_hero().map(|(h, _)| h);
         self.manually_dismissed.retain(|&id| id != hero_id);
         if let Some(existing_slot) = self
             .side_picks(side)
@@ -870,6 +874,7 @@ impl AppSession {
         }
         self.sync_local_player_target_role();
         self.sync_target_item_heroes_to_cache();
+        self.refresh_item_build_if_hero_changed(prev_active_hero);
     }
 
     /// Clears `(side, slot)`, unlocks the slot, and suppresses vision re-adding that hero until reset.
@@ -877,6 +882,7 @@ impl AppSession {
         if slot >= TEAM_SIZE {
             return;
         }
+        let prev_active_hero = self.active_build_hero().map(|(h, _)| h);
         let old = self.side_picks_mut(side)[slot].take();
         self.side_locked_mut(side)[slot] = false;
         if let Some(pick) = old {
@@ -894,6 +900,7 @@ impl AppSession {
             }
         }
         self.sync_target_item_heroes_to_cache();
+        self.refresh_item_build_if_hero_changed(prev_active_hero);
     }
 
     pub fn apply_event(&mut self, event: DraftEvent) {
@@ -1282,6 +1289,14 @@ impl AppSession {
         ))
     }
 
+    fn refresh_item_build_if_hero_changed(&mut self, prev_active_hero: Option<HeroId>) {
+        if self.is_post_draft_build_view()
+            && self.active_build_hero().map(|(h, _)| h) != prev_active_hero
+        {
+            let _ = self.request_item_build_refresh_if_uncached();
+        }
+    }
+
     /// Requests a background item-build refresh when live persistence is configured and active
     /// target heroes lack cached item stats. If another sync is already in flight, keeps the
     /// request pending until `poll_sync_completion` drains it.
@@ -1366,6 +1381,24 @@ impl AppSession {
             .find_map(|(idx, slot)| slot.map(|p| (p.hero_id, p.role.unwrap_or(Role::ALL[idx]))))
     }
 
+    /// Returns the GSI inventory items belonging to [`AppSession::active_build_hero`], or `&[]`
+    /// when browsing a teammate's build so local purchases never mark another hero's items owned.
+    pub fn active_build_owned_items(&self) -> &[ItemId] {
+        let Some((hero_id, _)) = self.active_build_hero() else {
+            return &[];
+        };
+        let owns_inventory = match self.local_player_hero {
+            Some(local_id) => local_id == hero_id,
+            // Without a confirmed local hero, allow fallback target inventory only when not browsing an explicit ally.
+            None => self.build_view_hero.is_none(),
+        };
+        if owns_inventory {
+            &self.owned_items
+        } else {
+            &[]
+        }
+    }
+
     /// Selects a variant item override keyed by the step's currently displayed primary item ID
     /// within the active `(hero_id, role)` build context.
     pub fn select_build_variant_for_item(
@@ -1426,6 +1459,7 @@ impl AppSession {
     /// Computes the recommended item build for the active allied hero, applying any selected variant swaps.
     pub fn compute_recommended_build(&self) -> Option<RecommendedBuild> {
         let (hero_id, role) = self.active_build_hero()?;
+        let owned_items = self.active_build_owned_items();
         let enemy_ids: [Option<HeroId>; TEAM_SIZE] =
             self.draft.enemies.map(|slot| slot.map(|p| p.hero_id));
         let mut build = recommend_item_build(
@@ -1434,7 +1468,7 @@ impl AppSession {
             role,
             self.draft.bracket,
             &enemy_ids,
-            &self.owned_items,
+            owned_items,
             self.game_time_secs,
         )
         .ok()?;
@@ -1469,13 +1503,13 @@ impl AppSession {
             step.score = chosen.score;
             step.avg_time_mins = chosen.avg_time_mins;
             step.counter_trait = chosen.counter_trait;
-            step.owned = self.owned_items.contains(&chosen.item_id);
+            step.owned = owned_items.contains(&chosen.item_id);
             if let Some(entry) = self.item_repo.item_catalog(chosen.item_id) {
                 step.total_components = entry.components.len();
                 step.owned_components = entry
                     .components
                     .iter()
-                    .filter(|c| self.owned_items.contains(c))
+                    .filter(|c| owned_items.contains(c))
                     .count();
             } else {
                 step.total_components = 0;

@@ -233,7 +233,7 @@ impl TrueSightGuiApp {
         right_to_left: bool,
     ) {
         let paint_chip = |ui: &mut egui::Ui, item_id: ItemId| {
-            let owned = self.session.owned_items.contains(&item_id);
+            let owned = self.session.active_build_owned_items().contains(&item_id);
             let (name, cost) = self
                 .session
                 .item_repo
