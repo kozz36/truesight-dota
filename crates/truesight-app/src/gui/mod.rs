@@ -1,4 +1,5 @@
 mod build_bar;
+mod i18n;
 mod matrix_card;
 mod onboarding;
 mod oracle_card;
@@ -81,6 +82,8 @@ pub struct TrueSightGuiApp {
     pub(super) stratz_paste_open: bool,
     pub(super) stratz_token_input: String,
     pub(super) native_monitors_probed: bool,
+    pub(super) overlay_applied_click_through: Option<bool>,
+    pub(super) overlay_passthrough_repaint_frames: u8,
 }
 
 impl Drop for TrueSightGuiApp {
@@ -141,7 +144,25 @@ impl TrueSightGuiApp {
             stratz_paste_open: false,
             stratz_token_input: String::new(),
             native_monitors_probed: false,
+            overlay_applied_click_through: None,
+            overlay_passthrough_repaint_frames: 0,
         }
+    }
+
+    /// Toggles overlay mouse click-through immediately and requests immediate repaints on both
+    /// the main and overlay viewports so Wayland/X11/Windows input masks update right away.
+    pub(super) fn set_overlay_click_through_live(&mut self, ctx: &egui::Context, enabled: bool) {
+        self.session.set_overlay_click_through(enabled);
+        self.overlay_passthrough_repaint_frames = 2;
+        let overlay_id = egui::ViewportId::from_hash_of("truesight_compact_overlay");
+        ctx.request_repaint();
+        ctx.request_repaint_of(overlay_id);
+        let tr = i18n::strings(self.session.ui_language);
+        self.status_banner = if enabled {
+            tr.status_pass_enabled.into()
+        } else {
+            tr.status_pass_disabled.into()
+        };
     }
 
     pub(super) fn apply_account_input(&mut self) -> Option<AccountLinkConfig> {
@@ -248,9 +269,12 @@ pub struct LayoutRects {
     pub info_button: Rect,
     pub reset_button: Rect,
     pub bracket_bar: Rect,
+    pub overlay_pass_unlock_button: Option<Rect>,
     pub options_window: Option<Rect>,
     pub options_demo_button: Option<Rect>,
+    pub options_lang_buttons: Option<[Rect; 3]>,
     pub onboarding_window: Option<Rect>,
+    pub onboarding_lang_buttons: Option<[Rect; 3]>,
     pub account_window: Option<Rect>,
     pub account_apply_button: Option<Rect>,
     pub account_close_button: Option<Rect>,
@@ -298,9 +322,15 @@ impl TrueSightGuiApp {
         if let Some(notice) = self.session.last_sync_notice.take() {
             self.status_banner = notice;
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::F8)) {
+        let f8_root = ctx.input(|i| i.key_pressed(egui::Key::F8));
+        if f8_root {
             let next = !self.session.overlay_mode;
             self.session.set_overlay_mode(next);
+        }
+        let f9_root = self.session.overlay_mode && ctx.input(|i| i.key_pressed(egui::Key::F9));
+        if f9_root {
+            let next = !self.session.overlay_geometry.click_through;
+            self.set_overlay_click_through_live(ctx, next);
         }
 
         let (analysis, _) = self.session.evaluate();
@@ -310,9 +340,12 @@ impl TrueSightGuiApp {
             info_button: Rect::NOTHING,
             reset_button: Rect::NOTHING,
             bracket_bar: Rect::NOTHING,
+            overlay_pass_unlock_button: None,
             options_window: None,
             options_demo_button: None,
+            options_lang_buttons: None,
             onboarding_window: None,
+            onboarding_lang_buttons: None,
             account_window: None,
             account_apply_button: None,
             account_close_button: None,
@@ -376,10 +409,14 @@ impl TrueSightGuiApp {
                 }
             });
 
-        let (opts_win, opts_demo) = self.render_options_window(ctx, rects.top_bar.max.y);
+        let (opts_win, opts_demo, opts_lang_btns) =
+            self.render_options_window(ctx, rects.top_bar.max.y);
         rects.options_window = opts_win;
         rects.options_demo_button = opts_demo;
-        rects.onboarding_window = self.render_onboarding_window(ctx);
+        rects.options_lang_buttons = opts_lang_btns;
+        let (guide_win, guide_lang_btns) = self.render_onboarding_window(ctx);
+        rects.onboarding_window = guide_win;
+        rects.onboarding_lang_buttons = guide_lang_btns;
 
         if self.drag_slot.is_some() {
             ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
@@ -424,7 +461,9 @@ impl TrueSightGuiApp {
                 (vec2(-12.0, top_anchor_y - screen.top()), mw, 240.0)
             };
 
-            let acct_resp = egui::Window::new("STEAM ACCOUNT LINK")
+            let tr = i18n::strings(self.session.ui_language);
+            let acct_resp = egui::Window::new(tr.account_window_title)
+                .id(egui::Id::new("truesight_account_editor_window"))
                 .collapsible(false)
                 .resizable(false)
                 .fade_in(false)
@@ -435,11 +474,7 @@ impl TrueSightGuiApp {
                 .show(ctx, |ui| {
                     ui.add(
                         egui::Label::new(
-                            RichText::new(
-                                "Enter Steam32 or Steam64 ID (leave Auto for GSI + Steam VDF):",
-                            )
-                            .size(11.0)
-                            .color(P_SILVER),
+                            RichText::new(tr.account_prompt).size(11.0).color(P_SILVER),
                         )
                         .wrap(),
                     );
@@ -448,7 +483,7 @@ impl TrueSightGuiApp {
                         .add(
                             egui::TextEdit::singleline(&mut self.account_input)
                                 .desired_width(input_w)
-                                .hint_text("e.g. Steam32 or 7656119..."),
+                                .hint_text(tr.account_hint),
                         )
                         .lost_focus()
                         && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -456,7 +491,7 @@ impl TrueSightGuiApp {
                     let mut apply_rect = None;
                     let mut close_rect = None;
                     ui.horizontal(|ui| {
-                        let apply_resp = ui.button("APPLY");
+                        let apply_resp = ui.button(tr.apply_btn);
                         apply_rect = Some(apply_resp.rect);
                         if apply_resp.clicked() || enter_pressed {
                             if let Some(cfg) = self.apply_account_input() {
@@ -464,18 +499,18 @@ impl TrueSightGuiApp {
                                 close_modal = true;
                             }
                         }
-                        if ui.button("AUTO (VDF)").clicked() {
+                        if ui.button(tr.auto_vdf_btn).clicked() {
                             let cfg = self.apply_auto_account();
                             let _ = save_account_config(cfg);
                             close_modal = true;
                         }
-                        if ui.button("UNLINK").clicked() {
+                        if ui.button(tr.unlink_btn).clicked() {
                             self.session.set_account_id(None, true);
                             let _ = save_account_config(AccountLinkConfig::Unlinked);
                             self.status_banner = "Account unlinked (neutral 0.0% comfort).".into();
                             close_modal = true;
                         }
-                        let close_resp = ui.button("CLOSE");
+                        let close_resp = ui.button(tr.close_btn);
                         close_rect = Some(close_resp.rect);
                         if close_resp.clicked() {
                             close_modal = true;
@@ -500,16 +535,42 @@ impl TrueSightGuiApp {
         if self.session.overlay_mode {
             let overlay_id = egui::ViewportId::from_hash_of("truesight_compact_overlay");
             let builder = overlay::build_overlay_viewport_builder(self.session.overlay_geometry);
-            let click_through = self.session.overlay_geometry.click_through;
             ctx.show_viewport_immediate(overlay_id, builder, |vctx, _class| {
+                if !f8_root && vctx.input(|i| i.key_pressed(egui::Key::F8)) {
+                    self.session.set_overlay_mode(false);
+                    ctx.request_repaint();
+                }
+                if !f9_root && vctx.input(|i| i.key_pressed(egui::Key::F9)) {
+                    let next = !self.session.overlay_geometry.click_through;
+                    self.set_overlay_click_through_live(ctx, next);
+                }
+
                 self.sync_live_overlay_viewport_geometry(vctx);
-                vctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(click_through));
                 egui::CentralPanel::default()
                     .frame(egui::Frame::NONE)
                     .show(vctx, |ui| {
                         let _ = self.render_overlay_panel(ui);
                     });
+
+                let click_through = self.session.overlay_geometry.click_through;
+                if self.overlay_applied_click_through != Some(click_through) {
+                    vctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(click_through));
+                    self.overlay_applied_click_through = Some(click_through);
+                    self.overlay_passthrough_repaint_frames = 2;
+                    ctx.request_repaint();
+                    ctx.request_repaint_of(overlay_id);
+                } else if self.overlay_passthrough_repaint_frames > 0 {
+                    self.overlay_passthrough_repaint_frames -= 1;
+                    if !click_through {
+                        vctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(false));
+                    }
+                    ctx.request_repaint();
+                    ctx.request_repaint_of(overlay_id);
+                }
             });
+        } else {
+            self.overlay_applied_click_through = None;
+            self.overlay_passthrough_repaint_frames = 0;
         }
 
         rects
@@ -533,6 +594,7 @@ impl TrueSightGuiApp {
         rects.info_button = top_out.info_button;
         rects.reset_button = top_out.reset_button;
         rects.bracket_bar = top_out.bracket_bar;
+        rects.overlay_pass_unlock_button = top_out.overlay_pass_unlock_button;
         ui.add_space(if compact_h { 8.0 } else { 10.0 });
 
         // 2. Top Row: Allies (238..356px) | Oracle (flex) | Enemies (238..356px)

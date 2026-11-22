@@ -17,6 +17,16 @@ fn format_clock(secs: i32) -> String {
     }
 }
 
+/// Layout and interaction telemetry returned by [`TrueSightGuiApp::render_overlay_panel`].
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) struct OverlayPanelOutput {
+    pub(super) rect: Rect,
+    pub(super) drag_handle: Rect,
+    pub(super) resize_handle: Rect,
+    pub(super) drag_started: bool,
+    pub(super) resize_started: bool,
+}
+
 /// Builds the always-on-top frameless viewport configuration for the compact overlay window.
 pub(super) fn build_overlay_viewport_builder(geom: OverlayGeometry) -> egui::ViewportBuilder {
     egui::ViewportBuilder::default()
@@ -109,41 +119,50 @@ impl TrueSightGuiApp {
             );
         let clamped_pts = clamped_px.scale_to_egui_points(ppp);
 
-        if (clamped_pts.x - candidate_pts.x).abs() > 0.5
-            || (clamped_pts.y - candidate_pts.y).abs() > 0.5
-        {
-            vctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
-                clamped_pts.x,
-                clamped_pts.y,
-            )));
-        }
-        if (clamped_pts.width - candidate_pts.width).abs() > 0.5
-            || (clamped_pts.height - candidate_pts.height).abs() > 0.5
-        {
-            vctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
-                clamped_pts.width,
-                clamped_pts.height,
-            )));
-        }
+        // Avoid sending corrective position/size commands while the user is actively dragging
+        // or resizing the frameless overlay viewport, or WM live tracking will snap/stutter.
+        let actively_interacting = vctx.input(|i| i.pointer.primary_down());
+        if !actively_interacting {
+            if (clamped_pts.x - candidate_pts.x).abs() > 0.5
+                || (clamped_pts.y - candidate_pts.y).abs() > 0.5
+            {
+                vctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
+                    clamped_pts.x,
+                    clamped_pts.y,
+                )));
+            }
+            if (clamped_pts.width - candidate_pts.width).abs() > 0.5
+                || (clamped_pts.height - candidate_pts.height).abs() > 0.5
+            {
+                vctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+                    clamped_pts.width,
+                    clamped_pts.height,
+                )));
+            }
 
-        let prev = self.session.overlay_geometry;
-        if (clamped_pts.x - prev.x).abs() > 0.5
-            || (clamped_pts.y - prev.y).abs() > 0.5
-            || (clamped_pts.width - prev.width).abs() > 0.5
-            || (clamped_pts.height - prev.height).abs() > 0.5
-        {
-            self.session.set_overlay_geometry(clamped_pts);
+            let prev = self.session.overlay_geometry;
+            if (clamped_pts.x - prev.x).abs() > 0.5
+                || (clamped_pts.y - prev.y).abs() > 0.5
+                || (clamped_pts.width - prev.width).abs() > 0.5
+                || (clamped_pts.height - prev.height).abs() > 0.5
+            {
+                self.session.set_overlay_geometry(clamped_pts);
+            }
         }
     }
 
     /// Renders the compact overlay panel for both draft-phase and post-draft item build views.
-    pub(super) fn render_overlay_panel(&mut self, ui: &mut egui::Ui) -> Rect {
+    pub(super) fn render_overlay_panel(&mut self, ui: &mut egui::Ui) -> OverlayPanelOutput {
+        let tr = super::i18n::strings(self.session.ui_language);
         let summary = compute_overlay_summary(&self.session);
+        let interactive = !self.session.overlay_geometry.click_through;
         let mut clicked_role: Option<Role> = None;
         let mut toggle_build_view = false;
         let mut toggle_click_through = false;
         let mut exit_overlay = false;
         let mut clicked_variant: Option<(ItemId, ItemId)> = None;
+        let mut drag_handle = Rect::NOTHING;
+        let mut drag_started = false;
 
         let panel_resp = egui::Frame::NONE
             .fill(P_VOID.gamma_multiply(0.92))
@@ -152,25 +171,86 @@ impl TrueSightGuiApp {
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
 
-                // Top mini-bar
+                // Top mini-bar with tactile drag grip tab & quick controls
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
-                    ui.label(
-                        RichText::new("TRUESIGHT OVERLAY")
-                            .size(9.5)
-                            .strong()
-                            .color(P_GEM),
+
+                    let (grip_rect, mut grip_resp) = ui.allocate_exact_size(
+                        vec2(20.0, 16.0),
+                        if interactive {
+                            Sense::drag()
+                        } else {
+                            Sense::hover()
+                        },
                     );
+                    drag_handle = grip_rect;
+                    let grip_color = if grip_resp.dragged() || grip_resp.hovered() {
+                        P_GEM
+                    } else {
+                        P_MUTED
+                    };
+                    let painter = ui.painter();
+                    for row in 0..2 {
+                        for col in 0..3 {
+                            let dot = egui::pos2(
+                                grip_rect.left() + 4.0 + col as f32 * 5.0,
+                                grip_rect.top() + 5.0 + row as f32 * 5.0,
+                            );
+                            painter.circle_filled(dot, 1.3, grip_color);
+                        }
+                    }
+                    if interactive {
+                        grip_resp = grip_resp
+                            .on_hover_cursor(egui::CursorIcon::Grab)
+                            .on_hover_text(tr.overlay_drag_hover);
+                        if grip_resp.dragged() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                        }
+                        if grip_resp.drag_started_by(egui::PointerButton::Primary) {
+                            drag_started = true;
+                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                        }
+                    }
+
+                    let mut title_resp = ui.add(
+                        egui::Label::new(
+                            RichText::new(tr.overlay_title)
+                                .size(9.5)
+                                .strong()
+                                .color(P_GEM),
+                        )
+                        .sense(if interactive {
+                            Sense::drag()
+                        } else {
+                            Sense::hover()
+                        }),
+                    );
+                    if interactive {
+                        title_resp = title_resp
+                            .on_hover_cursor(egui::CursorIcon::Grab)
+                            .on_hover_text(tr.overlay_drag_hover);
+                        if title_resp.dragged() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                        }
+                        if title_resp.drag_started_by(egui::PointerButton::Primary) {
+                            drag_started = true;
+                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                        }
+                    }
+
                     let win_col = if summary.projected_ally_win_pct >= 50.0 {
                         P_GEM
                     } else {
                         P_DIRE
                     };
                     ui.label(
-                        RichText::new(format!("WIN: {:.1}%", summary.projected_ally_win_pct))
-                            .size(10.0)
-                            .strong()
-                            .color(win_col),
+                        RichText::new(format!(
+                            "{} {:.1}%",
+                            tr.overlay_win_prefix, summary.projected_ally_win_pct
+                        ))
+                        .size(10.0)
+                        .strong()
+                        .color(win_col),
                     );
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -178,7 +258,10 @@ impl TrueSightGuiApp {
                         if ui
                             .add(
                                 egui::Button::new(
-                                    RichText::new("[ EXIT ]").size(9.0).strong().color(P_DIRE),
+                                    RichText::new(tr.overlay_exit_btn)
+                                        .size(9.0)
+                                        .strong()
+                                        .color(P_DIRE),
                                 )
                                 .fill(P_INDIGO_2),
                             )
@@ -187,31 +270,36 @@ impl TrueSightGuiApp {
                             exit_overlay = true;
                         }
 
-                        let pass_lbl = if self.session.overlay_geometry.click_through {
-                            "[ PASS: ON ]"
-                        } else {
-                            "[ PASS ]"
-                        };
-                        if ui
+                        if self.session.overlay_geometry.click_through {
+                            ui.add(
+                                egui::Button::new(
+                                    RichText::new(tr.overlay_pass_on_badge)
+                                        .size(9.0)
+                                        .strong()
+                                        .color(P_NEUTRAL),
+                                )
+                                .sense(Sense::hover())
+                                .fill(P_INDIGO_2)
+                                .stroke(Stroke::new(1.0_f32, P_NEUTRAL)),
+                            )
+                            .on_hover_text(tr.top_bar_pass_unlock_hover);
+                        } else if ui
                             .add(
-                                egui::Button::new(RichText::new(pass_lbl).size(9.0).color(
-                                    if self.session.overlay_geometry.click_through {
-                                        P_NEUTRAL
-                                    } else {
-                                        P_MUTED
-                                    },
-                                ))
+                                egui::Button::new(
+                                    RichText::new(tr.overlay_pass_btn).size(9.0).color(P_MUTED),
+                                )
                                 .fill(P_INDIGO_2),
                             )
+                            .on_hover_text(tr.overlay_pass_hover)
                             .clicked()
                         {
                             toggle_click_through = true;
                         }
 
                         let mode_lbl = if summary.is_post_draft {
-                            "[ PICKS ]"
+                            tr.overlay_picks_btn
                         } else {
-                            "[ BUILD ]"
+                            tr.overlay_build_btn
                         };
                         if ui
                             .add(
@@ -269,7 +357,7 @@ impl TrueSightGuiApp {
                             );
                             if summary.top_suggestions.is_empty() {
                                 ui.label(
-                                    RichText::new("No hero suggestions")
+                                    RichText::new(tr.overlay_no_suggestions)
                                         .size(9.5)
                                         .color(P_MUTED),
                                 );
@@ -297,7 +385,12 @@ impl TrueSightGuiApp {
 
                         // Compact 5x5 colored mini counter grid
                         ui.vertical(|ui| {
-                            ui.label(RichText::new("5v5 CNT").size(9.0).strong().color(P_MUTED));
+                            ui.label(
+                                RichText::new(tr.overlay_cnt_label)
+                                    .size(9.0)
+                                    .strong()
+                                    .color(P_MUTED),
+                            );
                             ui.spacing_mut().item_spacing = vec2(2.0, 2.0);
                             for row in &summary.counter_grid {
                                 ui.horizontal(|ui| {
@@ -327,7 +420,7 @@ impl TrueSightGuiApp {
                                 .color(P_CYAN),
                         );
                         ui.label(
-                            RichText::new("ITEM BUILD")
+                            RichText::new(tr.overlay_item_build_label)
                                 .size(9.5)
                                 .strong()
                                 .color(P_MUTED),
@@ -428,13 +521,55 @@ impl TrueSightGuiApp {
                             });
                     } else {
                         ui.label(
-                            RichText::new("Pick an allied hero to view item build.")
+                            RichText::new(tr.overlay_pick_ally_hint)
                                 .size(9.5)
                                 .color(P_MUTED),
                         );
                     }
                 }
             });
+
+        let panel_rect = panel_resp.response.rect;
+        let resize_handle = Rect::from_min_max(
+            egui::pos2(
+                (panel_rect.right() - 14.0).max(panel_rect.left()),
+                (panel_rect.bottom() - 14.0).max(panel_rect.top()),
+            ),
+            egui::pos2(panel_rect.right() - 2.0, panel_rect.bottom() - 2.0),
+        );
+        let mut resize_started = false;
+        if interactive {
+            let resize_resp = ui
+                .interact(
+                    resize_handle,
+                    ui.id().with("truesight_overlay_resize_grip"),
+                    Sense::drag(),
+                )
+                .on_hover_cursor(egui::CursorIcon::ResizeSouthEast)
+                .on_hover_text(tr.overlay_resize_hover);
+            let line_col = if resize_resp.dragged() || resize_resp.hovered() {
+                P_GEM
+            } else {
+                P_MUTED
+            };
+            let painter = ui.painter();
+            for offset in [3.0_f32, 6.0, 9.0] {
+                painter.line_segment(
+                    [
+                        egui::pos2(resize_handle.right() - offset, resize_handle.bottom()),
+                        egui::pos2(resize_handle.right(), resize_handle.bottom() - offset),
+                    ],
+                    Stroke::new(1.2_f32, line_col),
+                );
+            }
+            if resize_resp.drag_started_by(egui::PointerButton::Primary) {
+                resize_started = true;
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::BeginResize(
+                        egui::ResizeDirection::SouthEast,
+                    ));
+            }
+        }
 
         if let Some(role) = clicked_role {
             self.session.draft.target_role = role;
@@ -444,10 +579,11 @@ impl TrueSightGuiApp {
         }
         if toggle_click_through {
             let next = !self.session.overlay_geometry.click_through;
-            self.session.set_overlay_click_through(next);
+            self.set_overlay_click_through_live(ui.ctx(), next);
         }
         if exit_overlay {
             self.session.set_overlay_mode(false);
+            ui.ctx().request_repaint();
         }
         if let Some((primary_id, var_id)) = clicked_variant {
             self.session
@@ -455,6 +591,12 @@ impl TrueSightGuiApp {
         }
 
         let _ = TEAM_SIZE;
-        panel_resp.response.rect
+        OverlayPanelOutput {
+            rect: panel_rect,
+            drag_handle,
+            resize_handle,
+            drag_started,
+            resize_started,
+        }
     }
 }

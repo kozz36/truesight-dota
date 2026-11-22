@@ -3716,3 +3716,37 @@ fn resolve_effective_pixels_per_point_honors_native_scale_and_app_zoom() {
             < 1e-5
     );
 }
+
+#[test]
+fn ui_config_persists_ui_language_and_defaults_to_english_when_missing() {
+    use crate::session::{UiConfig, UiLanguage, load_ui_config_from_dir, save_ui_config_to_dir};
+
+    let tmp_dir =
+        std::env::temp_dir().join(format!("truesight_ui_lang_cfg_test_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    // Missing config file defaults safely to English.
+    let missing = load_ui_config_from_dir(&tmp_dir);
+    assert_eq!(missing.ui_language, UiLanguage::En);
+
+    // Unsupported language value falls back to English.
+    std::fs::write(tmp_dir.join("ui_config.toml"), "ui_language = \"fr\"\n").unwrap();
+    let invalid = load_ui_config_from_dir(&tmp_dir);
+    assert_eq!(invalid.ui_language, UiLanguage::En);
+
+    for lang in [UiLanguage::Es, UiLanguage::Ru, UiLanguage::En] {
+        let cfg = UiConfig {
+            ui_language: lang,
+            ..UiConfig::default()
+        };
+        save_ui_config_to_dir(&tmp_dir, &cfg).unwrap();
+        let reloaded = load_ui_config_from_dir(&tmp_dir);
+        assert_eq!(
+            reloaded.ui_language, lang,
+            "ui_language {lang:?} must round-trip through ui_config.toml"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}

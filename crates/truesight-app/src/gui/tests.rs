@@ -1587,7 +1587,7 @@ fn gui_build_bar_and_overlay_preserve_win_parity_and_render_variants() {
         },
         |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                let r = app.render_overlay_panel(ui);
+                let r = app.render_overlay_panel(ui).rect;
                 assert!(r.width() > 0.0 && r.height() > 0.0);
             });
         },
@@ -1629,7 +1629,7 @@ fn gui_build_bar_and_overlay_preserve_win_parity_and_render_variants() {
         },
         |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                let r = app.render_overlay_panel(ui);
+                let r = app.render_overlay_panel(ui).rect;
                 assert!(r.width() > 0.0 && r.height() > 0.0);
             });
         },
@@ -2270,4 +2270,363 @@ fn live_overlay_viewport_geometry_honors_effective_scale_with_native_dpi_and_app
         "dragging past right edge on 150%-DPI + 1.2x zoom secondary monitor must clamp to physical max_x / 1.8, got {}",
         app.session.overlay_geometry.x
     );
+}
+
+#[test]
+fn overlay_drag_and_resize_handles_emit_start_drag_and_begin_resize_commands() {
+    let mut app = TrueSightGuiApp::new(make_5v5_gui_session(), None, None);
+    app.onboarding_open = false;
+    app.session.overlay_mode = true;
+    app.session.set_overlay_click_through(false);
+
+    let ctx = egui::Context::default();
+    let vp_size = egui::vec2(380.0, 230.0);
+
+    let run_overlay = |events: Vec<egui::Event>, app: &mut TrueSightGuiApp| {
+        let mut panel_out = None;
+        let full_output = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(pos2(0.0, 0.0), vp_size)),
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    panel_out = Some(app.render_overlay_panel(ui));
+                });
+            },
+        );
+        (panel_out.expect("overlay panel output"), full_output)
+    };
+
+    let (initial, _) = run_overlay(vec![], &mut app);
+    assert!(initial.drag_handle.width() > 0.0 && initial.drag_handle.height() > 0.0);
+    assert!(initial.resize_handle.width() > 0.0 && initial.resize_handle.height() > 0.0);
+    assert!(!initial.drag_started);
+    assert!(!initial.resize_started);
+
+    // Drag the top-left grip handle -> ViewportCommand::StartDrag
+    // Note: in egui 0.31 `Sense::drag()` widgets fire `drag_started_by` on the press frame.
+    let drag_start = initial.drag_handle.center();
+    let (drag_out, drag_full) = run_overlay(
+        vec![
+            egui::Event::PointerMoved(drag_start),
+            egui::Event::PointerButton {
+                pos: drag_start,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            },
+        ],
+        &mut app,
+    );
+    let drag_end = drag_start + egui::vec2(12.0, 6.0);
+    let (drag_move_out, drag_move_full) =
+        run_overlay(vec![egui::Event::PointerMoved(drag_end)], &mut app);
+    assert!(
+        drag_out.drag_started || drag_move_out.drag_started,
+        "dragging grip handle must trigger drag_started"
+    );
+    let mut drag_cmds: Vec<egui::ViewportCommand> = Vec::new();
+    if let Some(vp) = drag_full.viewport_output.get(&egui::ViewportId::ROOT) {
+        drag_cmds.extend(vp.commands.iter().cloned());
+    }
+    if let Some(vp) = drag_move_full.viewport_output.get(&egui::ViewportId::ROOT) {
+        drag_cmds.extend(vp.commands.iter().cloned());
+    }
+    assert!(
+        drag_cmds
+            .iter()
+            .any(|cmd| matches!(cmd, egui::ViewportCommand::StartDrag)),
+        "expected ViewportCommand::StartDrag, got {drag_cmds:?}"
+    );
+    let _ = run_overlay(
+        vec![egui::Event::PointerButton {
+            pos: drag_end,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::default(),
+        }],
+        &mut app,
+    );
+
+    // Drag the bottom-right resize grip -> ViewportCommand::BeginResize(SouthEast)
+    let resize_start = initial.resize_handle.center();
+    let (resize_out, resize_full) = run_overlay(
+        vec![
+            egui::Event::PointerMoved(resize_start),
+            egui::Event::PointerButton {
+                pos: resize_start,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            },
+        ],
+        &mut app,
+    );
+    let resize_end = resize_start + egui::vec2(10.0, 8.0);
+    let (resize_move_out, resize_move_full) =
+        run_overlay(vec![egui::Event::PointerMoved(resize_end)], &mut app);
+    assert!(
+        resize_out.resize_started || resize_move_out.resize_started,
+        "dragging resize handle must trigger resize_started"
+    );
+    let mut resize_cmds: Vec<egui::ViewportCommand> = Vec::new();
+    if let Some(vp) = resize_full.viewport_output.get(&egui::ViewportId::ROOT) {
+        resize_cmds.extend(vp.commands.iter().cloned());
+    }
+    if let Some(vp) = resize_move_full
+        .viewport_output
+        .get(&egui::ViewportId::ROOT)
+    {
+        resize_cmds.extend(vp.commands.iter().cloned());
+    }
+    assert!(
+        resize_cmds.iter().any(|cmd| matches!(
+            cmd,
+            egui::ViewportCommand::BeginResize(egui::ResizeDirection::SouthEast)
+        )),
+        "expected ViewportCommand::BeginResize(SouthEast), got {resize_cmds:?}"
+    );
+    let _ = run_overlay(
+        vec![egui::Event::PointerButton {
+            pos: resize_end,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::default(),
+        }],
+        &mut app,
+    );
+
+    // When click-through is active, overlay shows PASS: ON · F9 badge and ignores handle drags.
+    app.session.set_overlay_click_through(true);
+    let (locked_out, locked_full) = run_overlay(
+        vec![
+            egui::Event::PointerMoved(drag_start),
+            egui::Event::PointerButton {
+                pos: drag_start,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            },
+            egui::Event::PointerMoved(drag_end),
+        ],
+        &mut app,
+    );
+    assert!(!locked_out.drag_started);
+    assert!(!locked_out.resize_started);
+    let mut texts = Vec::new();
+    for clipped in &locked_full.shapes {
+        collect_painted_texts(&clipped.shape, &mut texts);
+    }
+    assert!(
+        texts.iter().any(|t| t.contains("PASS: ON · F9")),
+        "locked overlay must show PASS: ON · F9 badge; texts={texts:?}"
+    );
+}
+
+#[test]
+fn overlay_click_through_unlocks_via_top_bar_button_options_and_f9_hotkey() {
+    let mut app = TrueSightGuiApp::new(make_5v5_gui_session(), None, None);
+    app.onboarding_open = false;
+    app.session.overlay_mode = true;
+    app.session.set_overlay_click_through(true);
+
+    let ctx = egui::Context::default();
+    let viewport = vec2(1280.0, 800.0);
+
+    let click_at = |pos: egui::Pos2, app: &mut TrueSightGuiApp| {
+        for pressed in [true, false] {
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), viewport)),
+                    events: vec![
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::default(),
+                        },
+                    ],
+                    ..Default::default()
+                },
+                |ctx| {
+                    app.render_frame(ctx);
+                },
+            );
+        }
+    };
+
+    let press_f9 = |app: &mut TrueSightGuiApp| {
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), viewport)),
+                events: vec![egui::Event::Key {
+                    key: egui::Key::F9,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::default(),
+                }],
+                ..Default::default()
+            },
+            |ctx| {
+                app.render_frame(ctx);
+            },
+        );
+    };
+
+    // 1. Top bar renders unlock pill while click-through is ON; clicking it disables click-through.
+    let r0 = render_at_viewport(&mut app, &ctx, viewport);
+    let unlock_rect = r0
+        .overlay_pass_unlock_button
+        .expect("top bar unlock button must appear while overlay click-through is ON");
+    click_at(unlock_rect.center(), &mut app);
+    assert!(
+        !app.session.overlay_geometry.click_through,
+        "clicking top bar unlock button must disable click-through"
+    );
+    let r1 = render_at_viewport(&mut app, &ctx, viewport);
+    assert!(
+        r1.overlay_pass_unlock_button.is_none(),
+        "top bar unlock button must disappear once click-through is OFF"
+    );
+
+    // 2. Pressing F9 toggles click-through ON then back OFF without double-toggling in one frame.
+    press_f9(&mut app);
+    assert!(
+        app.session.overlay_geometry.click_through,
+        "F9 must enable click-through without child viewport double-toggling"
+    );
+    press_f9(&mut app);
+    assert!(
+        !app.session.overlay_geometry.click_through,
+        "second F9 press must disable click-through"
+    );
+
+    // 3. Live click-through unlock from Options arms repaint commit frames and clears click-through.
+    app.set_overlay_click_through_live(&ctx, true);
+    assert!(app.session.overlay_geometry.click_through);
+    assert_eq!(app.overlay_passthrough_repaint_frames, 2);
+    app.options_open = true;
+    app.set_overlay_click_through_live(&ctx, false);
+    assert!(!app.session.overlay_geometry.click_through);
+    assert_eq!(app.overlay_passthrough_repaint_frames, 2);
+    let r2 = render_at_viewport(&mut app, &ctx, viewport);
+    assert!(r2.overlay_pass_unlock_button.is_none());
+}
+
+#[test]
+fn language_selector_switches_es_en_ru_from_quick_guide_and_options() {
+    use crate::session::UiLanguage;
+
+    let mut app = TrueSightGuiApp::new(AppSession::new().unwrap(), None, None);
+    app.onboarding_open = true;
+    let ctx = egui::Context::default();
+    let viewport = vec2(1280.0, 800.0);
+
+    let click_at = |pos: egui::Pos2, app: &mut TrueSightGuiApp| {
+        for pressed in [true, false] {
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), viewport)),
+                    events: vec![
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::default(),
+                        },
+                    ],
+                    ..Default::default()
+                },
+                |ctx| {
+                    app.render_frame(ctx);
+                },
+            );
+        }
+    };
+
+    // 1. Toggle from Quick Guide (`[ES]`, `[EN]`, `[RU]`)
+    let r0 = render_at_viewport(&mut app, &ctx, viewport);
+    let guide_btns = r0
+        .onboarding_lang_buttons
+        .expect("Quick Guide must expose [ES] [EN] [RU] buttons");
+    for b in guide_btns {
+        assert!(b.width() > 0.0 && b.height() > 0.0);
+    }
+
+    click_at(guide_btns[0].center(), &mut app);
+    assert_eq!(app.session.ui_language, UiLanguage::Es);
+    let (_, es_out) = render_at_viewport_with_output(&mut app, &ctx, viewport);
+    let mut es_texts = Vec::new();
+    for c in &es_out.shapes {
+        collect_painted_texts(&c.shape, &mut es_texts);
+    }
+    assert!(
+        es_texts
+            .iter()
+            .any(|t| t.contains("GUÍA RÁPIDA") || t.contains("SIGUIENTE >")),
+        "Quick Guide in ES must paint Spanish labels; got {es_texts:?}"
+    );
+
+    let r_es = render_at_viewport(&mut app, &ctx, viewport);
+    let guide_btns = r_es.onboarding_lang_buttons.unwrap();
+    click_at(guide_btns[2].center(), &mut app);
+    assert_eq!(app.session.ui_language, UiLanguage::Ru);
+    let (_, ru_out) = render_at_viewport_with_output(&mut app, &ctx, viewport);
+    let mut ru_texts = Vec::new();
+    for c in &ru_out.shapes {
+        collect_painted_texts(&c.shape, &mut ru_texts);
+    }
+    assert!(
+        ru_texts
+            .iter()
+            .any(|t| t.contains("БЫСТРЫЙ СТАРТ") || t.contains("ДАЛЕЕ >")),
+        "Quick Guide in RU must paint Russian labels; got {ru_texts:?}"
+    );
+
+    let r_ru = render_at_viewport(&mut app, &ctx, viewport);
+    let guide_btns = r_ru.onboarding_lang_buttons.unwrap();
+    click_at(guide_btns[1].center(), &mut app);
+    assert_eq!(app.session.ui_language, UiLanguage::En);
+
+    // 2. Toggle from Options (`[ES]`, `[EN]`, `[RU]`)
+    app.onboarding_open = false;
+    app.options_open = true;
+    let r_opt = render_at_viewport(&mut app, &ctx, viewport);
+    let opt_btns = r_opt
+        .options_lang_buttons
+        .expect("OPTIONS must expose [ES] [EN] [RU] buttons");
+    click_at(opt_btns[0].center(), &mut app);
+    assert_eq!(app.session.ui_language, UiLanguage::Es);
+
+    let r_opt = render_at_viewport(&mut app, &ctx, viewport);
+    let opt_btns = r_opt.options_lang_buttons.unwrap();
+    click_at(opt_btns[2].center(), &mut app);
+    assert_eq!(app.session.ui_language, UiLanguage::Ru);
+
+    let r_opt = render_at_viewport(&mut app, &ctx, viewport);
+    let opt_btns = r_opt.options_lang_buttons.unwrap();
+    click_at(opt_btns[1].center(), &mut app);
+    assert_eq!(app.session.ui_language, UiLanguage::En);
+
+    // 3. OPTIONS modal must fit inside minimum supported 640x440 viewport in all 3 languages.
+    app.account_editor_open = true;
+    let min_vp = vec2(640.0, 440.0);
+    for lang in [UiLanguage::En, UiLanguage::Es, UiLanguage::Ru] {
+        app.session.set_ui_language(lang);
+        let r = render_at_viewport(&mut app, &ctx, min_vp);
+        let opts_win = r.options_window.expect("OPTIONS window open");
+        let demo_btn = r.options_demo_button.expect("DEMO 5V5 button visible");
+        assert!(
+            opts_win.contains_rect(demo_btn)
+                && opts_win.max.x <= min_vp.x
+                && opts_win.max.y <= min_vp.y
+                && demo_btn.max.y <= min_vp.y,
+            "lang={lang:?} OPTIONS {opts_win:?} or DEMO {demo_btn:?} overflowed {min_vp:?}"
+        );
+    }
 }

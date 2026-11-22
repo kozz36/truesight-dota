@@ -15,6 +15,7 @@ impl TrueSightGuiApp {
         analysis: &DraftAnalysis5v5,
         scout_cards_out: &mut Vec<Rect>,
     ) -> Rect {
+        let tr = super::i18n::strings(self.session.ui_language);
         let ally_pct = analysis.ally_win_probability * 100.0;
         let enemy_pct = 100.0 - ally_pct;
         let lead = ally_pct - 50.0;
@@ -30,7 +31,7 @@ impl TrueSightGuiApp {
 
             // 1. Score Row
             ui.columns(3, |cols| {
-                cols[0].label(RichText::new("ALLIES WIN").size(10.0).color(P_MUTED));
+                cols[0].label(RichText::new(tr.allies_win_label).size(10.0).color(P_MUTED));
                 cols[0].label(
                     RichText::new(format!("{ally_pct:4.1}%"))
                         .size(score_sz)
@@ -42,11 +43,11 @@ impl TrueSightGuiApp {
                     ui.add_space(if compact_h { 4.0 } else { 8.0 });
                     let tag_col = tone_for_user(lead, 1.0).color();
                     let tag_word = if lead >= EPS_PCT {
-                        "FAVORED"
+                        tr.favored_tag
                     } else if lead <= -EPS_PCT {
-                        "UNDERDOG"
+                        tr.underdog_tag
                     } else {
-                        "EVEN"
+                        tr.even_tag
                     };
                     egui::Frame::NONE
                         .stroke(Stroke::new(1.0_f32, tag_col))
@@ -71,7 +72,11 @@ impl TrueSightGuiApp {
                 });
 
                 cols[2].with_layout(Layout::top_down(Align::Max), |ui| {
-                    ui.label(RichText::new("ENEMIES WIN").size(10.0).color(P_MUTED));
+                    ui.label(
+                        RichText::new(tr.enemies_win_label)
+                            .size(10.0)
+                            .color(P_MUTED),
+                    );
                     ui.label(
                         RichText::new(format!("{enemy_pct:4.1}%"))
                             .size(score_sz)
@@ -129,7 +134,7 @@ impl TrueSightGuiApp {
 
             let edges = [
                 (
-                    "Meta edge",
+                    tr.meta_edge_label,
                     analysis.total_meta_edge * 100.0,
                     format!(
                         "A {} · E {}",
@@ -138,12 +143,12 @@ impl TrueSightGuiApp {
                     ),
                 ),
                 (
-                    "Counter edge",
+                    tr.counter_edge_label,
                     analysis.total_counter_edge * 100.0,
                     format!("{pair_cnt} / 25 pairs"),
                 ),
                 (
-                    "Synergy edge",
+                    tr.synergy_edge_label,
                     analysis.total_synergy_edge * 100.0,
                     format!(
                         "A {} · E {}",
@@ -152,7 +157,7 @@ impl TrueSightGuiApp {
                     ),
                 ),
                 (
-                    "Composition",
+                    tr.comp_label,
                     analysis.total_composition_edge * 100.0,
                     format!("A {} · E {}", fmt_val(ally_comp), fmt_val(enemy_comp)),
                 ),

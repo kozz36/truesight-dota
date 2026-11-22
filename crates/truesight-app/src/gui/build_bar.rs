@@ -31,6 +31,7 @@ fn phase_label(phase: ItemPhase) -> &'static str {
 
 impl TrueSightGuiApp {
     pub(super) fn render_item_build_card(&mut self, ui: &mut egui::Ui) -> BuildBarRenderOutput {
+        let tr = super::i18n::strings(self.session.ui_language);
         let mut clicked_variant: Option<(
             truesight_core::domain::ItemId,
             truesight_core::domain::ItemId,
@@ -47,11 +48,12 @@ impl TrueSightGuiApp {
                     .map(|h| h.display_name.to_ascii_uppercase())
                     .unwrap_or_else(|| format!("HERO #{}", hero_id.0));
                 format!(
-                    "ITEM BUILD · {hero_name} ({})",
+                    "{} · {hero_name} ({})",
+                    tr.item_build_header,
                     role.label().to_ascii_uppercase()
                 )
             } else {
-                "ITEM BUILD · POST-DRAFT PROGRESSION".to_string()
+                tr.item_build_post_draft_fallback.to_string()
             };
 
             // Header
@@ -89,7 +91,7 @@ impl TrueSightGuiApp {
 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let toggle_btn = egui::Button::new(
-                        RichText::new("[ < PICKS ]")
+                        RichText::new(tr.picks_view_btn)
                             .size(10.0)
                             .strong()
                             .color(P_GLINT),
@@ -98,7 +100,7 @@ impl TrueSightGuiApp {
                     .stroke(Stroke::new(1.0_f32, P_LINE));
                     if ui
                         .add(toggle_btn)
-                        .on_hover_text("Switch back to Suggested Picks view")
+                        .on_hover_text(tr.picks_view_hover)
                         .clicked()
                     {
                         switch_to_picks = true;
@@ -112,11 +114,9 @@ impl TrueSightGuiApp {
                 ui.add_space(24.0);
                 ui.centered_and_justified(|ui| {
                     ui.label(
-                        RichText::new(
-                            "Pick or lock an allied hero to view match-tailored item build progression [item 1] > [item 2] > [item 3].",
-                        )
-                        .size(11.0)
-                        .color(P_MUTED),
+                        RichText::new(tr.item_build_empty_hint)
+                            .size(11.0)
+                            .color(P_MUTED),
                     );
                 });
                 return;
@@ -127,7 +127,7 @@ impl TrueSightGuiApp {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     ui.label(
-                        RichText::new("STARTING:")
+                        RichText::new(tr.starting_items_label)
                             .size(10.0)
                             .strong()
                             .color(P_MUTED),

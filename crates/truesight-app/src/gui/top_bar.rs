@@ -14,6 +14,7 @@ pub(super) struct TopBarRenderOutput {
     pub(super) info_button: Rect,
     pub(super) reset_button: Rect,
     pub(super) bracket_bar: Rect,
+    pub(super) overlay_pass_unlock_button: Option<Rect>,
 }
 
 impl TrueSightGuiApp {
@@ -78,14 +79,23 @@ impl TrueSightGuiApp {
     }
 
     fn render_faction_button(&mut self, ui: &mut egui::Ui, compact: bool) {
+        let tr = super::i18n::strings(self.session.ui_language);
         let fac_col = match self.session.draft.ally_faction {
             Faction::Radiant => P_GEM,
             Faction::Dire => P_DIRE,
         };
         let label = if compact {
-            format!("YOU: {}", self.session.draft.ally_faction.label())
+            format!(
+                "{}: {}",
+                tr.you_prefix,
+                self.session.draft.ally_faction.label()
+            )
         } else {
-            format!("YOU: {} <->", self.session.draft.ally_faction.label())
+            format!(
+                "{}: {} <->",
+                tr.you_prefix,
+                self.session.draft.ally_faction.label()
+            )
         };
         let fac_btn = egui::Button::new(
             RichText::new(label)
@@ -98,7 +108,7 @@ impl TrueSightGuiApp {
         .min_size(vec2(0.0, TOP_BTN_H));
         if ui
             .add(fac_btn)
-            .on_hover_text("Toggle your team side (Radiant / Dire)")
+            .on_hover_text(tr.toggle_faction_hover)
             .clicked()
         {
             self.session
@@ -246,7 +256,8 @@ impl TrueSightGuiApp {
             fg,
         );
 
-        let resp = resp.on_hover_text("Open TrueSight Quick Guide");
+        let tr = super::i18n::strings(self.session.ui_language);
+        let resp = resp.on_hover_text(tr.open_guide_hover);
         if resp.clicked() {
             self.onboarding_open = true;
             self.onboarding_step = 0;
@@ -254,10 +265,32 @@ impl TrueSightGuiApp {
         rect
     }
 
+    fn render_pass_unlock_button(&mut self, ui: &mut egui::Ui, compact: bool) -> Rect {
+        let tr = super::i18n::strings(self.session.ui_language);
+        let resp = ui
+            .add(
+                egui::Button::new(
+                    RichText::new(tr.top_bar_pass_unlock_btn)
+                        .size(if compact { 9.5 } else { 10.0 })
+                        .strong()
+                        .color(P_NEUTRAL),
+                )
+                .fill(P_INDIGO_2)
+                .stroke(Stroke::new(1.0_f32, P_NEUTRAL))
+                .min_size(vec2(0.0, TOP_BTN_H)),
+            )
+            .on_hover_text(tr.top_bar_pass_unlock_hover);
+        if resp.clicked() {
+            self.set_overlay_click_through_live(ui.ctx(), false);
+        }
+        resp.rect
+    }
+
     fn render_reset_button(&mut self, ui: &mut egui::Ui, compact: bool) -> Rect {
+        let tr = super::i18n::strings(self.session.ui_language);
         let resp = ui.add(
             egui::Button::new(
-                RichText::new("RESET")
+                RichText::new(tr.reset_btn)
                     .size(if compact { 10.0 } else { 10.5 })
                     .strong()
                     .color(P_GLINT),
@@ -289,6 +322,9 @@ impl TrueSightGuiApp {
         let mut info_btn_rect = Rect::NOTHING;
         let mut reset_btn_rect = Rect::NOTHING;
         let mut bracket_bar_rect = Rect::NOTHING;
+        let mut overlay_pass_unlock_button = None;
+        let show_pass_unlock =
+            self.session.overlay_mode && self.session.overlay_geometry.click_through;
         let bar_rect = hud_card(ui, |ui| {
             let avail_w = ui.available_width();
             let compact = avail_w < 1120.0;
@@ -307,6 +343,10 @@ impl TrueSightGuiApp {
                         reset_btn_rect = self.render_reset_button(ui, compact);
                         info_btn_rect = self.render_info_button(ui);
                         options_btn_rect = self.render_options_button(ui, compact);
+                        if show_pass_unlock {
+                            overlay_pass_unlock_button =
+                                Some(self.render_pass_unlock_button(ui, compact));
+                        }
                         ui.add_space(if compact { 2.0 } else { 6.0 });
                         Self::paint_top_bar_separator(ui);
                         ui.add_space(if compact { 2.0 } else { 6.0 });
@@ -324,6 +364,10 @@ impl TrueSightGuiApp {
                             reset_btn_rect = self.render_reset_button(ui, true);
                             info_btn_rect = self.render_info_button(ui);
                             options_btn_rect = self.render_options_button(ui, true);
+                            if show_pass_unlock {
+                                overlay_pass_unlock_button =
+                                    Some(self.render_pass_unlock_button(ui, true));
+                            }
                             Self::paint_top_bar_separator(ui);
                             self.render_faction_button(ui, true);
                         });
@@ -340,6 +384,7 @@ impl TrueSightGuiApp {
             info_button: info_btn_rect,
             reset_button: reset_btn_rect,
             bracket_bar: bracket_bar_rect,
+            overlay_pass_unlock_button,
         }
     }
 
@@ -352,14 +397,16 @@ impl TrueSightGuiApp {
         &mut self,
         ctx: &egui::Context,
         top_bar_bottom_y: f32,
-    ) -> (Option<Rect>, Option<Rect>) {
+    ) -> (Option<Rect>, Option<Rect>, Option<[Rect; 3]>) {
         if !self.options_open {
-            return (None, None);
+            return (None, None, None);
         }
 
+        let tr = super::i18n::strings(self.session.ui_language);
         let mut close_window =
             !self.account_editor_open && ctx.input(|i| i.key_pressed(egui::Key::Escape));
         let mut demo_btn_rect = None;
+        let mut lang_btn_rects: Option<[Rect; 3]> = None;
 
         let screen_w = ctx.screen_rect().width();
         let max_opt_w = if screen_w < 700.0 {
@@ -369,7 +416,8 @@ impl TrueSightGuiApp {
         };
         let anchor_y =
             (top_bar_bottom_y + 4.0).clamp(14.0, (ctx.screen_rect().height() - 120.0).max(14.0));
-        let resp = egui::Window::new("OPTIONS · DEV & TELEMETRY")
+        let resp = egui::Window::new(tr.options_window_title)
+            .id(egui::Id::new("truesight_options_window"))
             .collapsible(false)
             .resizable(false)
             .fade_in(false)
@@ -379,10 +427,27 @@ impl TrueSightGuiApp {
             .default_width(max_opt_w)
             .max_width(max_opt_w)
             .show(ctx, |ui| {
-                ui.spacing_mut().item_spacing.y = 6.0;
+                ui.spacing_mut().item_spacing.y = 4.0;
+
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(tr.language_label)
+                            .size(9.5)
+                            .strong()
+                            .color(P_MUTED),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let (clicked_lang, rects) =
+                            super::i18n::render_language_selector(ui, self.session.ui_language);
+                        lang_btn_rects = Some(rects);
+                        if let Some(lang) = clicked_lang {
+                            self.session.set_ui_language(lang);
+                        }
+                    });
+                });
 
                 ui.label(
-                    RichText::new("LIVE CAPTURE & GSI")
+                    RichText::new(tr.live_capture_section)
                         .size(9.5)
                         .strong()
                         .color(P_MUTED),
@@ -427,7 +492,7 @@ impl TrueSightGuiApp {
                     });
 
                 ui.label(
-                    RichText::new("DATABASE & STEAM LINK")
+                    RichText::new(tr.db_steam_section)
                         .size(9.5)
                         .strong()
                         .color(P_MUTED),
@@ -449,9 +514,9 @@ impl TrueSightGuiApp {
                         ui.add_space(2.0);
                         ui.horizontal(|ui| {
                             let sync_label = if self.session.sync_in_flight {
-                                "SYNCING..."
+                                tr.syncing_btn
                             } else {
-                                "SYNC DB"
+                                tr.sync_db_btn
                             };
                             if ui
                                 .add_enabled(
@@ -475,7 +540,9 @@ impl TrueSightGuiApp {
                             if ui
                                 .add(
                                     egui::Button::new(
-                                        RichText::new("STEAM ACCOUNT...").size(10.5).color(P_GLINT),
+                                        RichText::new(tr.steam_account_btn)
+                                            .size(10.5)
+                                            .color(P_GLINT),
                                     )
                                     .fill(P_INDIGO_1),
                                 )
@@ -495,21 +562,21 @@ impl TrueSightGuiApp {
                         let days_opt = self.session.stratz_token_days_remaining_at(now);
                         let expired = self.session.is_stratz_token_expired_at(now);
                         let (stratz_label, stratz_col) = if expired {
-                            (
-                                "STRATZ: Token expired (reconnect)".to_string(),
-                                super::theme::P_NEUTRAL,
-                            )
+                            (tr.stratz_expired.to_string(), super::theme::P_NEUTRAL)
                         } else if let Some(days) = days_opt {
-                            (format!("STRATZ · Connected ({days}d remaining)"), P_GEM)
+                            (
+                                format!("STRATZ · {days}{}", tr.stratz_connected_suffix),
+                                P_GEM,
+                            )
                         } else {
-                            ("STRATZ · Not connected (optional)".to_string(), P_MUTED)
+                            (tr.stratz_optional.to_string(), P_MUTED)
                         };
                         ui.label(RichText::new(stratz_label).size(9.5).color(stratz_col));
                         ui.horizontal(|ui| {
                             if ui
                                 .add(
                                     egui::Button::new(
-                                        RichText::new("CONNECT STRATZ (1-CLICK)")
+                                        RichText::new(tr.connect_stratz_one_click_btn)
                                             .size(10.0)
                                             .strong()
                                             .color(P_GEM),
@@ -524,7 +591,7 @@ impl TrueSightGuiApp {
                             if ui
                                 .add(
                                     egui::Button::new(
-                                        RichText::new("PASTE TOKEN").size(10.0).color(P_GLINT),
+                                        RichText::new(tr.paste_token_btn).size(10.0).color(P_GLINT),
                                     )
                                     .fill(P_INDIGO_1),
                                 )
@@ -540,9 +607,9 @@ impl TrueSightGuiApp {
                                 ui.add(
                                     egui::TextEdit::singleline(&mut self.stratz_token_input)
                                         .desired_width(175.0)
-                                        .hint_text("Paste STRATZ JWT..."),
+                                        .hint_text(tr.paste_token_hint),
                                 );
-                                if ui.button("SAVE").clicked() {
+                                if ui.button(tr.save_btn).clicked() {
                                     let tok = self.stratz_token_input.clone();
                                     let now =
                                         truesight_adapters::sync::LocalCacheManager::now_unix();
@@ -557,9 +624,9 @@ impl TrueSightGuiApp {
 
                 ui.horizontal(|ui| {
                     let overlay_lbl = if self.session.overlay_mode {
-                        "COMPACT OVERLAY: ON"
+                        tr.compact_overlay_on
                     } else {
-                        "COMPACT OVERLAY: OFF"
+                        tr.compact_overlay_off
                     };
                     if ui
                         .add(
@@ -582,7 +649,7 @@ impl TrueSightGuiApp {
                                 },
                             )),
                         )
-                        .on_hover_text("Toggle compact always-on-top overlay window (F8)")
+                        .on_hover_text(tr.compact_overlay_hover)
                         .clicked()
                     {
                         let next = !self.session.overlay_mode;
@@ -590,9 +657,9 @@ impl TrueSightGuiApp {
                     }
 
                     let ct_lbl = if self.session.overlay_geometry.click_through {
-                        "CLICK-THROUGH: ON"
+                        tr.click_through_on
                     } else {
-                        "CLICK-THROUGH: OFF"
+                        tr.click_through_off
                     };
                     if ui
                         .add(
@@ -604,19 +671,30 @@ impl TrueSightGuiApp {
                                 },
                             ))
                             .fill(P_INDIGO_2)
-                            .stroke(Stroke::new(1.0_f32, P_LINE)),
+                            .stroke(Stroke::new(
+                                1.0_f32,
+                                if self.session.overlay_geometry.click_through {
+                                    P_NEUTRAL
+                                } else {
+                                    P_LINE
+                                },
+                            )),
                         )
+                        .on_hover_text(tr.click_through_hover)
                         .clicked()
                     {
                         let next = !self.session.overlay_geometry.click_through;
-                        self.session.set_overlay_click_through(next);
+                        self.set_overlay_click_through_live(ui.ctx(), next);
                     }
                 });
 
                 ui.horizontal(|ui| {
                     let demo_resp = ui.add(
                         egui::Button::new(
-                            RichText::new("DEMO 5V5").size(10.5).strong().color(P_GEM),
+                            RichText::new(tr.demo_5v5_btn)
+                                .size(10.5)
+                                .strong()
+                                .color(P_GEM),
                         )
                         .fill(P_INDIGO_2)
                         .stroke(Stroke::new(1.0_f32, P_GEM_DEEP)),
@@ -627,7 +705,7 @@ impl TrueSightGuiApp {
                     }
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.button("CLOSE").clicked() {
+                        if ui.button(tr.close_btn).clicked() {
                             close_window = true;
                         }
                     });
@@ -642,6 +720,6 @@ impl TrueSightGuiApp {
             let painter = ctx.layer_painter(r.response.layer_id);
             paint_hud_corner_ticks(&painter, r.response.rect, P_GEM);
         }
-        (win_rect, demo_btn_rect)
+        (win_rect, demo_btn_rect, lang_btn_rects)
     }
 }
