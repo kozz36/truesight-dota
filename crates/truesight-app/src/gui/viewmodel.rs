@@ -215,10 +215,10 @@ pub struct OverlaySummary {
 /// Computes the compact overlay summary from `AppSession`, guaranteeing exact `0.00%` win% parity with the main window.
 pub fn compute_overlay_summary(session: &AppSession) -> OverlaySummary {
     let (analysis, _) = session.evaluate();
-    let recs = recommend_heroes(&session.draft, &session.matrix, &session.weights, 3);
+    let recs = recommend_heroes(&session.draft, &session.matrix, &session.weights, 8);
     let top_suggestions = recs
         .into_iter()
-        .take(3)
+        .take(8)
         .map(|r| {
             let name = session
                 .matrix

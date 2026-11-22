@@ -25,15 +25,16 @@ impl TrueSightGuiApp {
         analysis: &DraftAnalysis5v5,
         docked_comp_mode: bool,
     ) -> MatrixRenderOutput {
+        let tr = super::i18n::strings(self.session.ui_language);
         let active_tab = if docked_comp_mode && self.matrix_tab == MatrixTab::Comp {
             MatrixTab::Counter
         } else {
             self.matrix_tab
         };
         let title = match active_tab {
-            MatrixTab::Counter => "COUNTER MATRIX",
-            MatrixTab::Synergy => "ALLY SYNERGY",
-            MatrixTab::Comp => "COMPOSITION",
+            MatrixTab::Counter => tr.counter_tab_title,
+            MatrixTab::Synergy => tr.synergy_tab_title,
+            MatrixTab::Comp => tr.comp_tab_title,
         };
         let mut grid_rect = Rect::NOTHING;
         let mut cell_sz = Vec2::ZERO;
@@ -45,9 +46,9 @@ impl TrueSightGuiApp {
         let card_rect = hud_card_fill(ui, |ui| {
             let compact_hdr = ui.available_width() < 325.0;
             let short_title = match active_tab {
-                MatrixTab::Counter => "MATRIX",
-                MatrixTab::Synergy => "SYNERGY",
-                MatrixTab::Comp => "COMP",
+                MatrixTab::Counter => tr.counter_tab_short,
+                MatrixTab::Synergy => tr.synergy_tab_short,
+                MatrixTab::Comp => tr.comp_tab_short,
             };
             // Header with COUNTER | SYNERGY | COMP tabs (COMP hidden when docked below)
             ui.horizontal(|ui| {
@@ -61,14 +62,14 @@ impl TrueSightGuiApp {
                     ui.spacing_mut().item_spacing.x = 1.0;
                     let tabs: &[(MatrixTab, &str)] = if docked_comp_mode {
                         &[
-                            (MatrixTab::Synergy, "SYNERGY"),
-                            (MatrixTab::Counter, "COUNTER"),
+                            (MatrixTab::Synergy, tr.synergy_tab_short),
+                            (MatrixTab::Counter, tr.counter_tab_short),
                         ]
                     } else {
                         &[
-                            (MatrixTab::Comp, "COMP"),
-                            (MatrixTab::Synergy, "SYNERGY"),
-                            (MatrixTab::Counter, "COUNTER"),
+                            (MatrixTab::Comp, tr.comp_tab_short),
+                            (MatrixTab::Synergy, tr.synergy_tab_short),
+                            (MatrixTab::Counter, tr.counter_tab_short),
                         ]
                     };
                     for &(tab, lbl) in tabs {
@@ -132,10 +133,11 @@ impl TrueSightGuiApp {
         ui: &mut egui::Ui,
         analysis: &DraftAnalysis5v5,
     ) -> (Rect, Rect) {
+        let tr = super::i18n::strings(self.session.ui_language);
         let mut comp_enemies_hdr = Rect::NOTHING;
         let card_rect = hud_card_fill(ui, |ui| {
             ui.label(
-                RichText::new("COMPOSITION")
+                RichText::new(tr.comp_tab_title)
                     .size(11.0)
                     .strong()
                     .color(P_GLINT),
@@ -552,6 +554,7 @@ impl TrueSightGuiApp {
     }
 
     fn render_comp_tab(&self, ui: &mut egui::Ui, analysis: &DraftAnalysis5v5) -> Rect {
+        let tr = super::i18n::strings(self.session.ui_language);
         let ally_diag = compute_comp_diagnostic(&self.session.draft.allies, &self.session.matrix);
         let enemy_diag = compute_comp_diagnostic(&self.session.draft.enemies, &self.session.matrix);
         let ally_pct = ally_diag.score * 100.0;
@@ -567,7 +570,7 @@ impl TrueSightGuiApp {
         ui.columns(3, |cols| {
             cols[0].vertical(|ui| {
                 ui.label(
-                    RichText::new(format!("ALLIES · {} / 5", ally_diag.picked))
+                    RichText::new(format!("{} · {} / 5", tr.allies_title, ally_diag.picked))
                         .size(9.5)
                         .color(P_MUTED),
                 );
@@ -585,12 +588,12 @@ impl TrueSightGuiApp {
                         .strong()
                         .color(tone_for_user(comp_edge, 1.0).color()),
                 );
-                ui.label(RichText::new("COMP EDGE").size(9.0).color(P_MUTED));
+                ui.label(RichText::new(tr.comp_edge_label).size(9.0).color(P_MUTED));
             });
             cols[2].with_layout(Layout::top_down(Align::Max), |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.label(
-                    RichText::new(format!("ENEMIES · {} / 5", enemy_diag.picked))
+                    RichText::new(format!("{} · {} / 5", tr.enemies_title, enemy_diag.picked))
                         .size(9.5)
                         .color(P_MUTED),
                 );

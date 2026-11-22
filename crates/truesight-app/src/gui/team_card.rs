@@ -16,9 +16,14 @@ impl TrueSightGuiApp {
         side: Side,
         slots_out: &mut [SlotTelemetry; TEAM_SIZE],
     ) -> Rect {
+        let tr = super::i18n::strings(self.session.ui_language);
         let is_ally = side == Side::Allies;
         let accent = if is_ally { P_GEM } else { P_DIRE };
-        let title = if is_ally { "ALLIES" } else { "ENEMIES" };
+        let title = if is_ally {
+            tr.allies_title
+        } else {
+            tr.enemies_title
+        };
         let faction = if is_ally {
             self.session.draft.ally_faction
         } else {

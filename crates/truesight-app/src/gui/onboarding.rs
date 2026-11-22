@@ -327,6 +327,7 @@ impl TrueSightGuiApp {
         ) else {
             return;
         };
+        let tr = super::i18n::strings(self.session.ui_language);
         ui.add_space(4.0);
         ui.label(
             RichText::new(format!(
@@ -355,8 +356,12 @@ impl TrueSightGuiApp {
             }
             if ui
                 .add(
-                    egui::Button::new(RichText::new("KEEP CURRENT").size(10.0).color(P_SILVER))
-                        .fill(P_INDIGO_1),
+                    egui::Button::new(
+                        RichText::new(tr.keep_current_btn)
+                            .size(10.0)
+                            .color(P_SILVER),
+                    )
+                    .fill(P_INDIGO_1),
                 )
                 .clicked()
             {
@@ -366,17 +371,24 @@ impl TrueSightGuiApp {
         });
     }
 
-    /// Renders the skippable 4-step UI onboarding guide (`TRUESIGHT · QUICK GUIDE`).
-    pub(super) fn render_onboarding_window(&mut self, ctx: &egui::Context) -> Option<Rect> {
+    /// Renders the skippable 4-step UI onboarding guide (`TRUESIGHT · QUICK GUIDE`) and
+    /// returns `(window_rect, language_button_rects)`.
+    pub(super) fn render_onboarding_window(
+        &mut self,
+        ctx: &egui::Context,
+    ) -> (Option<Rect>, Option<[Rect; 3]>) {
         if !self.onboarding_open {
-            return None;
+            return (None, None);
         }
 
+        let tr = super::i18n::strings(self.session.ui_language);
         let mut close_window = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+        let mut lang_btn_rects: Option<[Rect; 3]> = None;
         let screen = ctx.screen_rect();
         let modal_w = (screen.width() - 32.0).clamp(320.0, 480.0);
 
-        let resp = egui::Window::new("TRUESIGHT · QUICK GUIDE")
+        let resp = egui::Window::new(tr.guide_window_title)
+            .id(egui::Id::new("truesight_quick_guide_window"))
             .collapsible(false)
             .resizable(false)
             .fade_in(false)
@@ -388,34 +400,20 @@ impl TrueSightGuiApp {
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing.y = 8.0;
 
-                let (step_title, step_body) = match self.onboarding_step {
-                    0 => (
-                        "1/4 · Live Draft & Auto-Capture",
-                        "TrueSight listens to Dota 2 Game State Integration (GSI) and top-bar \
-                         portrait vision to detect Radiant/Dire, allies, and enemies automatically. \
-                         You can also click any Ally or Enemy slot card, type a hero name, and press Enter.",
-                    ),
-                    1 => (
-                        "2/4 · Role, Medal & Personal Comfort v3",
-                        "Pick your target role (Pos 1..5) and medal bracket (or leave Auto from \
-                         OpenDota rank_tier). Link your Steam account for Personal Comfort v3, \
-                         which applies 75-day exponential recency decay over your last 500 matches.",
-                    ),
-                    2 => (
-                        "3/4 · 1-Click STRATZ Connect & Data Tiers",
-                        "Built-in snapshot + OpenDota work out of the box. Click CONNECT STRATZ \
-                         to open stratz.com/api, copy your free 1-year token, and TrueSight \
-                         auto-detects it from your clipboard and auto-links your Steam ID.",
-                    ),
-                    _ => (
-                        "4/4 · In-Game Item Builds & Overlay",
-                        "After draft picks lock, TrueSight transitions toward post-draft counter \
-                         item progressions and compact overlay guidance while staying 100% read-only \
-                         and Valve-compliant (zero memory reading, zero input automation).",
-                    ),
-                };
+                let (step_title, step_body) =
+                    tr.guide_steps[self.onboarding_step.min(TOTAL_ONBOARDING_STEPS - 1)];
 
-                ui.label(RichText::new(step_title).size(12.5).strong().color(P_GEM));
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(step_title).size(12.5).strong().color(P_GEM));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let (clicked_lang, rects) =
+                            super::i18n::render_language_selector(ui, self.session.ui_language);
+                        lang_btn_rects = Some(rects);
+                        if let Some(lang) = clicked_lang {
+                            self.session.set_ui_language(lang);
+                        }
+                    });
+                });
 
                 egui::Frame::NONE
                     .fill(P_INDIGO_2)
@@ -434,29 +432,23 @@ impl TrueSightGuiApp {
                             let days_opt = self.session.stratz_token_days_remaining_at(now);
                             let expired = self.session.is_stratz_token_expired_at(now);
                             let (stratz_status, status_col) = if expired {
-                                (
-                                    "STRATZ: Token expired (reconnect)".to_string(),
-                                    super::theme::P_NEUTRAL,
-                                )
+                                (tr.stratz_expired.to_string(), super::theme::P_NEUTRAL)
                             } else if let Some(days) = days_opt {
-                                (format!("Connected ({days}d remaining)"), P_GEM)
+                                (
+                                    format!("STRATZ · {days}{}", tr.stratz_connected_suffix),
+                                    P_GEM,
+                                )
                             } else if self.is_watching_stratz_clipboard(now) {
-                                (
-                                    "Watching clipboard for STRATZ JWT (90s)...".to_string(),
-                                    P_MUTED,
-                                )
+                                (tr.stratz_watching.to_string(), P_MUTED)
                             } else {
-                                (
-                                    "Optional — enhances 5v5 synergy data".to_string(),
-                                    P_MUTED,
-                                )
+                                (tr.stratz_optional.to_string(), P_MUTED)
                             };
                             ui.label(RichText::new(stratz_status).size(10.0).color(status_col));
                             ui.horizontal(|ui| {
                                 if ui
                                     .add(
                                         egui::Button::new(
-                                            RichText::new("CONNECT STRATZ")
+                                            RichText::new(tr.connect_stratz_btn)
                                                 .size(10.5)
                                                 .strong()
                                                 .color(P_VOID),
@@ -470,7 +462,9 @@ impl TrueSightGuiApp {
                                 if ui
                                     .add(
                                         egui::Button::new(
-                                            RichText::new("PASTE TOKEN").size(10.5).color(P_GLINT),
+                                            RichText::new(tr.paste_token_btn)
+                                                .size(10.5)
+                                                .color(P_GLINT),
                                         )
                                         .fill(P_INDIGO_1),
                                     )
@@ -486,9 +480,9 @@ impl TrueSightGuiApp {
                                     ui.add(
                                         egui::TextEdit::singleline(&mut self.stratz_token_input)
                                             .desired_width(240.0)
-                                            .hint_text("Paste STRATZ JWT..."),
+                                            .hint_text(tr.paste_token_hint),
                                     );
-                                    if ui.button("SAVE").clicked() {
+                                    if ui.button(tr.save_btn).clicked() {
                                         let tok = self.stratz_token_input.clone();
                                         let now = LocalCacheManager::now_unix();
                                         if self.apply_stratz_token_ui(&tok, now) {
@@ -505,8 +499,10 @@ impl TrueSightGuiApp {
                     if ui
                         .add_enabled(
                             self.onboarding_step > 0,
-                            egui::Button::new(RichText::new("< PREV").size(10.5).color(P_GLINT))
-                                .fill(P_INDIGO_2),
+                            egui::Button::new(
+                                RichText::new(tr.guide_prev).size(10.5).color(P_GLINT),
+                            )
+                            .fill(P_INDIGO_2),
                         )
                         .clicked()
                     {
@@ -517,7 +513,10 @@ impl TrueSightGuiApp {
                         if ui
                             .add(
                                 egui::Button::new(
-                                    RichText::new("NEXT >").size(10.5).strong().color(P_GEM),
+                                    RichText::new(tr.guide_next)
+                                        .size(10.5)
+                                        .strong()
+                                        .color(P_GEM),
                                 )
                                 .fill(P_INDIGO_2)
                                 .stroke(Stroke::new(1.0_f32, P_GEM_DEEP)),
@@ -529,7 +528,10 @@ impl TrueSightGuiApp {
                     } else if ui
                         .add(
                             egui::Button::new(
-                                RichText::new("FINISH").size(10.5).strong().color(P_VOID),
+                                RichText::new(tr.guide_finish)
+                                    .size(10.5)
+                                    .strong()
+                                    .color(P_VOID),
                             )
                             .fill(P_GEM),
                         )
@@ -542,7 +544,7 @@ impl TrueSightGuiApp {
                         if ui
                             .add(
                                 egui::Button::new(
-                                    RichText::new("DON'T SHOW AGAIN").size(10.0).color(P_MUTED),
+                                    RichText::new(tr.guide_dont_show).size(10.0).color(P_MUTED),
                                 )
                                 .fill(P_INDIGO_1),
                             )
@@ -554,8 +556,10 @@ impl TrueSightGuiApp {
                         }
                         if ui
                             .add(
-                                egui::Button::new(RichText::new("SKIP").size(10.0).color(P_SILVER))
-                                    .fill(P_INDIGO_2),
+                                egui::Button::new(
+                                    RichText::new(tr.guide_skip).size(10.0).color(P_SILVER),
+                                )
+                                .fill(P_INDIGO_2),
                             )
                             .clicked()
                         {
@@ -572,6 +576,6 @@ impl TrueSightGuiApp {
             let painter = ctx.layer_painter(r.response.layer_id);
             paint_hud_corner_ticks(&painter, r.response.rect, P_GEM);
         }
-        resp.map(|r| r.response.rect)
+        (resp.map(|r| r.response.rect), lang_btn_rects)
     }
 }

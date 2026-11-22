@@ -1,8 +1,65 @@
+use std::collections::HashMap;
 use truesight_core::domain::{
     Bracket, HeroId, HeroItemStat, ItemCatalogEntry, ItemId, ItemPhase, Role,
     all_referenced_counter_item_ids,
 };
 use truesight_core::ports::{ItemMetaRepository, PortError};
+
+/// Embedded binary RGB atlas of official Dota 2 item icons (`TSIA` header, `44x32` RGB per item).
+pub const ITEM_ATLAS_BYTES: &[u8] = include_bytes!("../assets/item_atlas.bin");
+
+/// Decoded item icon atlas indexed by canonical [`ItemId`].
+#[derive(Debug, Clone)]
+pub struct DecodedItemAtlas {
+    pub item_width: usize,
+    pub item_height: usize,
+    pub items: HashMap<ItemId, Vec<u8>>,
+}
+
+/// Decodes the embedded binary RGB item atlas (`TSIA` header + `u16` IDs + RGB pixels).
+pub fn parse_item_atlas() -> Option<DecodedItemAtlas> {
+    if ITEM_ATLAS_BYTES.len() < 10 || &ITEM_ATLAS_BYTES[0..4] != b"TSIA" {
+        return None;
+    }
+    let count = u16::from_le_bytes([ITEM_ATLAS_BYTES[4], ITEM_ATLAS_BYTES[5]]) as usize;
+    let item_width = u16::from_le_bytes([ITEM_ATLAS_BYTES[6], ITEM_ATLAS_BYTES[7]]) as usize;
+    let item_height = u16::from_le_bytes([ITEM_ATLAS_BYTES[8], ITEM_ATLAS_BYTES[9]]) as usize;
+    let item_len = item_width.checked_mul(item_height)?.checked_mul(3)?;
+    if item_len == 0 {
+        return None;
+    }
+
+    let mut offset = 10usize;
+    let mut items = HashMap::with_capacity(count);
+    for _ in 0..count {
+        let id_end = offset.checked_add(2)?;
+        if id_end > ITEM_ATLAS_BYTES.len() {
+            return None;
+        }
+        let iid = u16::from_le_bytes([ITEM_ATLAS_BYTES[offset], ITEM_ATLAS_BYTES[offset + 1]]);
+        offset = id_end;
+        let frame_end = offset.checked_add(item_len)?;
+        if frame_end > ITEM_ATLAS_BYTES.len() {
+            return None;
+        }
+        items.insert(ItemId(iid), ITEM_ATLAS_BYTES[offset..frame_end].to_vec());
+        offset = frame_end;
+    }
+
+    Some(DecodedItemAtlas {
+        item_width,
+        item_height,
+        items,
+    })
+}
+
+/// Returns every canonical [`ItemId`] included in the embedded offline item catalog.
+pub fn embedded_item_ids() -> Vec<ItemId> {
+    EMBEDDED_ITEM_CATALOG
+        .iter()
+        .map(|row| ItemId(row.id))
+        .collect()
+}
 
 struct StaticItemRow {
     id: u16,

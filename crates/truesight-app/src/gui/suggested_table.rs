@@ -21,6 +21,7 @@ impl TrueSightGuiApp {
         &mut self,
         ui: &mut egui::Ui,
     ) -> SuggestedRenderOutput {
+        let tr = super::i18n::strings(self.session.ui_language);
         let target_role = self.session.draft.target_role;
         let target_slot_idx = target_role.index();
         let mut last_col_max_x = 0.0_f32;
@@ -38,7 +39,8 @@ impl TrueSightGuiApp {
                 ui.spacing_mut().item_spacing.x = if compact_hdr { 4.0 } else { 8.0 };
                 ui.label(
                     RichText::new(format!(
-                        "SUGGESTED PICKS · {}",
+                        "{} · {}",
+                        tr.suggested_picks_title,
                         target_role.label().to_ascii_uppercase()
                     ))
                     .size(if compact_hdr { 10.0 } else { 11.0 })
@@ -46,16 +48,16 @@ impl TrueSightGuiApp {
                     .color(P_GLINT),
                 );
                 let build_btn = egui::Button::new(
-                    RichText::new("[ BUILD > ]")
+                    RichText::new(tr.build_view_btn)
                         .size(if compact_hdr { 9.0 } else { 9.5 })
                         .strong()
                         .color(P_CYAN),
                 )
                 .fill(P_INDIGO_2)
-                .stroke(Stroke::new(1.0_f32, P_LINE));
+                .stroke(Stroke::new(1.0_f32, P_GEM_DEEP));
                 if ui
                     .add(build_btn)
-                    .on_hover_text("Switch to post-draft Item Build view")
+                    .on_hover_text(tr.build_view_hover)
                     .clicked()
                 {
                     self.session.toggle_post_draft_build_view();

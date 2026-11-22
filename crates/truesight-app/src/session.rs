@@ -87,6 +87,7 @@ pub struct AppSession {
     pub active_monitor_rect: Option<MonitorRect>,
     pub known_monitors: Vec<MonitorRect>,
     pub active_capture_strip_rect: Option<(f32, f32, f32, f32)>,
+    pub ui_language: UiLanguage,
 }
 
 impl Drop for AppSession {
@@ -238,6 +239,7 @@ impl AppSession {
             active_monitor_rect: None,
             known_monitors: Vec::new(),
             active_capture_strip_rect: None,
+            ui_language: ui_cfg.ui_language,
         })
     }
 
@@ -257,6 +259,7 @@ impl AppSession {
             self.stratz_token_exp = resolved_exp;
             self.overlay_mode = ui_cfg.overlay_mode;
             self.overlay_geometry = ui_cfg.overlay_geometry;
+            self.ui_language = ui_cfg.ui_language;
             if is_stratz_exp_expired(resolved_exp, now) {
                 self.cache_mgr.stratz_api_token = None;
                 self.cache_mgr.stratz_token_exp = None;
@@ -1182,6 +1185,7 @@ impl AppSession {
                 stratz_token_exp: self.stratz_token_exp,
                 overlay_mode: self.overlay_mode,
                 overlay_geometry: self.overlay_geometry,
+                ui_language: self.ui_language,
             };
             if let Err(err) = save_ui_config_to_dir(dir, &cfg) {
                 self.last_sync_notice = Some(format!(
@@ -1506,9 +1510,9 @@ impl AppSession {
         }
 
         let min_w_px = 280.0 * ppp;
-        let max_w_cap_px = 520.0 * ppp;
+        let max_w_cap_px = 840.0 * ppp;
         let min_h_px = 160.0 * ppp;
-        let max_h_cap_px = 360.0 * ppp;
+        let max_h_cap_px = 720.0 * ppp;
         let min_mon_w_px = 640.0 * ppp;
         let min_mon_h_px = 480.0 * ppp;
 
@@ -1612,7 +1616,7 @@ impl AppSession {
 
     /// Clamps physical desktop pixel `geom_px` within physical `monitor_px` (preserving secondary
     /// monitor origins) and prevents it from intersecting physical `capture_strip_rect_px`,
-    /// scaling logical point bounds (`280..520` x `160..360`) by `pixels_per_point`.
+    /// scaling logical point bounds (`280..840` x `160..720`) by `pixels_per_point`.
     pub fn clamp_overlay_geometry_in_monitor_scaled(
         mut geom_px: OverlayGeometry,
         monitor_px: MonitorRect,
@@ -1621,9 +1625,9 @@ impl AppSession {
     ) -> OverlayGeometry {
         let ppp = Self::sanitize_pixels_per_point(pixels_per_point);
         let min_w_px = 280.0 * ppp;
-        let max_w_cap_px = 520.0 * ppp;
+        let max_w_cap_px = 840.0 * ppp;
         let min_h_px = 160.0 * ppp;
-        let max_h_cap_px = 360.0 * ppp;
+        let max_h_cap_px = 720.0 * ppp;
         let min_mon_w_px = 640.0 * ppp;
         let min_mon_h_px = 480.0 * ppp;
 
@@ -1734,6 +1738,12 @@ impl AppSession {
     pub fn set_onboarding_dismissed(&mut self, dismissed: bool) -> Result<(), String> {
         self.onboarding_dismissed = dismissed;
         self.persist_ui_config()
+    }
+
+    /// Updates and persists the selected UI display language (`es`, `en`, `ru`).
+    pub fn set_ui_language(&mut self, language: UiLanguage) {
+        self.ui_language = language;
+        let _ = self.persist_ui_config();
     }
 
     /// Returns whole days remaining before the persisted STRATZ token expires at `now_unix_secs`,
@@ -1906,7 +1916,50 @@ impl Default for OverlayGeometry {
     }
 }
 
-/// Persisted UI onboarding, overlay, and STRATZ token state stored in `ui_config.toml`.
+/// Supported GUI display languages (`[ES]`, `[EN]`, `[RU]`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UiLanguage {
+    #[default]
+    En,
+    Es,
+    Ru,
+}
+
+impl UiLanguage {
+    /// Display order in language selector bars (`[ES]`, `[EN]`, `[RU]`).
+    pub const ALL: [Self; 3] = [Self::Es, Self::En, Self::Ru];
+
+    /// Compact uppercase selector pill label (`"ES"`, `"EN"`, `"RU"`).
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Es => "ES",
+            Self::En => "EN",
+            Self::Ru => "RU",
+        }
+    }
+
+    /// Canonical lowercase configuration string written to `ui_config.toml`.
+    pub const fn as_config_str(self) -> &'static str {
+        match self {
+            Self::Es => "es",
+            Self::En => "en",
+            Self::Ru => "ru",
+        }
+    }
+
+    /// Parses a persisted or locale string into `UiLanguage` (case-insensitive, trims quotes).
+    pub fn parse(raw: &str) -> Option<Self> {
+        let norm = raw.trim().trim_matches('"').trim().to_ascii_lowercase();
+        match norm.as_str() {
+            "en" | "en-us" | "en-gb" => Some(Self::En),
+            "es" | "es-es" | "es-la" | "es-pe" | "es-mx" => Some(Self::Es),
+            "ru" | "ru-ru" => Some(Self::Ru),
+            _ => None,
+        }
+    }
+}
+
+/// Persisted UI onboarding, overlay, language, and STRATZ token state stored in `ui_config.toml`.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct UiConfig {
     pub onboarding_dismissed: bool,
@@ -1914,6 +1967,7 @@ pub struct UiConfig {
     pub stratz_token_exp: Option<u64>,
     pub overlay_mode: bool,
     pub overlay_geometry: OverlayGeometry,
+    pub ui_language: UiLanguage,
 }
 
 fn resolve_stratz_exp(token: Option<&str>, explicit_exp: Option<u64>) -> Option<u64> {
@@ -2070,6 +2124,11 @@ pub fn load_ui_config_from_dir(config_dir: &Path) -> UiConfig {
                 }
             }
             "overlay_click_through" => cfg.overlay_geometry.click_through = val == "true",
+            "ui_language" => {
+                if let Some(lang) = UiLanguage::parse(val) {
+                    cfg.ui_language = lang;
+                }
+            }
             _ => {}
         }
     }
@@ -2107,6 +2166,10 @@ pub fn save_ui_config_to_dir(config_dir: &Path, cfg: &UiConfig) -> Result<(), St
     body.push_str(&format!(
         "overlay_click_through = {}\n",
         cfg.overlay_geometry.click_through
+    ));
+    body.push_str(&format!(
+        "ui_language = \"{}\"\n",
+        cfg.ui_language.as_config_str()
     ));
     if let Some(token) = cfg.stratz_api_token.as_deref().filter(|t| !t.is_empty()) {
         let escaped = token.replace('"', "");

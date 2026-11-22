@@ -5795,3 +5795,20 @@ fn bounded_gsi_listener_waits_for_fragmented_body_after_connect_on_blocking_stre
         }]
     );
 }
+
+#[test]
+fn embedded_item_atlas_decodes_all_embedded_catalog_items() {
+    let atlas = crate::item_repo::parse_item_atlas().expect("embedded item atlas must decode");
+    assert_eq!(atlas.item_width, 44);
+    assert_eq!(atlas.item_height, 32);
+    let ids = crate::item_repo::embedded_item_ids();
+    assert!(!ids.is_empty());
+    assert_eq!(atlas.items.len(), ids.len());
+    for id in ids {
+        let rgb = atlas
+            .items
+            .get(&id)
+            .unwrap_or_else(|| panic!("missing embedded icon for item {:?}", id));
+        assert_eq!(rgb.len(), 44 * 32 * 3);
+    }
+}

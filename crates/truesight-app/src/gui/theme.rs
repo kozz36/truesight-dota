@@ -3,8 +3,9 @@ use eframe::egui::{
     Shape, Stroke, StrokeKind, TextureHandle, TextureOptions, Vec2, pos2, vec2,
 };
 use std::collections::HashMap;
+use truesight_adapters::item_repo::parse_item_atlas;
 use truesight_adapters::vision::parse_hero_atlas;
-use truesight_core::domain::HeroId;
+use truesight_core::domain::{HeroId, ItemId};
 
 // =============================================================================
 // Gem of Truesight Color System (OKLCH tokens mapped to sRGB)
@@ -93,6 +94,7 @@ pub(super) struct GuiTextureCache {
     pub(super) initialized: bool,
     pub(super) gem: Option<TextureHandle>,
     pub(super) heroes: HashMap<HeroId, HeroTextureSet>,
+    pub(super) items: HashMap<ItemId, TextureHandle>,
 }
 
 impl GuiTextureCache {
@@ -101,45 +103,52 @@ impl GuiTextureCache {
             return;
         }
         self.initialized = true;
-        let Some(atlas) = parse_hero_atlas() else {
-            return;
-        };
+        if let Some(atlas) = parse_hero_atlas() {
+            let gem_img =
+                egui::ColorImage::from_rgb([atlas.gem_width, atlas.gem_height], &atlas.gem_rgb);
+            self.gem = Some(ctx.load_texture("truesight_gem", gem_img, TextureOptions::LINEAR));
 
-        let gem_img =
-            egui::ColorImage::from_rgb([atlas.gem_width, atlas.gem_height], &atlas.gem_rgb);
-        self.gem = Some(ctx.load_texture("truesight_gem", gem_img, TextureOptions::LINEAR));
+            let size = [atlas.hero_width, atlas.hero_height];
+            for (hid, rgb) in atlas.heroes {
+                let color_img = egui::ColorImage::from_rgb(size, &rgb);
+                let toned_rgb = transform_rgb(&rgb, 0.60, 0.80);
+                let toned_img = egui::ColorImage::from_rgb(size, &toned_rgb);
+                let banned_rgb = transform_rgb(&rgb, 0.90, 0.55);
+                let banned_img = egui::ColorImage::from_rgb(size, &banned_rgb);
 
-        let size = [atlas.hero_width, atlas.hero_height];
-        for (hid, rgb) in atlas.heroes {
-            let color_img = egui::ColorImage::from_rgb(size, &rgb);
-            let toned_rgb = transform_rgb(&rgb, 0.60, 0.80);
-            let toned_img = egui::ColorImage::from_rgb(size, &toned_rgb);
-            let banned_rgb = transform_rgb(&rgb, 0.90, 0.55);
-            let banned_img = egui::ColorImage::from_rgb(size, &banned_rgb);
+                let color = ctx.load_texture(
+                    format!("h_col_{}", hid.0),
+                    color_img,
+                    TextureOptions::LINEAR,
+                );
+                let toned = ctx.load_texture(
+                    format!("h_ton_{}", hid.0),
+                    toned_img,
+                    TextureOptions::LINEAR,
+                );
+                let banned = ctx.load_texture(
+                    format!("h_ban_{}", hid.0),
+                    banned_img,
+                    TextureOptions::LINEAR,
+                );
+                self.heroes.insert(
+                    hid,
+                    HeroTextureSet {
+                        color,
+                        toned,
+                        banned,
+                    },
+                );
+            }
+        }
 
-            let color = ctx.load_texture(
-                format!("h_col_{}", hid.0),
-                color_img,
-                TextureOptions::LINEAR,
-            );
-            let toned = ctx.load_texture(
-                format!("h_ton_{}", hid.0),
-                toned_img,
-                TextureOptions::LINEAR,
-            );
-            let banned = ctx.load_texture(
-                format!("h_ban_{}", hid.0),
-                banned_img,
-                TextureOptions::LINEAR,
-            );
-            self.heroes.insert(
-                hid,
-                HeroTextureSet {
-                    color,
-                    toned,
-                    banned,
-                },
-            );
+        if let Some(item_atlas) = parse_item_atlas() {
+            let size = [item_atlas.item_width, item_atlas.item_height];
+            for (iid, rgb) in item_atlas.items {
+                let img = egui::ColorImage::from_rgb(size, &rgb);
+                let tex = ctx.load_texture(format!("itm_{}", iid.0), img, TextureOptions::LINEAR);
+                self.items.insert(iid, tex);
+            }
         }
     }
 }
@@ -258,6 +267,149 @@ pub(super) fn paint_portrait_16_9(
         );
     }
     resp
+}
+
+pub(super) fn paint_item_icon_on(
+    painter: &egui::Painter,
+    rect: Rect,
+    tex: Option<&TextureHandle>,
+    border_color: Color32,
+    owned: bool,
+) {
+    painter.rect_filled(rect, 0.0, P_INDIGO_1);
+    if let Some(t) = tex {
+        let tint = if owned {
+            Color32::from_gray(145)
+        } else {
+            Color32::WHITE
+        };
+        painter.image(t.id(), rect, uv_full(), tint);
+    }
+    painter.rect_stroke(
+        rect,
+        0.0,
+        Stroke::new(1.0_f32, border_color),
+        StrokeKind::Inside,
+    );
+}
+
+pub(super) fn paint_item_icon(
+    ui: &mut egui::Ui,
+    tex: Option<&TextureHandle>,
+    size: Vec2,
+    border_color: Color32,
+    owned: bool,
+) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
+    paint_item_icon_on(ui.painter(), rect, tex, border_color, owned);
+    resp
+}
+
+pub(super) fn paint_reset_icon(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let c = rect.center();
+    let r = (rect.width().min(rect.height()) * 0.30).max(3.5);
+    let start_rad = -0.85_f32;
+    let end_rad = 3.85_f32;
+    let steps = 14usize;
+    let mut pts = Vec::with_capacity(steps + 1);
+    for i in 0..=steps {
+        let a = start_rad + (end_rad - start_rad) * (i as f32 / steps as f32);
+        pts.push(pos2(c.x + r * a.cos(), c.y + r * a.sin()));
+    }
+    painter.add(Shape::line(pts, Stroke::new(1.6_f32, color)));
+
+    // Crisp arrow tip at the upper-right arc start pointing clockwise.
+    let tip_angle = start_rad;
+    let head = pos2(
+        c.x + (r + 0.5) * tip_angle.cos(),
+        c.y + (r + 0.5) * tip_angle.sin(),
+    );
+    let arrow = vec![
+        head,
+        pos2(head.x - 4.2, head.y - 0.6),
+        pos2(head.x - 0.8, head.y - 4.0),
+    ];
+    painter.add(Shape::convex_polygon(arrow, color, Stroke::NONE));
+}
+
+pub(super) fn paint_drag_grip_icon(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let cx = rect.center().x;
+    let cy = rect.center().y;
+    for row in [-2.4_f32, 2.4_f32] {
+        for col in [-4.5_f32, 0.0_f32, 4.5_f32] {
+            painter.circle_filled(pos2(cx + col, cy + row), 1.25, color);
+        }
+    }
+}
+
+pub(super) fn paint_close_icon(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let r = (rect.width().min(rect.height()) * 0.25).max(3.0);
+    let c = rect.center();
+    let stroke = Stroke::new(1.6_f32, color);
+    painter.line_segment([pos2(c.x - r, c.y - r), pos2(c.x + r, c.y + r)], stroke);
+    painter.line_segment([pos2(c.x + r, c.y - r), pos2(c.x - r, c.y + r)], stroke);
+}
+
+pub(super) fn paint_pass_icon(painter: &egui::Painter, rect: Rect, color: Color32, active: bool) {
+    let c = rect.center();
+    let s = (rect.width().min(rect.height()) * 0.30).max(3.5);
+    let tip = pos2(c.x - s * 0.65, c.y - s * 0.9);
+    let cursor = vec![
+        tip,
+        pos2(c.x + s * 0.85, c.y + s * 0.10),
+        pos2(c.x + s * 0.12, c.y + s * 0.22),
+        pos2(c.x - s * 0.25, c.y + s * 0.92),
+    ];
+    painter.add(Shape::convex_polygon(cursor, color, Stroke::NONE));
+    if active {
+        painter.rect_stroke(
+            rect.shrink(1.5),
+            0.0,
+            Stroke::new(1.0_f32, color),
+            StrokeKind::Inside,
+        );
+    }
+}
+
+pub(super) fn paint_mode_icon(
+    painter: &egui::Painter,
+    rect: Rect,
+    color: Color32,
+    show_picks_target: bool,
+) {
+    let c = rect.center();
+    if show_picks_target {
+        // 2x2 hero slot squares -> switch to Picks view
+        let sz = 4.0_f32;
+        for dy in [-2.8_f32, 2.8_f32] {
+            for dx in [-2.8_f32, 2.8_f32] {
+                let sq = Rect::from_center_size(pos2(c.x + dx, c.y + dy), vec2(sz, sz));
+                painter.rect_filled(sq, 0.0, color);
+            }
+        }
+    } else {
+        // Diagonal blade emblem -> switch to Item Build view
+        let r = (rect.width().min(rect.height()) * 0.28).max(3.5);
+        let stroke = Stroke::new(1.5_f32, color);
+        painter.line_segment([pos2(c.x - r, c.y + r), pos2(c.x + r, c.y - r)], stroke);
+        painter.line_segment(
+            [
+                pos2(c.x - r * 0.75, c.y + r * 0.15),
+                pos2(c.x - r * 0.15, c.y + r * 0.75),
+            ],
+            stroke,
+        );
+        painter.circle_filled(pos2(c.x + r, c.y - r), 1.4, color);
+    }
+}
+
+pub(super) fn paint_chevron_right(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let c = rect.center();
+    let w = (rect.width() * 0.28).max(2.5);
+    let h = (rect.height() * 0.28).max(3.5);
+    let stroke = Stroke::new(1.6_f32, color);
+    painter.line_segment([pos2(c.x - w, c.y - h), pos2(c.x + w, c.y)], stroke);
+    painter.line_segment([pos2(c.x + w, c.y), pos2(c.x - w, c.y + h)], stroke);
 }
 
 pub(super) fn paint_tinted_cell(

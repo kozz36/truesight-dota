@@ -9,7 +9,7 @@ pub use cli::{
     CliInputEvent, execute_command, parse_account_id_arg, render_dashboard_string, run_cli_loop,
     spawn_input_reader,
 };
-pub use session::AppSession;
+pub use session::{AppSession, UiLanguage};
 
 use std::io::{self, Write};
 use truesight_adapters::gsi::BoundedGsiListener;
