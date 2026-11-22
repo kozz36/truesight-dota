@@ -158,9 +158,36 @@ impl TrueSightGuiApp {
         }
     }
 
+    fn is_non_repeating_key_pressed(ctx: &egui::Context, target: egui::Key) -> bool {
+        ctx.input(|i| {
+            i.events.iter().any(|ev| {
+                matches!(
+                    ev,
+                    egui::Event::Key {
+                        key,
+                        pressed: true,
+                        repeat: false,
+                        ..
+                    } if *key == target
+                )
+            })
+        })
+    }
+
     fn is_pass_shortcut_pressed(ctx: &egui::Context) -> bool {
         ctx.input(|i| {
-            i.modifiers.ctrl && i.modifiers.shift && !i.modifiers.alt && i.key_pressed(egui::Key::P)
+            i.events.iter().any(|ev| {
+                matches!(
+                    ev,
+                    egui::Event::Key {
+                        key: egui::Key::P,
+                        pressed: true,
+                        repeat: false,
+                        modifiers,
+                        ..
+                    } if modifiers.ctrl && modifiers.shift && !modifiers.alt
+                )
+            })
         })
     }
 
@@ -356,7 +383,6 @@ impl TrueSightGuiApp {
             for action in actions {
                 if action == hotkey::GlobalHotkeyAction::ToggleOverlayPass
                     && self.session.overlay_mode
-                    && !pass_toggled_this_frame
                 {
                     let next = !self.session.overlay_geometry.click_through;
                     self.set_overlay_click_through_live(ctx, next);
@@ -364,7 +390,7 @@ impl TrueSightGuiApp {
                 }
             }
         }
-        let f8_root = ctx.input(|i| i.key_pressed(egui::Key::F8));
+        let f8_root = Self::is_non_repeating_key_pressed(ctx, egui::Key::F8);
         if f8_root {
             let next = !self.session.overlay_mode;
             self.session.set_overlay_mode(next);
@@ -581,7 +607,7 @@ impl TrueSightGuiApp {
             let overlay_id = egui::ViewportId::from_hash_of("truesight_compact_overlay");
             let builder = overlay::build_overlay_viewport_builder(self.session.overlay_geometry);
             ctx.show_viewport_immediate(overlay_id, builder, |vctx, _class| {
-                if !f8_root && vctx.input(|i| i.key_pressed(egui::Key::F8)) {
+                if !f8_root && Self::is_non_repeating_key_pressed(vctx, egui::Key::F8) {
                     self.session.set_overlay_mode(false);
                     ctx.request_repaint();
                 }

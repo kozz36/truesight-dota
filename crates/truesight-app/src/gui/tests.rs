@@ -2585,23 +2585,25 @@ fn overlay_click_through_unlocks_via_top_bar_button_options_and_ctrl_shift_p_hot
     };
 
     let press_key = |key: egui::Key, modifiers: egui::Modifiers, app: &mut TrueSightGuiApp| {
-        let _ = ctx.run(
-            egui::RawInput {
-                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), viewport)),
-                modifiers,
-                events: vec![egui::Event::Key {
-                    key,
-                    physical_key: None,
-                    pressed: true,
-                    repeat: false,
+        for pressed in [true, false] {
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), viewport)),
                     modifiers,
-                }],
-                ..Default::default()
-            },
-            |ctx| {
-                app.render_frame(ctx);
-            },
-        );
+                    events: vec![egui::Event::Key {
+                        key,
+                        physical_key: None,
+                        pressed,
+                        repeat: false,
+                        modifiers,
+                    }],
+                    ..Default::default()
+                },
+                |ctx| {
+                    app.render_frame(ctx);
+                },
+            );
+        }
     };
 
     // 1. Top bar renders unlock pill while click-through is ON; clicking it disables click-through.
@@ -2792,6 +2794,348 @@ fn language_selector_switches_es_en_ru_from_quick_guide_and_options() {
                 && opts_win.max.y <= min_vp.y
                 && demo_btn.max.y <= min_vp.y,
             "lang={lang:?} OPTIONS {opts_win:?} or DEMO {demo_btn:?} overflowed {min_vp:?}"
+        );
+    }
+}
+
+#[test]
+fn overlay_resize_grip_remains_inside_minimum_280x160_viewport_and_starts_resize() {
+    let mut app = TrueSightGuiApp::new(make_5v5_gui_session(), None, None);
+    app.onboarding_open = false;
+    app.session.overlay_mode = true;
+    app.session.set_overlay_click_through(false);
+
+    let ctx = egui::Context::default();
+    let min_vp = vec2(280.0, 160.0);
+    let screen_rect = Rect::from_min_size(pos2(0.0, 0.0), min_vp);
+    let run_min_overlay = |events: Vec<egui::Event>, app: &mut TrueSightGuiApp| {
+        let mut out = None;
+        let full = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(screen_rect),
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(ctx, |ui| {
+                        out = Some(app.render_overlay_panel(ui));
+                    });
+            },
+        );
+        (out.expect("overlay panel output"), full)
+    };
+
+    let (initial, _) = run_min_overlay(vec![], &mut app);
+    assert!(
+        screen_rect.contains_rect(initial.resize_handle)
+            && initial.resize_handle.width() >= 10.0
+            && initial.resize_handle.height() >= 10.0,
+        "resize handle {:?} must stay completely inside minimum 280x160 viewport {:?}",
+        initial.resize_handle,
+        screen_rect
+    );
+
+    let start = initial.resize_handle.center();
+    let _ = run_min_overlay(
+        vec![
+            egui::Event::PointerMoved(start),
+            egui::Event::PointerButton {
+                pos: start,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            },
+        ],
+        &mut app,
+    );
+    let (dragged, full) = run_min_overlay(
+        vec![egui::Event::PointerMoved(start + vec2(8.0, 6.0))],
+        &mut app,
+    );
+    assert!(
+        dragged.resize_started,
+        "holding and dragging minimum-size resize handle must initiate BeginResize"
+    );
+    let cmds = &full
+        .viewport_output
+        .get(&egui::ViewportId::ROOT)
+        .expect("root viewport output")
+        .commands;
+    assert!(
+        cmds.iter().any(|c| matches!(
+            c,
+            egui::ViewportCommand::BeginResize(egui::ResizeDirection::SouthEast)
+        )),
+        "expected BeginResize(SouthEast), got {cmds:?}"
+    );
+}
+
+#[test]
+fn gui_overlay_preserves_resized_dimensions_on_native_wayland_without_position_rects() {
+    let mut session = AppSession::new().unwrap();
+    session.overlay_mode = true;
+    session.overlay_geometry = crate::session::OverlayGeometry {
+        x: 120.0,
+        y: 130.0,
+        width: 380.0,
+        height: 230.0,
+        click_through: false,
+    };
+    let mut app = TrueSightGuiApp::new(session, None, None);
+    app.native_monitors_probed = true;
+    let ctx = egui::Context::default();
+
+    let mut raw_input = egui::RawInput {
+        screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(480.0, 420.0))),
+        ..Default::default()
+    };
+    raw_input.viewports.insert(
+        egui::ViewportId::ROOT,
+        egui::ViewportInfo {
+            monitor_size: None,
+            outer_rect: None,
+            inner_rect: None,
+            ..Default::default()
+        },
+    );
+
+    let full_output = ctx.run(raw_input, |vctx| {
+        app.sync_live_overlay_viewport_geometry(vctx);
+    });
+
+    assert_eq!(app.session.overlay_geometry.width, 480.0);
+    assert_eq!(app.session.overlay_geometry.height, 420.0);
+    assert_eq!(app.session.overlay_geometry.x, 120.0);
+    assert_eq!(app.session.overlay_geometry.y, 130.0);
+    let cmds = &full_output
+        .viewport_output
+        .get(&egui::ViewportId::ROOT)
+        .expect("root viewport output")
+        .commands;
+    assert!(
+        !cmds
+            .iter()
+            .any(|c| matches!(c, egui::ViewportCommand::OuterPosition(_))),
+        "must not emit OuterPosition when native Wayland omits outer/inner position rects: {cmds:?}"
+    );
+}
+
+#[test]
+fn hotkey_ignores_key_repeats_and_processes_multiple_queued_global_presses() {
+    let mut app = TrueSightGuiApp::new(make_5v5_gui_session(), None, None);
+    app.onboarding_open = false;
+    app.session.overlay_mode = true;
+    app.session.set_overlay_click_through(false);
+
+    let (tx, rx) = std::sync::mpsc::sync_channel(8);
+    app.hotkey_listener = Some(super::hotkey::GlobalHotkeyListener::from_channel_for_test(
+        rx,
+        "Ctrl+Shift+P (Test Global)",
+    ));
+
+    let ctx = egui::Context::default();
+    let viewport = vec2(1280.0, 800.0);
+    let send_key_event = |key: egui::Key,
+                          pressed: bool,
+                          repeat: bool,
+                          modifiers: egui::Modifiers,
+                          app: &mut TrueSightGuiApp| {
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), viewport)),
+                modifiers,
+                events: vec![egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed,
+                    repeat,
+                    modifiers,
+                }],
+                ..Default::default()
+            },
+            |ctx| {
+                app.render_frame(ctx);
+            },
+        );
+    };
+
+    let ctrl_shift = egui::Modifiers {
+        ctrl: true,
+        shift: true,
+        ..Default::default()
+    };
+    // Initial press toggles ON (`false -> true`), held auto-repeat (`keys_down` active -> egui `repeat: true`)
+    // MUST NOT flicker back OFF; release afterwards cleans `keys_down`.
+    send_key_event(egui::Key::P, true, false, ctrl_shift, &mut app);
+    assert!(
+        app.session.overlay_geometry.click_through,
+        "initial Ctrl+Shift+P press must toggle overlay click-through ON"
+    );
+    send_key_event(egui::Key::P, true, true, ctrl_shift, &mut app);
+    assert!(
+        app.session.overlay_geometry.click_through,
+        "repeating Ctrl+Shift+P key event while held must not toggle overlay click-through"
+    );
+    send_key_event(egui::Key::P, false, false, ctrl_shift, &mut app);
+
+    // Same for F8: initial press toggles overlay OFF (`true -> false`), held auto-repeat MUST NOT flicker back ON.
+    send_key_event(
+        egui::Key::F8,
+        true,
+        false,
+        egui::Modifiers::default(),
+        &mut app,
+    );
+    assert!(
+        !app.session.overlay_mode,
+        "initial F8 press must toggle overlay mode OFF"
+    );
+    send_key_event(
+        egui::Key::F8,
+        true,
+        true,
+        egui::Modifiers::default(),
+        &mut app,
+    );
+    assert!(
+        !app.session.overlay_mode,
+        "repeating F8 key event while held must not toggle overlay mode"
+    );
+    send_key_event(
+        egui::Key::F8,
+        false,
+        false,
+        egui::Modifiers::default(),
+        &mut app,
+    );
+    app.session.set_overlay_mode(true);
+    app.session.set_overlay_click_through(false);
+
+    // Enqueue one global press -> toggles ON and updates banner.
+    tx.send(super::hotkey::GlobalHotkeyAction::ToggleOverlayPass)
+        .unwrap();
+    let _ = render_at_viewport(&mut app, &ctx, viewport);
+    assert!(
+        app.session.overlay_geometry.click_through,
+        "single queued global press must toggle overlay click-through ON"
+    );
+    let tr = super::i18n::strings(app.session.ui_language);
+    assert_eq!(app.status_banner, tr.status_pass_enabled);
+
+    // Enqueue two distinct global presses in one frame (`true -> false -> true`):
+    // resetting `status_banner` proves neither 0 nor 1 execution can pass this assertion.
+    app.status_banner = "sentinel".into();
+    tx.send(super::hotkey::GlobalHotkeyAction::ToggleOverlayPass)
+        .unwrap();
+    tx.send(super::hotkey::GlobalHotkeyAction::ToggleOverlayPass)
+        .unwrap();
+    let _ = render_at_viewport(&mut app, &ctx, viewport);
+    assert!(
+        app.session.overlay_geometry.click_through,
+        "two queued global presses in one frame must toggle twice (`true -> false -> true`) without dropping the second"
+    );
+    assert_eq!(app.status_banner, tr.status_pass_enabled);
+}
+
+#[test]
+fn wayland_portal_shortcut_syntax_binding_status_and_cancel_handling() {
+    use super::hotkey::{
+        PORTAL_PREFERRED_TRIGGER, PortalLoopOutcome, portal_status_label,
+        should_fallback_to_xwayland,
+    };
+
+    assert_eq!(PORTAL_PREFERRED_TRIGGER, "CTRL+SHIFT+p");
+    assert_eq!(portal_status_label(None), "Ctrl+Shift+P (In-App)");
+    assert_eq!(portal_status_label(Some("")), "Ctrl+Shift+P (In-App)");
+    assert_eq!(portal_status_label(Some("   ")), "Ctrl+Shift+P (In-App)");
+    assert_eq!(
+        portal_status_label(Some("Meta+Shift+P")),
+        "Meta+Shift+P (Global · Wayland Portal)"
+    );
+
+    // Explicit user cancellation (`response_code == 1`) must NEVER fall back to XWayland XGrabKey.
+    assert!(!should_fallback_to_xwayland(
+        &PortalLoopOutcome::Cancelled,
+        true
+    ));
+    assert!(!should_fallback_to_xwayland(
+        &PortalLoopOutcome::Finished,
+        true
+    ));
+    assert!(should_fallback_to_xwayland(
+        &PortalLoopOutcome::Unavailable("no portal".into()),
+        true
+    ));
+    assert!(!should_fallback_to_xwayland(
+        &PortalLoopOutcome::Unavailable("no portal".into()),
+        false
+    ));
+
+    #[cfg(target_os = "linux")]
+    {
+        use super::hotkey::{extract_assigned_trigger_from_pairs, inspect_portal_shortcuts_value};
+        use std::collections::HashMap;
+        use zbus::zvariant::{OwnedValue, Value};
+
+        let empty: Vec<(String, HashMap<String, Value<'_>>)> = Vec::new();
+        let empty_val = Value::from(empty);
+        assert_eq!(
+            inspect_portal_shortcuts_value(&empty_val, "toggle_overlay_pass"),
+            (false, None)
+        );
+
+        let mut blank_props: HashMap<String, Value<'_>> = HashMap::new();
+        blank_props.insert("description".into(), Value::from("Toggle Overlay"));
+        blank_props.insert(
+            "trigger_description".into(),
+            Value::Value(Box::new(Value::from("   "))),
+        );
+        let blank_val = Value::from(vec![("toggle_overlay_pass".to_string(), blank_props)]);
+        let (listed, trigger) = inspect_portal_shortcuts_value(&blank_val, "toggle_overlay_pass");
+        assert!(listed, "listed shortcut id should be detected");
+        assert_eq!(
+            trigger, None,
+            "blank trigger_description must NOT report Global"
+        );
+        assert_eq!(
+            portal_status_label(trigger.as_deref()),
+            "Ctrl+Shift+P (In-App)"
+        );
+
+        let mut bound_props: HashMap<String, Value<'_>> = HashMap::new();
+        bound_props.insert("description".into(), Value::from("Toggle Overlay"));
+        bound_props.insert("trigger_description".into(), Value::from("Ctrl+Shift+P"));
+        let bound_val = Value::Value(Box::new(Value::from(vec![(
+            "toggle_overlay_pass".to_string(),
+            bound_props,
+        )])));
+        assert_eq!(
+            inspect_portal_shortcuts_value(&bound_val, "toggle_overlay_pass"),
+            (true, Some("Ctrl+Shift+P".to_string()))
+        );
+
+        let mut changed_bound: HashMap<String, OwnedValue> = HashMap::new();
+        changed_bound.insert(
+            "trigger_description".into(),
+            OwnedValue::try_from(Value::from("Meta+P")).unwrap(),
+        );
+        let changed_pairs = vec![("toggle_overlay_pass".to_string(), changed_bound)];
+        assert_eq!(
+            extract_assigned_trigger_from_pairs(&changed_pairs, "toggle_overlay_pass"),
+            Some("Meta+P".to_string())
+        );
+
+        let mut changed_cleared: HashMap<String, OwnedValue> = HashMap::new();
+        changed_cleared.insert(
+            "trigger_description".into(),
+            OwnedValue::try_from(Value::from("")).unwrap(),
+        );
+        let cleared_pairs = vec![("toggle_overlay_pass".to_string(), changed_cleared)];
+        assert_eq!(
+            extract_assigned_trigger_from_pairs(&cleared_pairs, "toggle_overlay_pass"),
+            None
         );
     }
 }

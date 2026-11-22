@@ -120,17 +120,10 @@ impl TrueSightGuiApp {
 
         let fallback_monitor_size_pts = vp_monitor_size
             .map(|s| (s.x, s.y))
-            .filter(|(w, h)| *w > 0.0 && *h > 0.0)
-            .or_else(|| {
-                let s = screen_rect.size();
-                if s.x > 0.0 && s.y > 0.0 {
-                    Some((s.x, s.y))
-                } else {
-                    None
-                }
-            });
+            .filter(|(w, h)| *w > 0.0 && *h > 0.0);
         let fallback_monitor_size_px = fallback_monitor_size_pts.map(|(w, h)| (w * ppp, h * ppp));
 
+        let has_live_position = vp_outer_rect.is_some() || vp_inner_rect.is_some();
         let (x, y) = vp_outer_rect
             .or(vp_inner_rect)
             .map(|r| (r.min.x, r.min.y))
@@ -139,9 +132,14 @@ impl TrueSightGuiApp {
                 self.session.overlay_geometry.y,
             ));
 
+        let live_screen_size = {
+            let s = screen_rect.size();
+            (s.x > 0.0 && s.y > 0.0).then_some((s.x, s.y))
+        };
         let (width, height) = vp_inner_rect
             .or(vp_outer_rect)
             .map(|r| (r.width(), r.height()))
+            .or(live_screen_size)
             .unwrap_or((
                 self.session.overlay_geometry.width,
                 self.session.overlay_geometry.height,
@@ -172,8 +170,9 @@ impl TrueSightGuiApp {
             || self.overlay_wm_gesture_cooldown > 0
             || vctx.input(|i| i.pointer.primary_down());
         if !actively_interacting {
-            if (clamped_pts.x - candidate_pts.x).abs() > 0.5
-                || (clamped_pts.y - candidate_pts.y).abs() > 0.5
+            if has_live_position
+                && ((clamped_pts.x - candidate_pts.x).abs() > 0.5
+                    || (clamped_pts.y - candidate_pts.y).abs() > 0.5)
             {
                 vctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
                     clamped_pts.x,
@@ -396,16 +395,16 @@ impl TrueSightGuiApp {
 
                     let body_w = ui.available_width();
                     // Reserve 14px strip at the bottom so the resize corner handle stays clear.
-                    let body_h = (ui.available_height() - 14.0).max(96.0);
-                    let matrix_col_w = (body_w * 0.44).clamp(112.0, 260.0);
-                    let picks_col_w = (body_w - matrix_col_w - 8.0).max(120.0);
+                    let body_h = (ui.available_height() - 14.0).max(52.0);
+                    let matrix_col_w = (body_w * 0.44).clamp(84.0, 260.0);
+                    let picks_col_w = (body_w - matrix_col_w - 8.0).max(96.0);
                     let grid_gap = 2.0_f32;
                     let cell_side = ((matrix_col_w - 5.0 * grid_gap) / 6.0)
-                        .min((body_h - 18.0 - 5.0 * grid_gap) / 6.0)
-                        .clamp(16.0, 38.0);
+                        .min(((body_h - 14.0 - 5.0 * grid_gap) / 6.0).max(10.0))
+                        .clamp(10.0, 38.0);
                     let cell_sz = vec2(cell_side, cell_side);
                     let cell_font = (cell_side * 0.27).clamp(6.8, 10.5);
-                    let max_picks = ((body_h - 18.0) / 19.5).floor().clamp(3.0, 8.0) as usize;
+                    let max_picks = ((body_h - 14.0) / 18.0).floor().clamp(2.0, 8.0) as usize;
 
                     // Draft phase: Hero-portrait Top Suggestions (left) + 5x5 Intensity Matrix (right)
                     ui.horizontal_top(|ui| {
@@ -742,12 +741,19 @@ impl TrueSightGuiApp {
             });
 
         let panel_rect = panel_resp.response.rect;
+        let visible_rect = ui.ctx().screen_rect();
+        let clamped_panel = visible_rect.intersect(panel_rect);
+        let handle_anchor = if clamped_panel.width() >= 20.0 && clamped_panel.height() >= 20.0 {
+            clamped_panel
+        } else {
+            visible_rect
+        };
         let resize_handle = Rect::from_min_max(
             egui::pos2(
-                (panel_rect.right() - 16.0).max(panel_rect.left()),
-                (panel_rect.bottom() - 16.0).max(panel_rect.top()),
+                (handle_anchor.right() - 16.0).max(handle_anchor.left()),
+                (handle_anchor.bottom() - 16.0).max(handle_anchor.top()),
             ),
-            egui::pos2(panel_rect.right() - 2.0, panel_rect.bottom() - 2.0),
+            egui::pos2(handle_anchor.right() - 2.0, handle_anchor.bottom() - 2.0),
         );
 
         let mut drag_started = false;
@@ -768,9 +774,21 @@ impl TrueSightGuiApp {
             } else {
                 P_MUTED
             };
-            let painter = ui.painter();
+            let fg_painter = ui.ctx().layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                ui.id().with("truesight_overlay_resize_grip_layer"),
+            ));
+            fg_painter.add(egui::Shape::convex_polygon(
+                vec![
+                    egui::pos2(resize_handle.right(), resize_handle.top()),
+                    resize_handle.max,
+                    egui::pos2(resize_handle.left(), resize_handle.bottom()),
+                ],
+                P_VOID.gamma_multiply(0.92),
+                Stroke::NONE,
+            ));
             for offset in [3.5_f32, 7.0, 10.5] {
-                painter.line_segment(
+                fg_painter.line_segment(
                     [
                         egui::pos2(resize_handle.right() - offset, resize_handle.bottom()),
                         egui::pos2(resize_handle.right(), resize_handle.bottom() - offset),

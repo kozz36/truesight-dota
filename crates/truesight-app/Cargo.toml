@@ -24,7 +24,7 @@ gui = ["dep:eframe", "dep:global-hotkey", "dep:zbus"]
 truesight-core = { path = "../truesight-core" }
 truesight-adapters = { path = "../truesight-adapters" }
 eframe = { version = "0.31", optional = true }
-global-hotkey = { version = "0.7", optional = true }
+global-hotkey = { version = "0.10", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = { version = "4", optional = true }
