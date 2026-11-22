@@ -1,4 +1,5 @@
 mod build_bar;
+mod hotkey;
 mod i18n;
 mod matrix_card;
 mod onboarding;
@@ -84,6 +85,10 @@ pub struct TrueSightGuiApp {
     pub(super) native_monitors_probed: bool,
     pub(super) overlay_applied_click_through: Option<bool>,
     pub(super) overlay_passthrough_repaint_frames: u8,
+    pub(super) overlay_drag_armed: Option<egui::Pos2>,
+    pub(super) overlay_resize_armed: Option<egui::Pos2>,
+    pub(super) overlay_wm_gesture_cooldown: u8,
+    hotkey_listener: Option<hotkey::GlobalHotkeyListener>,
 }
 
 impl Drop for TrueSightGuiApp {
@@ -146,7 +151,27 @@ impl TrueSightGuiApp {
             native_monitors_probed: false,
             overlay_applied_click_through: None,
             overlay_passthrough_repaint_frames: 0,
+            overlay_drag_armed: None,
+            overlay_resize_armed: None,
+            overlay_wm_gesture_cooldown: 0,
+            hotkey_listener: None,
         }
+    }
+
+    fn is_pass_shortcut_pressed(ctx: &egui::Context) -> bool {
+        ctx.input(|i| {
+            i.modifiers.ctrl && i.modifiers.shift && !i.modifiers.alt && i.key_pressed(egui::Key::P)
+        })
+    }
+
+    /// Clears the active draft and transient UI selection state.
+    pub(super) fn reset_draft_ui(&mut self) {
+        self.session.reset_draft();
+        self.picker_target = None;
+        self.enemy_scout_role = None;
+        self.drag_slot = None;
+        let tr = i18n::strings(self.session.ui_language);
+        self.status_banner = tr.status_draft_cleared.into();
     }
 
     /// Toggles overlay mouse click-through immediately and requests immediate repaints on both
@@ -322,15 +347,35 @@ impl TrueSightGuiApp {
         if let Some(notice) = self.session.last_sync_notice.take() {
             self.status_banner = notice;
         }
+        let mut pass_toggled_this_frame = false;
+        if let Some(actions) = self
+            .hotkey_listener
+            .as_ref()
+            .map(hotkey::GlobalHotkeyListener::poll_actions)
+        {
+            for action in actions {
+                if action == hotkey::GlobalHotkeyAction::ToggleOverlayPass
+                    && self.session.overlay_mode
+                    && !pass_toggled_this_frame
+                {
+                    let next = !self.session.overlay_geometry.click_through;
+                    self.set_overlay_click_through_live(ctx, next);
+                    pass_toggled_this_frame = true;
+                }
+            }
+        }
         let f8_root = ctx.input(|i| i.key_pressed(egui::Key::F8));
         if f8_root {
             let next = !self.session.overlay_mode;
             self.session.set_overlay_mode(next);
         }
-        let f9_root = self.session.overlay_mode && ctx.input(|i| i.key_pressed(egui::Key::F9));
-        if f9_root {
+        if !pass_toggled_this_frame
+            && self.session.overlay_mode
+            && Self::is_pass_shortcut_pressed(ctx)
+        {
             let next = !self.session.overlay_geometry.click_through;
             self.set_overlay_click_through_live(ctx, next);
+            pass_toggled_this_frame = true;
         }
 
         let (analysis, _) = self.session.evaluate();
@@ -540,7 +585,7 @@ impl TrueSightGuiApp {
                     self.session.set_overlay_mode(false);
                     ctx.request_repaint();
                 }
-                if !f9_root && vctx.input(|i| i.key_pressed(egui::Key::F9)) {
+                if !pass_toggled_this_frame && Self::is_pass_shortcut_pressed(vctx) {
                     let next = !self.session.overlay_geometry.click_through;
                     self.set_overlay_click_through_live(ctx, next);
                 }
@@ -571,6 +616,9 @@ impl TrueSightGuiApp {
         } else {
             self.overlay_applied_click_through = None;
             self.overlay_passthrough_repaint_frames = 0;
+            self.overlay_drag_armed = None;
+            self.overlay_resize_armed = None;
+            self.overlay_wm_gesture_cooldown = 0;
         }
 
         rects
@@ -747,12 +795,10 @@ pub fn run_gui(
     eframe::run_native(
         "TrueSight Dota",
         options,
-        Box::new(move |_cc| {
-            Ok(Box::new(TrueSightGuiApp::new(
-                session,
-                gsi_listener,
-                vision_worker,
-            )))
+        Box::new(move |cc| {
+            let mut app = TrueSightGuiApp::new(session, gsi_listener, vision_worker);
+            app.hotkey_listener = Some(hotkey::GlobalHotkeyListener::start(cc.egui_ctx.clone()));
+            Ok(Box::new(app))
         }),
     )
     .map_err(|e| e.to_string())

@@ -84,19 +84,11 @@ impl TrueSightGuiApp {
             Faction::Radiant => P_GEM,
             Faction::Dire => P_DIRE,
         };
-        let label = if compact {
-            format!(
-                "{}: {}",
-                tr.you_prefix,
-                self.session.draft.ally_faction.label()
-            )
-        } else {
-            format!(
-                "{}: {} <->",
-                tr.you_prefix,
-                self.session.draft.ally_faction.label()
-            )
-        };
+        let label = format!(
+            "{}: {}",
+            tr.you_prefix,
+            self.session.draft.ally_faction.label()
+        );
         let fac_btn = egui::Button::new(
             RichText::new(label)
                 .size(if compact { 10.0 } else { 10.5 })
@@ -267,10 +259,15 @@ impl TrueSightGuiApp {
 
     fn render_pass_unlock_button(&mut self, ui: &mut egui::Ui, compact: bool) -> Rect {
         let tr = super::i18n::strings(self.session.ui_language);
+        let label = if compact {
+            tr.top_bar_pass_unlock_compact
+        } else {
+            tr.top_bar_pass_unlock_btn
+        };
         let resp = ui
             .add(
                 egui::Button::new(
-                    RichText::new(tr.top_bar_pass_unlock_btn)
+                    RichText::new(label)
                         .size(if compact { 9.5 } else { 10.0 })
                         .strong()
                         .color(P_NEUTRAL),
@@ -286,26 +283,31 @@ impl TrueSightGuiApp {
         resp.rect
     }
 
-    fn render_reset_button(&mut self, ui: &mut egui::Ui, compact: bool) -> Rect {
+    fn render_reset_button(&mut self, ui: &mut egui::Ui, _compact: bool) -> Rect {
         let tr = super::i18n::strings(self.session.ui_language);
-        let resp = ui.add(
-            egui::Button::new(
-                RichText::new(tr.reset_btn)
-                    .size(if compact { 10.0 } else { 10.5 })
-                    .strong()
-                    .color(P_GLINT),
-            )
-            .fill(P_INDIGO_2)
-            .min_size(vec2(0.0, TOP_BTN_H)),
+        let (rect, resp) = ui.allocate_exact_size(vec2(TOP_BTN_H, TOP_BTN_H), Sense::click());
+        let bg = if resp.hovered() {
+            P_INDIGO_3
+        } else {
+            P_INDIGO_2
+        };
+        let border = if resp.hovered() { P_GEM } else { P_LINE };
+        let fg = if resp.hovered() { P_GEM } else { P_GLINT };
+
+        let painter = ui.painter();
+        painter.rect_filled(rect, CornerRadius::same(2), bg);
+        painter.rect_stroke(
+            rect,
+            CornerRadius::same(2),
+            Stroke::new(1.0_f32, border),
+            StrokeKind::Inside,
         );
-        if resp.clicked() {
-            self.session.reset_draft();
-            self.picker_target = None;
-            self.enemy_scout_role = None;
-            self.drag_slot = None;
-            self.status_banner = "Draft cleared.".into();
+        paint_reset_icon(painter, rect, fg);
+
+        if resp.on_hover_text(tr.reset_hover).clicked() {
+            self.reset_draft_ui();
         }
-        resp.rect
+        rect
     }
 
     fn paint_top_bar_separator(ui: &mut egui::Ui) {
@@ -661,6 +663,11 @@ impl TrueSightGuiApp {
                     } else {
                         tr.click_through_off
                     };
+                    let hotkey_info = self
+                        .hotkey_listener
+                        .as_ref()
+                        .map(|h| h.status_label())
+                        .unwrap_or_else(|| super::hotkey::PASS_HOTKEY_LABEL.to_string());
                     if ui
                         .add(
                             egui::Button::new(RichText::new(ct_lbl).size(10.0).color(
@@ -680,7 +687,7 @@ impl TrueSightGuiApp {
                                 },
                             )),
                         )
-                        .on_hover_text(tr.click_through_hover)
+                        .on_hover_text(format!("{}\n{}", tr.click_through_hover, hotkey_info))
                         .clicked()
                     {
                         let next = !self.session.overlay_geometry.click_through;
@@ -708,6 +715,12 @@ impl TrueSightGuiApp {
                         if ui.button(tr.close_btn).clicked() {
                             close_window = true;
                         }
+                        ui.label(
+                            RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
+                                .size(9.5)
+                                .color(P_MUTED),
+                        )
+                        .on_hover_text(format!("TrueSight Dota v{}", env!("CARGO_PKG_VERSION")));
                     });
                 });
             });

@@ -1510,9 +1510,9 @@ impl AppSession {
         }
 
         let min_w_px = 280.0 * ppp;
-        let max_w_cap_px = 520.0 * ppp;
+        let max_w_cap_px = 840.0 * ppp;
         let min_h_px = 160.0 * ppp;
-        let max_h_cap_px = 360.0 * ppp;
+        let max_h_cap_px = 720.0 * ppp;
         let min_mon_w_px = 640.0 * ppp;
         let min_mon_h_px = 480.0 * ppp;
 
@@ -1616,7 +1616,7 @@ impl AppSession {
 
     /// Clamps physical desktop pixel `geom_px` within physical `monitor_px` (preserving secondary
     /// monitor origins) and prevents it from intersecting physical `capture_strip_rect_px`,
-    /// scaling logical point bounds (`280..520` x `160..360`) by `pixels_per_point`.
+    /// scaling logical point bounds (`280..840` x `160..720`) by `pixels_per_point`.
     pub fn clamp_overlay_geometry_in_monitor_scaled(
         mut geom_px: OverlayGeometry,
         monitor_px: MonitorRect,
@@ -1625,9 +1625,9 @@ impl AppSession {
     ) -> OverlayGeometry {
         let ppp = Self::sanitize_pixels_per_point(pixels_per_point);
         let min_w_px = 280.0 * ppp;
-        let max_w_cap_px = 520.0 * ppp;
+        let max_w_cap_px = 840.0 * ppp;
         let min_h_px = 160.0 * ppp;
-        let max_h_cap_px = 360.0 * ppp;
+        let max_h_cap_px = 720.0 * ppp;
         let min_mon_w_px = 640.0 * ppp;
         let min_mon_h_px = 480.0 * ppp;
 

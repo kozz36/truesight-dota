@@ -54,7 +54,7 @@ impl TrueSightGuiApp {
                         .color(P_CYAN),
                 )
                 .fill(P_INDIGO_2)
-                .stroke(Stroke::new(1.0_f32, P_LINE));
+                .stroke(Stroke::new(1.0_f32, P_GEM_DEEP));
                 if ui
                     .add(build_btn)
                     .on_hover_text(tr.build_view_hover)

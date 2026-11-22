@@ -1,6 +1,6 @@
 use super::TrueSightGuiApp;
 use super::theme::*;
-use eframe::egui::{self, Align, Layout, Margin, Rect, RichText, Stroke};
+use eframe::egui::{self, Align, Layout, Margin, Rect, RichText, Sense, Stroke, vec2};
 use truesight_core::domain::{ItemPhase, counter_trait_table_patch};
 use truesight_core::ports::ItemMetaRepository;
 
@@ -139,23 +139,28 @@ impl TrueSightGuiApp {
                             .item_catalog(item_id)
                             .map(|e| (e.display_name, e.cost))
                             .unwrap_or_else(|| (format!("Item #{}", item_id.0), 0));
+                        let tex = self.textures.items.get(&item_id);
                         egui::Frame::NONE
                             .fill(P_INDIGO_2)
                             .stroke(Stroke::new(1.0_f32, P_LINE))
-                            .inner_margin(Margin::symmetric(6, 2))
+                            .inner_margin(Margin::symmetric(5, 2))
                             .show(ui, |ui| {
-                                ui.label(
-                                    RichText::new(format!("{name} · {cost}g"))
-                                        .size(9.5)
-                                        .color(P_SILVER),
-                                );
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 4.0;
+                                    paint_item_icon(ui, tex, vec2(22.0, 16.0), P_LINE, false);
+                                    ui.label(
+                                        RichText::new(format!("{name} · {cost}g"))
+                                            .size(9.5)
+                                            .color(P_SILVER),
+                                    );
+                                });
                             });
                     }
                 });
                 ui.add_space(6.0);
             }
 
-            // Sequential Build Bar: [ Item 1 ] > [ Item 2 ] > [ Item 3 ]
+            // Sequential Build Bar: Step cards joined by crisp vector chevrons
             egui::ScrollArea::horizontal()
                 .id_salt("truesight_item_build_bar_scroll")
                 .auto_shrink([false, true])
@@ -165,13 +170,10 @@ impl TrueSightGuiApp {
                         for (idx, step) in build.steps.iter().enumerate() {
                             if idx > 0 {
                                 ui.vertical(|ui| {
-                                    ui.add_space(26.0);
-                                    ui.label(
-                                        RichText::new(">")
-                                            .size(14.0)
-                                            .strong()
-                                            .color(P_GEM),
-                                    );
+                                    ui.add_space(28.0);
+                                    let (chev_rect, _) =
+                                        ui.allocate_exact_size(vec2(12.0, 14.0), Sense::hover());
+                                    paint_chevron_right(ui.painter(), chev_rect, P_GEM);
                                 });
                             }
 
@@ -195,6 +197,7 @@ impl TrueSightGuiApp {
                                 .item_catalog(step.item_id)
                                 .map(|e| (e.display_name, e.cost))
                                 .unwrap_or_else(|| (format!("Item #{}", step.item_id.0), 0));
+                            let step_tex = self.textures.items.get(&step.item_id);
 
                             ui.vertical(|ui| {
                                 ui.spacing_mut().item_spacing.y = 4.0;
@@ -206,7 +209,7 @@ impl TrueSightGuiApp {
                                     ))
                                     .inner_margin(Margin::symmetric(8, 6))
                                     .show(ui, |ui| {
-                                        ui.set_min_width(126.0);
+                                        ui.set_min_width(142.0);
                                         ui.horizontal(|ui| {
                                             ui.label(
                                                 RichText::new(phase_label(step.phase))
@@ -220,37 +223,56 @@ impl TrueSightGuiApp {
                                                     .color(P_MUTED),
                                             );
                                             if step.owned {
-                                                ui.label(
-                                                    RichText::new("[OK]")
-                                                        .size(9.5)
-                                                        .strong()
-                                                        .color(P_GEM),
+                                                paint_mini_badge_scaled(
+                                                    ui, "OK", P_GEM, P_GEM_DEEP, 8.0, 3,
                                                 );
                                             } else if is_next {
-                                                ui.label(
-                                                    RichText::new("[NEXT]")
-                                                        .size(9.5)
-                                                        .strong()
-                                                        .color(P_GEM),
+                                                paint_mini_badge_scaled(
+                                                    ui, "NEXT", P_GEM, P_GEM, 8.0, 3,
                                                 );
                                             } else if step.owned_components > 0 {
-                                                ui.label(
-                                                    RichText::new(format!(
-                                                        "[{}/{} COMP]",
+                                                paint_mini_badge_scaled(
+                                                    ui,
+                                                    &format!(
+                                                        "{}/{}",
                                                         step.owned_components, step.total_components
-                                                    ))
-                                                    .size(9.0)
-                                                    .color(P_CYAN),
+                                                    ),
+                                                    P_CYAN,
+                                                    P_LINE,
+                                                    8.0,
+                                                    3,
                                                 );
                                             }
                                         });
 
-                                        ui.label(
-                                            RichText::new(format!("{name} · {cost}g"))
-                                                .size(10.5)
-                                                .strong()
-                                                .color(if step.owned { P_MUTED } else { P_GLINT }),
-                                        );
+                                        ui.horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 6.0;
+                                            paint_item_icon(
+                                                ui,
+                                                step_tex,
+                                                vec2(44.0, 32.0),
+                                                border_color,
+                                                step.owned,
+                                            );
+                                            ui.vertical(|ui| {
+                                                ui.spacing_mut().item_spacing.y = 1.0;
+                                                ui.label(
+                                                    RichText::new(name)
+                                                        .size(10.5)
+                                                        .strong()
+                                                        .color(if step.owned {
+                                                            P_MUTED
+                                                        } else {
+                                                            P_GLINT
+                                                        }),
+                                                );
+                                                ui.label(
+                                                    RichText::new(format!("{cost}g"))
+                                                        .size(9.5)
+                                                        .color(P_MUTED),
+                                                );
+                                            });
+                                        });
 
                                         if let Some(tr) = step.counter_trait {
                                             ui.label(
@@ -277,10 +299,19 @@ impl TrueSightGuiApp {
                                                 .item_catalog(var.item_id)
                                                 .map(|e| e.display_name)
                                                 .unwrap_or_else(|| format!("Item #{}", var.item_id.0));
-                                            let var_btn = egui::Button::new(
-                                                RichText::new(format!("[v] {var_name}"))
-                                                    .size(9.5)
-                                                    .color(P_SILVER),
+                                            let var_img = self
+                                                .textures
+                                                .items
+                                                .get(&var.item_id)
+                                                .map(|t| egui::Image::new((t.id(), vec2(20.0, 15.0))));
+                                            let var_btn = egui::Button::opt_image_and_text(
+                                                var_img,
+                                                Some(
+                                                    RichText::new(var_name)
+                                                        .size(9.5)
+                                                        .color(P_SILVER)
+                                                        .into(),
+                                                ),
                                             )
                                             .fill(P_INDIGO_1)
                                             .stroke(Stroke::new(1.0_f32, P_LINE));

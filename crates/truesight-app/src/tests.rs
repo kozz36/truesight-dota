@@ -3323,7 +3323,7 @@ fn overlay_geometry_clamps_to_monitor_and_avoids_topbar_capture_strip() {
         1080.0,
     );
     assert_eq!(clamped.width, 280.0);
-    assert_eq!(clamped.height, 360.0);
+    assert_eq!(clamped.height, 720.0);
     assert_eq!(clamped.x, 0.0);
     assert!(
         clamped.y >= 96.0,
