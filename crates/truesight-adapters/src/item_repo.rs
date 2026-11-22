@@ -1,3 +1,4 @@
+use crate::item_catalog_data::{EMBEDDED_ITEM_CATALOG, StaticItemRow};
 use std::collections::HashMap;
 use truesight_core::domain::{
     Bracket, HeroId, HeroItemStat, ItemCatalogEntry, ItemId, ItemPhase, Role,
@@ -60,268 +61,6 @@ pub fn embedded_item_ids() -> Vec<ItemId> {
         .map(|row| ItemId(row.id))
         .collect()
 }
-
-struct StaticItemRow {
-    id: u16,
-    slug: &'static str,
-    display_name: &'static str,
-    cost: u32,
-    components: &'static [u16],
-    is_recipe: bool,
-    is_consumable_drop: bool,
-}
-
-impl StaticItemRow {
-    fn to_entry(&self) -> ItemCatalogEntry {
-        ItemCatalogEntry {
-            id: ItemId(self.id),
-            slug: self.slug.to_string(),
-            display_name: self.display_name.to_string(),
-            cost: self.cost,
-            components: self.components.iter().copied().map(ItemId).collect(),
-            is_recipe: self.is_recipe,
-            is_consumable_drop: self.is_consumable_drop,
-        }
-    }
-}
-
-const fn item_row(
-    id: u16,
-    slug: &'static str,
-    display_name: &'static str,
-    cost: u32,
-    components: &'static [u16],
-) -> StaticItemRow {
-    StaticItemRow {
-        id,
-        slug,
-        display_name,
-        cost,
-        components,
-        is_recipe: false,
-        is_consumable_drop: false,
-    }
-}
-
-const fn drop_row(
-    id: u16,
-    slug: &'static str,
-    display_name: &'static str,
-    components: &'static [u16],
-) -> StaticItemRow {
-    StaticItemRow {
-        id,
-        slug,
-        display_name,
-        cost: 0,
-        components,
-        is_recipe: false,
-        is_consumable_drop: true,
-    }
-}
-
-const EMBEDDED_ITEM_CATALOG: &[StaticItemRow] = &[
-    item_row(1, "blink", "Blink Dagger", 2250, &[]),
-    item_row(2, "blades_of_attack", "Blades of Attack", 450, &[]),
-    item_row(3, "broadsword", "Broadsword", 1000, &[]),
-    item_row(4, "chainmail", "Chainmail", 500, &[]),
-    item_row(5, "claymore", "Claymore", 1350, &[]),
-    item_row(6, "helm_of_iron_will", "Helm of Iron Will", 975, &[]),
-    item_row(8, "mithril_hammer", "Mithril Hammer", 1600, &[]),
-    item_row(9, "platemail", "Platemail", 1400, &[]),
-    item_row(10, "quarterstaff", "Quarterstaff", 900, &[]),
-    item_row(11, "quelling_blade", "Quelling Blade", 100, &[]),
-    item_row(12, "ring_of_protection", "Ring of Protection", 175, &[]),
-    item_row(13, "gauntlets", "Gauntlets of Strength", 140, &[]),
-    item_row(14, "slippers", "Slippers of Agility", 140, &[]),
-    item_row(15, "mantle", "Mantle of Intelligence", 140, &[]),
-    item_row(16, "branches", "Iron Branch", 55, &[]),
-    item_row(17, "belt_of_strength", "Belt of Strength", 450, &[]),
-    item_row(18, "boots_of_elves", "Band of Elvenskin", 450, &[]),
-    item_row(19, "robe", "Robe of the Magi", 450, &[]),
-    item_row(20, "circlet", "Circlet", 155, &[]),
-    item_row(21, "ogre_axe", "Ogre Axe", 1000, &[]),
-    item_row(22, "blade_of_alacrity", "Blade of Alacrity", 1000, &[]),
-    item_row(23, "staff_of_wizardry", "Staff of Wizardry", 1000, &[]),
-    item_row(24, "ultimate_orb", "Ultimate Orb", 2800, &[]),
-    item_row(25, "gloves", "Gloves of Haste", 450, &[]),
-    item_row(26, "lifesteal", "Morbid Mask", 900, &[]),
-    item_row(27, "ring_of_regen", "Ring of Regen", 175, &[]),
-    item_row(28, "sobi_mask", "Sage's Mask", 175, &[]),
-    item_row(29, "boots", "Boots of Speed", 500, &[]),
-    item_row(30, "gem", "Gem of True Sight", 900, &[]),
-    item_row(31, "cloak", "Cloak", 900, &[]),
-    item_row(32, "talisman_of_evasion", "Talisman of Evasion", 1300, &[]),
-    item_row(34, "magic_stick", "Magic Stick", 200, &[]),
-    item_row(36, "magic_wand", "Magic Wand", 460, &[34, 16, 16]),
-    item_row(37, "ghost", "Ghost Scepter", 1500, &[]),
-    item_row(40, "dust", "Dust of Appearance", 80, &[]),
-    item_row(41, "bottle", "Bottle", 675, &[]),
-    item_row(43, "ward_sentry", "Sentry Ward", 50, &[]),
-    item_row(44, "tango", "Tango", 90, &[]),
-    item_row(46, "tpscroll", "Town Portal Scroll", 100, &[]),
-    item_row(48, "travel_boots", "Boots of Travel", 2500, &[29]),
-    item_row(50, "phase_boots", "Phase Boots", 1450, &[29, 4, 2]),
-    item_row(51, "demon_edge", "Demon Edge", 2200, &[]),
-    item_row(52, "eagle", "Eaglesong", 2800, &[]),
-    item_row(53, "reaver", "Reaver", 2800, &[]),
-    item_row(54, "relic", "Sacred Relic", 3400, &[]),
-    item_row(55, "hyperstone", "Hyperstone", 2000, &[]),
-    item_row(56, "ring_of_health", "Ring of Health", 700, &[]),
-    item_row(57, "void_stone", "Void Stone", 700, &[]),
-    item_row(58, "mystic_staff", "Mystic Staff", 2800, &[]),
-    item_row(59, "energy_booster", "Energy Booster", 800, &[]),
-    item_row(60, "point_booster", "Point Booster", 1200, &[]),
-    item_row(61, "vitality_booster", "Vitality Booster", 1000, &[]),
-    item_row(63, "power_treads", "Power Treads", 1400, &[29, 25, 17]),
-    item_row(65, "hand_of_midas", "Hand of Midas", 2200, &[25]),
-    item_row(67, "oblivion_staff", "Oblivion Staff", 1625, &[485, 19, 28]),
-    item_row(69, "pers", "Perseverance", 1400, &[56, 57]),
-    item_row(73, "bracer", "Bracer", 505, &[20, 13]),
-    item_row(75, "wraith_band", "Wraith Band", 505, &[20, 14]),
-    item_row(77, "null_talisman", "Null Talisman", 505, &[20, 15]),
-    item_row(79, "mekansm", "Mekansm", 1775, &[94, 4]),
-    item_row(81, "vladmir", "Vladmir's Offering", 2200, &[86, 88, 26, 2]),
-    item_row(86, "buckler", "Buckler", 425, &[12]),
-    item_row(88, "ring_of_basilius", "Ring of Basilius", 425, &[28]),
-    item_row(90, "pipe", "Pipe of Insight", 3725, &[279, 31, 1848]),
-    item_row(92, "urn_of_shadows", "Urn of Shadows", 875, &[28, 12, 20]),
-    item_row(94, "headdress", "Headdress", 425, &[27]),
-    item_row(96, "sheepstick", "Scythe of Vyse", 5200, &[58, 1802]),
-    item_row(98, "orchid", "Orchid Malevolence", 3275, &[67, 5]),
-    item_row(
-        100,
-        "cyclone",
-        "Eul's Scepter of Divinity",
-        2600,
-        &[23, 57, 244],
-    ),
-    item_row(102, "force_staff", "Force Staff", 2200, &[23, 593]),
-    item_row(104, "dagon", "Dagon", 3000, &[60, 261, 1849]),
-    item_row(
-        108,
-        "ultimate_scepter",
-        "Aghanim's Scepter",
-        4200,
-        &[60, 23, 21, 22],
-    ),
-    item_row(110, "refresher", "Refresher Orb", 5000, &[279, 1802]),
-    item_row(112, "assault", "Assault Cuirass", 5125, &[86, 55, 9]),
-    item_row(114, "heart", "Heart of Tarrasque", 5300, &[53, 279]),
-    item_row(116, "black_king_bar", "Black King Bar", 4050, &[8, 21]),
-    item_row(119, "shivas_guard", "Shiva's Guard", 4500, &[9, 1847, 1872]),
-    item_row(123, "sphere", "Linken's Sphere", 4800, &[69, 24]),
-    item_row(125, "vanguard", "Vanguard", 1700, &[61, 56]),
-    item_row(127, "blade_mail", "Blade Mail", 2350, &[3, 1847]),
-    item_row(129, "soul_booster", "Soul Booster", 3000, &[60, 61, 59]),
-    item_row(133, "rapier", "Divine Rapier", 5600, &[54, 51]),
-    item_row(
-        135,
-        "monkey_king_bar",
-        "Monkey King Bar",
-        5000,
-        &[51, 485, 10],
-    ),
-    item_row(137, "radiance", "Radiance", 4700, &[54, 32]),
-    item_row(139, "butterfly", "Butterfly", 5000, &[52, 32, 10]),
-    item_row(141, "greater_crit", "Daedalus", 5200, &[149, 51]),
-    item_row(143, "basher", "Skull Basher", 2875, &[8, 17]),
-    item_row(145, "bfury", "Battle Fury", 3900, &[69, 3, 3, 11]),
-    item_row(147, "manta", "Manta Style", 4550, &[170, 1122]),
-    item_row(149, "lesser_crit", "Crystalys", 2000, &[5, 2]),
-    item_row(151, "armlet", "Armlet of Mordiggian", 2500, &[6, 25, 2]),
-    item_row(152, "invis_sword", "Shadow Blade", 3250, &[5, 485, 215]),
-    item_row(154, "sange_and_yasha", "Sange and Yasha", 4000, &[162, 170]),
-    item_row(156, "satanic", "Satanic", 5050, &[53, 5, 26]),
-    item_row(158, "mjollnir", "Mjollnir", 5500, &[166, 55]),
-    item_row(160, "skadi", "Eye of Skadi", 5900, &[24, 24, 1575]),
-    item_row(162, "sange", "Sange", 2000, &[21, 17]),
-    item_row(
-        164,
-        "helm_of_the_dominator",
-        "Helm of the Dominator",
-        2550,
-        &[6, 261],
-    ),
-    item_row(166, "maelstrom", "Maelstrom", 2950, &[8, 25]),
-    item_row(168, "desolator", "Desolator", 3500, &[8, 8, 240]),
-    item_row(170, "yasha", "Yasha", 2000, &[22, 18]),
-    item_row(174, "diffusal_blade", "Diffusal Blade", 2500, &[22, 19]),
-    item_row(176, "ethereal_blade", "Ethereal Blade", 5200, &[24, 37]),
-    item_row(178, "soul_ring", "Soul Ring", 805, &[12, 13, 13]),
-    item_row(180, "arcane_boots", "Arcane Boots", 1500, &[29, 88, 1849]),
-    item_row(181, "orb_of_venom", "Orb of Venom", 350, &[]),
-    item_row(
-        190,
-        "veil_of_discord",
-        "Veil of Discord",
-        1700,
-        &[473, 19, 593],
-    ),
-    item_row(206, "rod_of_atos", "Rod of Atos", 2250, &[23, 61]),
-    item_row(208, "abyssal_blade", "Abyssal Blade", 6150, &[143, 236]),
-    item_row(210, "heavens_halberd", "Heaven's Halberd", 2400, &[21, 6]),
-    item_row(214, "tranquil_boots", "Tranquil Boots", 900, &[29, 244, 27]),
-    item_row(215, "shadow_amulet", "Shadow Amulet", 900, &[]),
-    item_row(225, "nullifier", "Nullifier", 4350, &[54, 1847]),
-    item_row(226, "lotus_orb", "Lotus Orb", 3850, &[69, 9, 59]),
-    item_row(229, "solar_crest", "Solar Crest", 2575, &[1128, 4, 244]),
-    item_row(
-        231,
-        "guardian_greaves",
-        "Guardian Greaves",
-        4350,
-        &[180, 79],
-    ),
-    item_row(232, "aether_lens", "Aether Lens", 2100, &[59, 57]),
-    item_row(235, "octarine_core", "Octarine Core", 5100, &[129, 1802]),
-    item_row(236, "dragon_lance", "Dragon Lance", 2000, &[22, 17]),
-    item_row(237, "faerie_fire", "Faerie Fire", 65, &[]),
-    item_row(240, "blight_stone", "Orb of Blight", 300, &[]),
-    item_row(242, "crimson_guard", "Crimson Guard", 3725, &[125, 86, 6]),
-    item_row(244, "wind_lace", "Wind Lace", 225, &[]),
-    item_row(249, "silver_edge", "Silver Edge", 5700, &[152, 51]),
-    item_row(250, "bloodthorn", "Bloodthorn", 6250, &[98, 67]),
-    item_row(252, "echo_sabre", "Echo Sabre", 2700, &[21, 3, 57]),
-    item_row(254, "glimmer_cape", "Glimmer Cape", 2150, &[215, 1848]),
-    item_row(256, "aeon_disk", "Aeon Disk", 3000, &[61, 59]),
-    item_row(259, "kaya", "Kaya", 2000, &[23, 19]),
-    item_row(261, "crown", "Crown", 450, &[]),
-    item_row(263, "hurricane_pike", "Hurricane Pike", 4550, &[102, 236]),
-    item_row(267, "spirit_vessel", "Spirit Vessel", 2725, &[92, 1122]),
-    item_row(269, "holy_locket", "Holy Locket", 2250, &[36, 261]),
-    item_row(273, "kaya_and_sange", "Kaya and Sange", 4000, &[259, 162]),
-    item_row(277, "yasha_and_kaya", "Yasha and Kaya", 4000, &[170, 259]),
-    item_row(279, "ring_of_tarrasque", "Ring of Tarrasque", 1700, &[]),
-    item_row(473, "voodoo_mask", "Voodoo Mask", 650, &[]),
-    item_row(485, "blitz_knuckles", "Blitz Knuckles", 1000, &[]),
-    item_row(534, "witch_blade", "Witch Blade", 2775, &[67, 4]),
-    item_row(593, "fluffy_hat", "Fluffy Hat", 250, &[]),
-    item_row(598, "mage_slayer", "Mage Slayer", 3100, &[69, 31, 2, 181]),
-    item_row(609, "aghanims_shard", "Aghanim's Shard", 1400, &[]),
-    item_row(610, "wind_waker", "Wind Waker", 6800, &[100, 58]),
-    item_row(939, "harpoon", "Harpoon", 4700, &[252, 236]),
-    item_row(1097, "disperser", "Disperser", 6100, &[174, 52]),
-    item_row(1107, "phylactery", "Phylactery", 2600, &[69, 1122]),
-    item_row(1122, "diadem", "Diadem", 1000, &[]),
-    item_row(1128, "pavise", "Pavise", 1250, &[1849, 593, 12]),
-    item_row(1466, "gungir", "Gleipnir", 4650, &[206, 60, 1872]),
-    item_row(1575, "orb_of_frost", "Orb of Frost", 300, &[]),
-    item_row(1802, "tiara_of_selemene", "Tiara of Selemene", 1700, &[]),
-    item_row(1806, "devastator", "Parasma", 5975, &[534, 58]),
-    item_row(1808, "angels_demise", "Khanda", 5600, &[1107, 129]),
-    item_row(1847, "splintmail", "Splintmail", 950, &[]),
-    item_row(1848, "shawl", "Shawl", 450, &[]),
-    item_row(1849, "wizard_hat", "Wizard Hat", 250, &[]),
-    item_row(1872, "chasm_stone", "Chasm Stone", 900, &[]),
-    drop_row(4204, "famango", "Healing Lotus", &[]),
-    drop_row(
-        4205,
-        "great_famango",
-        "Great Healing Lotus",
-        &[4204, 4204, 4204],
-    ),
-];
 
 /// Cached or test-injected item build override keyed by `(hero_id, optional role, optional bracket)`.
 pub type HeroItemStatsOverride = (HeroId, Option<Role>, Option<Bracket>, Vec<HeroItemStat>);
@@ -399,13 +138,49 @@ impl ItemMetaRepository for SeededItemMetaRepository {
                     .find(|(hid, r, b, _)| *hid == hero_id && r.is_none() && b.is_none())
             })
         {
-            let mut out = stats.clone();
+            let mut out: Vec<HeroItemStat> = stats
+                .iter()
+                .copied()
+                .filter(|stat| {
+                    stat.phase == ItemPhase::Starting
+                        || stat.phase == ItemPhase::Situational
+                        || is_valid_timed_progression_item(self, stat.item_id)
+                })
+                .collect();
             append_counter_situational_candidates(&mut out, role, scale);
             return Ok(out);
         }
 
         Ok(build_embedded_hero_stats(hero_id, role, bracket))
     }
+}
+
+/// Returns `true` if `item_id` represents a completed build target (or standalone non-combinable
+/// core item such as Blink Dagger, Ghost Scepter, Bottle, or Aghanim's Shard) eligible for
+/// `Early`/`Core`/`Late` progression recommendations rather than raw ingredients or consumables.
+pub(crate) fn is_valid_timed_progression_item(
+    repo: &SeededItemMetaRepository,
+    item_id: ItemId,
+) -> bool {
+    // Exclude pure intermediate stepping stones (`Oblivion Staff`, `Perseverance`) and all
+    // consumables, wards, smokes, or detection items from timed progression columns.
+    if matches!(
+        item_id.0,
+        30 | 38 | 39 | 40 | 42 | 43 | 44 | 46 | 67 | 69 | 188 | 216 | 218 | 237 | 1123
+    ) {
+        return false;
+    }
+    let Some(entry) = repo.item_catalog(item_id) else {
+        return false;
+    };
+    if (entry.cost == 0 && entry.is_consumable_drop) || entry.is_recipe {
+        return false;
+    }
+    matches!(item_id.0, 1 | 37 | 41 | 609)
+        || !entry.components.is_empty()
+        || EMBEDDED_ITEM_CATALOG
+            .iter()
+            .any(|row| row.id == item_id.0 && !row.components.is_empty())
 }
 
 fn stat(
@@ -480,7 +255,7 @@ fn build_embedded_hero_stats(hero_id: HeroId, role: Role, bracket: Bracket) -> V
             stat(160, ItemPhase::Late, 28.5 * scale, 780, 445),
             stat(139, ItemPhase::Late, 29.5 * scale, 740, 430),
             stat(143, ItemPhase::Core, 25.0 * scale, 680, 380),
-            stat(208, ItemPhase::Late, 35.5 * scale, 620, 365),
+            stat(208, ItemPhase::Late, 37.0 * scale, 620, 365),
         ],
         // Axe (2): Phase -> Blink -> Blade Mail/Vanguard -> BKB -> Shiva/Assault
         (2, Role::Offlane) => vec![

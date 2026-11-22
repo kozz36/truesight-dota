@@ -3178,6 +3178,42 @@ fn gui_build_bar_renders_three_timed_phases_and_role_filtered_optional_section()
         r.suggested.width() > 0.0 && r.suggested.height() > 0.0,
         "build card must occupy non-zero rect on desktop"
     );
+    assert!(
+        r.matrix.width() >= 180.0 && r.suggested.max.x <= r.matrix.min.x + 2.0,
+        "desktop build card {:?} must stay strictly left of Counter Matrix {:?} without pushing it off-screen",
+        r.suggested,
+        r.matrix
+    );
+    fn find_painted_text_bounds(shape: &egui::epaint::Shape, target: &str) -> Option<Rect> {
+        match shape {
+            egui::epaint::Shape::Text(ts) if ts.galley.text() == target => {
+                Some(ts.visual_bounding_rect())
+            }
+            egui::epaint::Shape::Vec(v) => {
+                v.iter().find_map(|s| find_painted_text_bounds(s, target))
+            }
+            _ => None,
+        }
+    }
+    let mut checked_labels = 0_usize;
+    for label in ["Arcane Boots", "Phylactery"] {
+        if let Some(bounds) = desktop_out
+            .shapes
+            .iter()
+            .filter(|c| r.suggested.intersects(c.clip_rect))
+            .find_map(|c| find_painted_text_bounds(&c.shape, label))
+        {
+            checked_labels += 1;
+            assert!(
+                bounds.height() <= 28.0 && bounds.width() >= 30.0,
+                "phase item label '{label}' wrapped vertically into narrow column: {bounds:?}"
+            );
+        }
+    }
+    assert!(
+        checked_labels >= 2,
+        "desktop build card must render readable primary item labels without clipping ({checked_labels})"
+    );
     let mut outputs = vec![(vec2(1468.0, 960.0), desktop_out)];
     for card_vp in [vec2(460.0, 760.0), vec2(320.0, 860.0)] {
         let card_out = ctx.run(

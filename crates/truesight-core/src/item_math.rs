@@ -100,6 +100,44 @@ pub fn recommend_item_build(
     });
     let starting_items: Vec<ItemId> = starting.into_iter().take(5).map(|s| s.item_id).collect();
 
+    // Suppress unowned stepping-stone sub-components when a completed upgrade using them is present.
+    let timed_ids: Vec<ItemId> = timed_core_stats.iter().map(|s| s.item_id).collect();
+    timed_core_stats.retain(|stat| {
+        if owned_items.contains(&stat.item_id)
+            || !matches!(stat.item_id.0, 67 | 69 | 149 | 162 | 170 | 259)
+        {
+            return true;
+        }
+        if matches!(stat.item_id.0, 67 | 69) {
+            return false;
+        }
+        !timed_ids.iter().any(|&parent_id| {
+            parent_id != stat.item_id
+                && repo
+                    .item_catalog(parent_id)
+                    .is_some_and(|entry| entry.components.contains(&stat.item_id))
+        })
+    });
+
+    // Apply a tiny-sample noise floor when sufficient match volume exists so rare 100%-WR
+    // late luxuries do not displace high-sample core builds.
+    let max_mc = timed_core_stats
+        .iter()
+        .map(|s| s.match_count)
+        .max()
+        .unwrap_or(0);
+    if max_mc >= 50 {
+        let min_mc = ((max_mc as f32 * 0.025).ceil() as u32).clamp(8, 25);
+        let retained_count = timed_core_stats
+            .iter()
+            .filter(|s| owned_items.contains(&s.item_id) || s.match_count >= min_mc)
+            .count();
+        if retained_count >= 3 {
+            timed_core_stats
+                .retain(|s| owned_items.contains(&s.item_id) || s.match_count >= min_mc);
+        }
+    }
+
     // Score each timed progression candidate (`Early`, `Core`, `Late`) deterministically.
     let mut scored: Vec<BuildStep> = timed_core_stats
         .into_iter()
@@ -118,8 +156,8 @@ pub fn recommend_item_build(
             let counter_bonus = 0.09 * (matching_enemy_traits as f32);
 
             let shrunk_wr =
-                (stat.win_count as f32 + 30.0 * 0.50) / (stat.match_count as f32 + 30.0);
-            let volume_score = 0.02 * (1.0 + stat.match_count as f32).ln();
+                (stat.win_count as f32 + 60.0 * 0.50) / (stat.match_count as f32 + 60.0);
+            let volume_score = 0.06 * (1.0 + stat.match_count as f32).ln();
             let score = shrunk_wr + volume_score + component_bonus + counter_bonus;
 
             BuildStep {

@@ -1483,3 +1483,69 @@ fn recommend_item_build_preserves_owned_role_ineligible_counters_under_optional(
         sup_owned_omitted.optional_items
     );
 }
+
+#[test]
+fn recommend_item_build_suppresses_tiny_sample_noise_and_redundant_subcomponents() {
+    use crate::domain::{Bracket, ItemId, ItemPhase};
+    use crate::math::recommend_item_build;
+
+    let repo = MockItemRepo {
+        catalog: vec![
+            catalog_entry(63, "Power Treads", 1400, &[], false, false),
+            catalog_entry(69, "Perseverance", 1400, &[], false, false),
+            catalog_entry(145, "Battle Fury", 3900, &[69], false, false),
+            catalog_entry(170, "Yasha", 2000, &[], false, false),
+            catalog_entry(147, "Manta Style", 4550, &[170], false, false),
+            catalog_entry(149, "Crystalys", 2000, &[], false, false),
+            catalog_entry(156, "Satanic", 5050, &[], false, false),
+            catalog_entry(534, "Witch Blade", 2775, &[], false, false),
+        ],
+        stats: vec![
+            item_stat(63, ItemPhase::Early, 9.0, 598, 258),
+            item_stat(69, ItemPhase::Early, 10.5, 387, 195),
+            item_stat(145, ItemPhase::Core, 16.0, 359, 165),
+            item_stat(170, ItemPhase::Core, 18.0, 379, 175),
+            item_stat(147, ItemPhase::Core, 23.5, 293, 152),
+            item_stat(149, ItemPhase::Core, 24.0, 80, 48),
+            item_stat(156, ItemPhase::Late, 26.0, 7, 7),
+            item_stat(534, ItemPhase::Early, 7.5, 1, 1),
+        ],
+    };
+
+    let enemies = [None; 5];
+    let build = recommend_item_build(
+        &repo,
+        HeroId(41),
+        Role::Carry,
+        Bracket::Ancient,
+        &enemies,
+        &[],
+        600,
+    )
+    .unwrap();
+
+    assert!(
+        build.steps.iter().all(|s| {
+            !matches!(s.item_id.0, 69 | 170 | 156 | 534)
+                && s.variants
+                    .iter()
+                    .all(|v| !matches!(v.item_id.0, 69 | 170 | 156 | 534))
+        }),
+        "Perseverance (69), bare Yasha (170 under Manta), and low-sample noise (Satanic 7/7, Witch Blade 1/1) must be excluded: {:?}",
+        build.steps
+    );
+    for expected in [63_u16, 145, 147] {
+        assert!(
+            build.steps.iter().any(|s| s.item_id == ItemId(expected)),
+            "high-volume item #{expected} must stay as primary step: {:?}",
+            build.steps
+        );
+    }
+    assert!(
+        build.steps.iter().any(|s| {
+            s.item_id == ItemId(149) || s.variants.iter().any(|v| v.item_id == ItemId(149))
+        }),
+        "standalone Crystalys (no Daedalus present) must be preserved in steps/variants: {:?}",
+        build.steps
+    );
+}

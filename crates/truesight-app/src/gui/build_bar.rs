@@ -53,154 +53,170 @@ impl TrueSightGuiApp {
         clicked_variant: &mut Option<(ItemId, ItemId)>,
     ) {
         let timing_summary = format_phase_timing_window(steps);
+        let inner_w = (col_w - 10.0).max(80.0);
         egui::Frame::NONE
             .fill(P_INDIGO_1)
             .stroke(Stroke::new(1.0_f32, P_LINE))
             .inner_margin(Margin::same(4))
             .show(ui, |ui| {
-                ui.set_min_width((col_w - 14.0).max(80.0));
-                ui.set_max_width((col_w - 14.0).max(80.0));
+                ui.allocate_ui_with_layout(
+                    vec2(inner_w, 0.0),
+                    Layout::top_down(Align::Min),
+                    |ui| {
+                        ui.set_min_width(inner_w);
+                        ui.set_max_width(inner_w);
 
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(phase_title).size(9.5).strong().color(P_CYAN));
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.label(RichText::new(timing_summary).size(9.0).color(P_MUTED));
-                    });
-                });
-                ui.add_space(2.0);
-
-                if steps.is_empty() {
-                    ui.label(RichText::new("—").size(9.5).color(P_MUTED));
-                    return;
-                }
-
-                for &(idx, step) in steps {
-                    let is_next = next_unowned_index == Some(idx);
-                    let border_color = if step.owned {
-                        P_GEM_DEEP
-                    } else if is_next {
-                        P_GEM
-                    } else {
-                        P_LINE
-                    };
-                    let fill_color = if step.owned { P_INDIGO_1 } else { P_INDIGO_2 };
-                    let (name, cost) = self
-                        .session
-                        .item_repo
-                        .item_catalog(step.item_id)
-                        .map(|e| (e.display_name, e.cost))
-                        .unwrap_or_else(|| (format!("Item #{}", step.item_id.0), 0));
-                    let step_tex = self.textures.items.get(&step.item_id);
-
-                    egui::Frame::NONE
-                        .fill(fill_color)
-                        .stroke(Stroke::new(
-                            if is_next { 1.5_f32 } else { 1.0_f32 },
-                            border_color,
-                        ))
-                        .inner_margin(Margin::symmetric(5, 3))
-                        .show(ui, |ui| {
-                            ui.set_min_width(ui.available_width());
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    RichText::new(format!("~{:.0}m", step.avg_time_mins))
-                                        .size(8.5)
-                                        .color(P_MUTED),
-                                );
-                                if step.owned {
-                                    paint_mini_badge_scaled(ui, "OK", P_GEM, P_GEM_DEEP, 8.0, 3);
-                                } else if is_next {
-                                    paint_mini_badge_scaled(ui, "NEXT", P_GEM, P_GEM, 8.0, 3);
-                                } else if step.owned_components > 0 {
-                                    paint_mini_badge_scaled(
-                                        ui,
-                                        &format!(
-                                            "{}/{}",
-                                            step.owned_components, step.total_components
-                                        ),
-                                        P_CYAN,
-                                        P_LINE,
-                                        8.0,
-                                        3,
-                                    );
-                                }
-                                if let Some(tr) = step.counter_trait {
-                                    ui.label(
-                                        RichText::new(format!("CNT: {}", tr.label()))
-                                            .size(8.0)
-                                            .strong()
-                                            .color(P_NEUTRAL),
-                                    );
-                                }
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(phase_title).size(9.5).strong().color(P_CYAN));
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.label(RichText::new(timing_summary).size(9.0).color(P_MUTED));
                             });
+                        });
+                        ui.add_space(2.0);
 
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 6.0;
-                                paint_item_icon(
-                                    ui,
-                                    step_tex,
-                                    vec2(32.0, 24.0),
+                        if steps.is_empty() {
+                            ui.label(RichText::new("—").size(9.5).color(P_MUTED));
+                            return;
+                        }
+
+                        for &(idx, step) in steps {
+                            let is_next = next_unowned_index == Some(idx);
+                            let border_color = if step.owned {
+                                P_GEM_DEEP
+                            } else if is_next {
+                                P_GEM
+                            } else {
+                                P_LINE
+                            };
+                            let fill_color = if step.owned { P_INDIGO_1 } else { P_INDIGO_2 };
+                            let (name, cost) = self
+                                .session
+                                .item_repo
+                                .item_catalog(step.item_id)
+                                .map(|e| (e.display_name, e.cost))
+                                .unwrap_or_else(|| (format!("Item #{}", step.item_id.0), 0));
+                            let step_tex = self.textures.items.get(&step.item_id);
+
+                            egui::Frame::NONE
+                                .fill(fill_color)
+                                .stroke(Stroke::new(
+                                    if is_next { 1.5_f32 } else { 1.0_f32 },
                                     border_color,
-                                    step.owned,
-                                );
-                                ui.vertical(|ui| {
-                                    ui.spacing_mut().item_spacing.y = 1.0;
-                                    ui.add(
-                                        egui::Label::new(
-                                            RichText::new(name)
-                                                .size(10.0)
-                                                .strong()
-                                                .color(if step.owned { P_MUTED } else { P_GLINT }),
-                                        )
-                                        .truncate(),
-                                    );
-                                    ui.label(
-                                        RichText::new(format!("{cost}g")).size(9.0).color(P_MUTED),
-                                    );
-                                });
-                            });
-                        });
+                                ))
+                                .inner_margin(Margin::symmetric(5, 3))
+                                .show(ui, |ui| {
+                                    ui.set_min_width(ui.available_width());
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new(format!("~{:.0}m", step.avg_time_mins))
+                                                .size(8.5)
+                                                .color(P_MUTED),
+                                        );
+                                        if step.owned {
+                                            paint_mini_badge_scaled(
+                                                ui, "OK", P_GEM, P_GEM_DEEP, 8.0, 3,
+                                            );
+                                        } else if is_next {
+                                            paint_mini_badge_scaled(
+                                                ui, "NEXT", P_GEM, P_GEM, 8.0, 3,
+                                            );
+                                        } else if step.owned_components > 0 {
+                                            paint_mini_badge_scaled(
+                                                ui,
+                                                &format!(
+                                                    "{}/{}",
+                                                    step.owned_components, step.total_components
+                                                ),
+                                                P_CYAN,
+                                                P_LINE,
+                                                8.0,
+                                                3,
+                                            );
+                                        }
+                                        if let Some(tr) = step.counter_trait {
+                                            ui.label(
+                                                RichText::new(format!("CNT: {}", tr.label()))
+                                                    .size(8.0)
+                                                    .strong()
+                                                    .color(P_NEUTRAL),
+                                            );
+                                        }
+                                    });
 
-                    if !step.variants.is_empty() {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.spacing_mut().item_spacing = vec2(4.0, 3.0);
-                            for var in &step.variants {
-                                let var_name = self
-                                    .session
-                                    .item_repo
-                                    .item_catalog(var.item_id)
-                                    .map(|e| e.display_name)
-                                    .unwrap_or_else(|| format!("Item #{}", var.item_id.0));
-                                let var_img = self
-                                    .textures
-                                    .items
-                                    .get(&var.item_id)
-                                    .map(|t| egui::Image::new((t.id(), vec2(18.0, 13.0))));
-                                let var_btn = egui::Button::opt_image_and_text(
-                                    var_img,
-                                    Some(RichText::new(var_name).size(9.0).color(P_SILVER).into()),
-                                )
-                                .fill(P_INDIGO_2)
-                                .stroke(Stroke::new(1.0_f32, P_LINE));
-                                let trait_note = var
-                                    .counter_trait
-                                    .map(|t| format!(" | CNT: {}", t.label()))
-                                    .unwrap_or_default();
-                                if ui
-                                    .add(var_btn)
-                                    .on_hover_text(format!(
-                                        "Swap into primary slot (score {:.2}, ~{:.0}m{})",
-                                        var.score, var.avg_time_mins, trait_note
-                                    ))
-                                    .clicked()
-                                {
-                                    *clicked_variant = Some((step.item_id, var.item_id));
-                                }
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 6.0;
+                                        paint_item_icon(
+                                            ui,
+                                            step_tex,
+                                            vec2(32.0, 24.0),
+                                            border_color,
+                                            step.owned,
+                                        );
+                                        ui.vertical(|ui| {
+                                            ui.spacing_mut().item_spacing.y = 1.0;
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(name).size(10.0).strong().color(
+                                                        if step.owned { P_MUTED } else { P_GLINT },
+                                                    ),
+                                                )
+                                                .truncate(),
+                                            );
+                                            ui.label(
+                                                RichText::new(format!("{cost}g"))
+                                                    .size(9.0)
+                                                    .color(P_MUTED),
+                                            );
+                                        });
+                                    });
+                                });
+
+                            if !step.variants.is_empty() {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.spacing_mut().item_spacing = vec2(4.0, 3.0);
+                                    for var in &step.variants {
+                                        let var_name = self
+                                            .session
+                                            .item_repo
+                                            .item_catalog(var.item_id)
+                                            .map(|e| e.display_name)
+                                            .unwrap_or_else(|| format!("Item #{}", var.item_id.0));
+                                        let var_img =
+                                            self.textures.items.get(&var.item_id).map(|t| {
+                                                egui::Image::new((t.id(), vec2(18.0, 13.0)))
+                                            });
+                                        let var_btn = egui::Button::opt_image_and_text(
+                                            var_img,
+                                            Some(
+                                                RichText::new(var_name)
+                                                    .size(9.0)
+                                                    .color(P_SILVER)
+                                                    .into(),
+                                            ),
+                                        )
+                                        .fill(P_INDIGO_2)
+                                        .stroke(Stroke::new(1.0_f32, P_LINE));
+                                        let trait_note = var
+                                            .counter_trait
+                                            .map(|t| format!(" | CNT: {}", t.label()))
+                                            .unwrap_or_default();
+                                        if ui
+                                            .add(var_btn)
+                                            .on_hover_text(format!(
+                                                "Swap into primary slot (score {:.2}, ~{:.0}m{})",
+                                                var.score, var.avg_time_mins, trait_note
+                                            ))
+                                            .clicked()
+                                        {
+                                            *clicked_variant = Some((step.item_id, var.item_id));
+                                        }
+                                    }
+                                });
                             }
-                        });
-                    }
-                    ui.add_space(4.0);
-                }
+                            ui.add_space(4.0);
+                        }
+                    },
+                );
             });
     }
 
@@ -211,105 +227,119 @@ impl TrueSightGuiApp {
         optional_items: &[OptionalBuildItem],
         section_w: f32,
     ) {
+        let inner_w = (section_w - 14.0).max(120.0);
         egui::Frame::NONE
             .fill(P_INDIGO_1)
             .stroke(Stroke::new(1.0_f32, P_LINE))
             .inner_margin(Margin::same(6))
             .show(ui, |ui| {
-                ui.set_min_width((section_w - 14.0).max(120.0));
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(tr.optional_items_label)
-                            .size(9.5)
-                            .strong()
-                            .color(P_NEUTRAL),
-                    );
-                });
-                ui.add_space(4.0);
+                ui.allocate_ui_with_layout(
+                    vec2(inner_w, 0.0),
+                    Layout::top_down(Align::Min),
+                    |ui| {
+                        ui.set_min_width(inner_w);
+                        ui.set_max_width(inner_w);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(tr.optional_items_label)
+                                    .size(9.5)
+                                    .strong()
+                                    .color(P_NEUTRAL),
+                            );
+                        });
+                        ui.add_space(4.0);
 
-                if optional_items.is_empty() {
-                    ui.label(
-                        RichText::new(tr.optional_items_empty)
-                            .size(9.5)
-                            .color(P_MUTED),
-                    );
-                    return;
-                }
+                        if optional_items.is_empty() {
+                            ui.label(
+                                RichText::new(tr.optional_items_empty)
+                                    .size(9.5)
+                                    .color(P_MUTED),
+                            );
+                            return;
+                        }
 
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(6.0, 5.0);
-                    for opt in optional_items {
-                        let (name, cost) = self
-                            .session
-                            .item_repo
-                            .item_catalog(opt.item_id)
-                            .map(|e| (e.display_name, e.cost))
-                            .unwrap_or_else(|| (format!("Item #{}", opt.item_id.0), 0));
-                        let opt_tex = self.textures.items.get(&opt.item_id);
-                        let border = if opt.owned { P_GEM_DEEP } else { P_NEUTRAL };
-                        let chip_resp =
-                            egui::Frame::NONE
-                                .fill(P_INDIGO_2)
-                                .stroke(Stroke::new(1.0_f32, border))
-                                .inner_margin(Margin::symmetric(6, 4))
-                                .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.spacing_mut().item_spacing.x = 5.0;
-                                        paint_item_icon(
-                                            ui,
-                                            opt_tex,
-                                            vec2(28.0, 20.0),
-                                            border,
-                                            opt.owned,
-                                        );
-                                        ui.vertical(|ui| {
-                                            ui.spacing_mut().item_spacing.y = 0.0;
-                                            ui.horizontal(|ui| {
-                                                ui.spacing_mut().item_spacing.x = 4.0;
-                                                ui.label(
-                                                    RichText::new(&name).size(9.5).strong().color(
-                                                        if opt.owned { P_MUTED } else { P_GLINT },
-                                                    ),
-                                                );
-                                                if opt.owned {
-                                                    paint_mini_badge_scaled(
-                                                        ui, "OK", P_GEM, P_GEM_DEEP, 7.5, 2,
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = vec2(6.0, 5.0);
+                            for opt in optional_items {
+                                let (name, cost) = self
+                                    .session
+                                    .item_repo
+                                    .item_catalog(opt.item_id)
+                                    .map(|e| (e.display_name, e.cost))
+                                    .unwrap_or_else(|| (format!("Item #{}", opt.item_id.0), 0));
+                                let opt_tex = self.textures.items.get(&opt.item_id);
+                                let border = if opt.owned { P_GEM_DEEP } else { P_NEUTRAL };
+                                let chip_resp = egui::Frame::NONE
+                                    .fill(P_INDIGO_2)
+                                    .stroke(Stroke::new(1.0_f32, border))
+                                    .inner_margin(Margin::symmetric(6, 4))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 5.0;
+                                            paint_item_icon(
+                                                ui,
+                                                opt_tex,
+                                                vec2(28.0, 20.0),
+                                                border,
+                                                opt.owned,
+                                            );
+                                            ui.vertical(|ui| {
+                                                ui.spacing_mut().item_spacing.y = 0.0;
+                                                ui.horizontal(|ui| {
+                                                    ui.spacing_mut().item_spacing.x = 4.0;
+                                                    ui.label(
+                                                        RichText::new(&name)
+                                                            .size(9.5)
+                                                            .strong()
+                                                            .color(if opt.owned {
+                                                                P_MUTED
+                                                            } else {
+                                                                P_GLINT
+                                                            }),
                                                     );
-                                                }
+                                                    if opt.owned {
+                                                        paint_mini_badge_scaled(
+                                                            ui, "OK", P_GEM, P_GEM_DEEP, 7.5, 2,
+                                                        );
+                                                    }
+                                                });
+                                                let reason = opt
+                                                    .counter_trait
+                                                    .map(|t| format!("CNT: {}", t.label()))
+                                                    .unwrap_or_default();
+                                                let sub = if reason.is_empty() {
+                                                    format!("{cost}g · ~{:.0}m", opt.avg_time_mins)
+                                                } else {
+                                                    format!("{reason} · ~{:.0}m", opt.avg_time_mins)
+                                                };
+                                                ui.label(RichText::new(sub).size(8.5).color(
+                                                    if opt.owned { P_MUTED } else { P_NEUTRAL },
+                                                ));
                                             });
-                                            let reason = opt
-                                                .counter_trait
-                                                .map(|t| format!("CNT: {}", t.label()))
-                                                .unwrap_or_default();
-                                            let sub = if reason.is_empty() {
-                                                format!("{cost}g · ~{:.0}m", opt.avg_time_mins)
-                                            } else {
-                                                format!("{reason} · ~{:.0}m", opt.avg_time_mins)
-                                            };
-                                            ui.label(RichText::new(sub).size(8.5).color(
-                                                if opt.owned { P_MUTED } else { P_NEUTRAL },
-                                            ));
                                         });
-                                    });
-                                })
-                                .response;
-                        let hover = match opt.counter_trait {
-                            Some(ct) => format!(
-                                "{name} ({cost}g) · ~{:.0}m · Counter vs enemy {}",
-                                opt.avg_time_mins,
-                                ct.label()
-                            ),
-                            None => format!("{name} ({cost}g) · ~{:.0}m", opt.avg_time_mins),
-                        };
-                        let _ = ui
-                            .interact(
-                                chip_resp.rect,
-                                ui.id().with(("opt_chip", opt.item_id.0)),
-                                Sense::hover(),
-                            )
-                            .on_hover_text(hover);
-                    }
-                });
+                                    })
+                                    .response;
+                                let hover = match opt.counter_trait {
+                                    Some(ct) => format!(
+                                        "{name} ({cost}g) · ~{:.0}m · Counter vs enemy {}",
+                                        opt.avg_time_mins,
+                                        ct.label()
+                                    ),
+                                    None => {
+                                        format!("{name} ({cost}g) · ~{:.0}m", opt.avg_time_mins)
+                                    }
+                                };
+                                let _ = ui
+                                    .interact(
+                                        chip_resp.rect,
+                                        ui.id().with(("opt_chip", opt.item_id.0)),
+                                        Sense::hover(),
+                                    )
+                                    .on_hover_text(hover);
+                            }
+                        });
+                    },
+                );
             });
     }
 
@@ -476,7 +506,7 @@ impl TrueSightGuiApp {
 
                     let col_gap = 6.0_f32;
                     if avail_w >= 520.0 {
-                        let col_w = ((avail_w - 2.0 * col_gap) / 3.0).floor();
+                        let col_w = ((avail_w - 2.0 * col_gap - 4.0) / 3.0).floor().max(120.0);
                         ui.horizontal_top(|ui| {
                             ui.spacing_mut().item_spacing.x = col_gap;
                             self.render_phase_column(
@@ -505,7 +535,7 @@ impl TrueSightGuiApp {
                             );
                         });
                     } else if avail_w >= 340.0 {
-                        let two_w = ((avail_w - col_gap) / 2.0).floor();
+                        let two_w = ((avail_w - col_gap - 4.0) / 2.0).floor().max(120.0);
                         ui.horizontal_top(|ui| {
                             ui.spacing_mut().item_spacing.x = col_gap;
                             self.render_phase_column(

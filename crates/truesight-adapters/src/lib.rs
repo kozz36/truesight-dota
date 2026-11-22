@@ -1,5 +1,6 @@
 pub mod gsi;
 pub mod hero_alt_atlas;
+mod item_catalog_data;
 pub mod item_repo;
 pub mod meta_repo;
 pub(crate) mod platform;

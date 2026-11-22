@@ -971,7 +971,15 @@ impl LocalCacheManager {
                 let mut fetched_for_hero = false;
                 if let Some(ref token) = stratz_token {
                     if let Ok(sb) = fetch_stratz_items(token, hero_id.0) {
-                        let stats = parse_stratz_hero_item_purchase_json(&sb);
+                        let mut stats = parse_stratz_hero_item_purchase_json(&sb);
+                        stats.retain(|stat| {
+                            stat.phase == ItemPhase::Starting
+                                || stat.phase == ItemPhase::Situational
+                                || crate::item_repo::is_valid_timed_progression_item(
+                                    &catalog_repo,
+                                    stat.item_id,
+                                )
+                        });
                         if !stats.is_empty() {
                             merged_hero_items.insert(hero_id.0, stats);
                             any_item_stats_fetched = true;
@@ -1689,9 +1697,9 @@ fn extract_i64_field(block: &str, key: &str) -> Option<i64> {
 }
 
 fn phase_from_avg_mins(avg_mins: f32) -> ItemPhase {
-    if avg_mins < 10.0 {
+    if avg_mins < 12.0 {
         ItemPhase::Early
-    } else if avg_mins <= 26.0 {
+    } else if avg_mins <= 24.5 {
         ItemPhase::Core
     } else {
         ItemPhase::Late
@@ -2126,10 +2134,7 @@ pub fn parse_opendota_item_timings_json(
         let Some(entry) = catalog.item_by_slug(slug) else {
             continue;
         };
-        if (entry.cost == 0 && entry.is_consumable_drop)
-            || entry.is_recipe
-            || matches!(entry.id.0, 30 | 40 | 43 | 44 | 46 | 237)
-        {
+        if !crate::item_repo::is_valid_timed_progression_item(catalog, entry.id) {
             continue;
         }
         let time_secs = extract_i64_field(block, "\"time\"").unwrap_or(0).max(0);
@@ -2194,7 +2199,7 @@ pub fn parse_opendota_item_popularity_json(
                 continue;
             }
             if phase != ItemPhase::Starting
-                && (matches!(item_id.0, 30 | 40 | 43 | 44 | 46 | 237)
+                && (!crate::item_repo::is_valid_timed_progression_item(catalog, item_id)
                     || truesight_core::domain::all_referenced_counter_item_ids().contains(&item_id))
             {
                 continue;
@@ -2306,6 +2311,15 @@ fn parse_hero_item_stats_grouped_by_hero(
             grouped.insert(hid, finalize_weighted_item_buckets(item_buckets));
         }
     }
+
+    for stats in grouped.values_mut() {
+        stats.retain(|stat| {
+            stat.phase == ItemPhase::Starting
+                || stat.phase == ItemPhase::Situational
+                || crate::item_repo::is_valid_timed_progression_item(catalog, stat.item_id)
+        });
+    }
+    grouped.retain(|_, stats| !stats.is_empty());
 
     grouped
         .into_iter()
