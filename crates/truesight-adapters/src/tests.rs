@@ -5803,6 +5803,10 @@ fn embedded_item_atlas_decodes_all_embedded_catalog_items() {
     assert_eq!(atlas.item_height, 32);
     let ids = crate::item_repo::embedded_item_ids();
     assert!(!ids.is_empty());
+    assert!(
+        ids.len() >= 150,
+        "expanded catalog should cover at least 150 items"
+    );
     assert_eq!(atlas.items.len(), ids.len());
     for id in ids {
         let rgb = atlas
@@ -5811,4 +5815,90 @@ fn embedded_item_atlas_decodes_all_embedded_catalog_items() {
             .unwrap_or_else(|| panic!("missing embedded icon for item {:?}", id));
         assert_eq!(rgb.len(), 44 * 32 * 3);
     }
+}
+
+#[test]
+fn opendota_item_timings_aggregates_weighted_times_and_item_popularity_parses_phases() {
+    use crate::item_repo::SeededItemMetaRepository;
+    use crate::sync::{parse_opendota_item_popularity_json, parse_opendota_item_timings_json};
+    use truesight_core::domain::{Bracket, HeroId, ItemId, ItemPhase, Role};
+    use truesight_core::ports::ItemMetaRepository;
+
+    let repo = SeededItemMetaRepository::default();
+    let multi_bucket_timings = r#"[
+        {"hero_id": 88, "item": "arcane_boots", "time": 420, "games": "60", "wins": "36"},
+        {"hero_id": 88, "item": "arcane_boots", "time": 720, "games": "40", "wins": "22"}
+    ]"#;
+    let parsed_timings = parse_opendota_item_timings_json(multi_bucket_timings, &repo);
+    assert_eq!(parsed_timings.len(), 1);
+    assert_eq!(parsed_timings[0].item_id, ItemId(180));
+    assert_eq!(parsed_timings[0].match_count, 100);
+    assert_eq!(parsed_timings[0].win_count, 58);
+    // Weighted average: (60 * 7m + 40 * 12m) / 100 = 9.0m
+    assert!((parsed_timings[0].avg_time_mins - 9.0).abs() < 0.05);
+    assert_eq!(parsed_timings[0].phase, ItemPhase::Early);
+
+    let pop_json = r#"{
+        "start_game_items": {"44": 90, "34": 60, "38": 75, "4204": 50},
+        "early_game_items": {"180": 80, "46": 190, "44": 150, "40": 140, "38": 120},
+        "mid_game_items": {"1107": 45, "104": 30, "30": 95, "43": 85, "90": 70},
+        "late_game_items": {"108": 25}
+    }"#;
+    let pop_stats = parse_opendota_item_popularity_json(pop_json, &repo);
+    assert!(
+        pop_stats
+            .iter()
+            .any(|s| s.item_id == ItemId(44) && s.phase == ItemPhase::Starting)
+    );
+    for forbidden_id in [4204_u16, 38, 46, 30, 40, 43, 90] {
+        assert!(
+            !pop_stats.iter().any(|s| s.item_id == ItemId(forbidden_id)),
+            "uncataloged/consumable/detection/counter item {forbidden_id} must be excluded from itemPopularity phases"
+        );
+    }
+    assert!(
+        !pop_stats
+            .iter()
+            .any(|s| s.item_id == ItemId(44) && s.phase != ItemPhase::Starting),
+        "lane consumables (Tango) must never leak into Early/Core/Late from itemPopularity"
+    );
+    assert!(
+        pop_stats
+            .iter()
+            .any(|s| s.item_id == ItemId(1107) && s.phase == ItemPhase::Core)
+    );
+    assert!(
+        pop_stats
+            .iter()
+            .any(|s| s.item_id == ItemId(108) && s.phase == ItemPhase::Late)
+    );
+
+    // Curated hero-specific progressions and role-filtered situational items:
+    let nyx_pos4 = repo
+        .hero_item_stats(HeroId(88), Role::SoftSupport, Bracket::Ancient)
+        .unwrap();
+    assert!(
+        nyx_pos4
+            .iter()
+            .any(|s| s.item_id == ItemId(1107) && s.phase == ItemPhase::Core)
+    );
+    assert!(
+        nyx_pos4
+            .iter()
+            .all(|s| s.item_id != ItemId(90) && s.item_id != ItemId(145))
+    );
+
+    let troll_pos1 = repo
+        .hero_item_stats(HeroId(95), Role::Carry, Bracket::Ancient)
+        .unwrap();
+    assert!(
+        troll_pos1
+            .iter()
+            .any(|s| s.item_id == ItemId(145) && s.phase == ItemPhase::Core)
+    );
+    assert!(
+        troll_pos1
+            .iter()
+            .all(|s| s.item_id != ItemId(30) && s.item_id != ItemId(90))
+    );
 }
