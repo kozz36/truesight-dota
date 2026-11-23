@@ -83,6 +83,8 @@ pub struct AppSession {
     pub item_repo: SeededItemMetaRepository,
     pub game_time_secs: i32,
     pub owned_items: Vec<ItemId>,
+    /// Confirmed GSI owner of [`AppSession::owned_items`], kept across manual slot clears so fallback allies never inherit another hero's inventory.
+    pub owned_items_owner: Option<HeroId>,
     pub selected_build_variants: Vec<VariantSelection>,
     pub post_draft_view_override: Option<bool>,
     pub active_game_patch: String,
@@ -239,6 +241,7 @@ impl AppSession {
             item_repo,
             game_time_secs: 0,
             owned_items: Vec::new(),
+            owned_items_owner: None,
             selected_build_variants: Vec::new(),
             post_draft_view_override: None,
             active_game_patch,
@@ -413,6 +416,13 @@ impl AppSession {
                     .unwrap_or(Bracket::Legend);
             }
             self.reload_repository();
+            if self.pending_item_build_refresh {
+                if self.is_post_draft_build_view() {
+                    let _ = self.request_item_build_refresh_if_uncached();
+                } else {
+                    self.pending_item_build_refresh = false;
+                }
+            }
         } else if !self.sync_in_flight {
             let _ = self.apply_auto_bracket_from_cache();
             self.reload_repository();
@@ -698,6 +708,7 @@ impl AppSession {
         self.vision_owned.clear();
         self.game_time_secs = 0;
         self.owned_items.clear();
+        self.owned_items_owner = None;
         self.selected_build_variants.clear();
         self.post_draft_view_override = None;
         self.sync_target_item_heroes_to_cache();
@@ -950,6 +961,7 @@ impl AppSession {
                     let hero_changed = self.local_player_hero != Some(id);
                     self.local_player_hero = Some(id);
                     self.local_player_hero_from_gsi = true;
+                    self.owned_items_owner = Some(id);
                     if hero_changed {
                         self.build_view_hero = None;
                     }
@@ -972,6 +984,7 @@ impl AppSession {
                         let hero_changed = self.local_player_hero != Some(id);
                         self.local_player_hero = Some(id);
                         self.local_player_hero_from_gsi = true;
+                        self.owned_items_owner = Some(id);
                         if hero_changed {
                             self.build_view_hero = None;
                         }
@@ -998,6 +1011,9 @@ impl AppSession {
                 }
             }
             DraftEvent::InventoryUpdated { item_slugs } => {
+                if let Some(local_id) = self.local_player_hero {
+                    self.owned_items_owner = Some(local_id);
+                }
                 self.owned_items = item_slugs
                     .iter()
                     .filter_map(|slug| self.item_repo.item_by_slug(slug).map(|e| e.id))
@@ -1054,6 +1070,7 @@ impl AppSession {
     // physical portrait in the same batch, including when all role slots are full.
     // Missing events are not removals (death/occlusion grace belongs to the adapter).
     pub(crate) fn apply_vision_events(&mut self, events: Vec<DraftEvent>) {
+        let prev_active_hero = self.active_build_hero().map(|(h, _)| h);
         // Cached observations support retirement only; replaying them as additions
         // would undo manual replacements and subsequent GSI side corrections.
         let mut fresh_slots = [[None; TEAM_SIZE]; 2];
@@ -1150,6 +1167,8 @@ impl AppSession {
                 self.rebalance_unlocked_side_roles(side);
             }
         }
+        self.sync_target_item_heroes_to_cache();
+        self.refresh_item_build_if_hero_changed(prev_active_hero);
     }
 
     pub fn poll_live_sources(
@@ -1387,9 +1406,10 @@ impl AppSession {
         let Some((hero_id, _)) = self.active_build_hero() else {
             return &[];
         };
-        let owns_inventory = match self.local_player_hero {
-            Some(local_id) => local_id == hero_id,
-            // Without a confirmed local hero, allow fallback target inventory only when not browsing an explicit ally.
+        let owner = self.owned_items_owner.or(self.local_player_hero);
+        let owns_inventory = match owner {
+            Some(owner_id) => owner_id == hero_id,
+            // Without an identified inventory owner, allow fallback target inventory only when not browsing an explicit ally.
             None => self.build_view_hero.is_none(),
         };
         if owns_inventory {

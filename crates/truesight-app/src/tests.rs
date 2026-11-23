@@ -4394,3 +4394,363 @@ fn manual_slot_replacement_in_build_view_requests_or_queues_item_refresh() {
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+#[test]
+fn clearing_confirmed_local_hero_keeps_inventory_bound_and_does_not_leak_to_fallback_ally() {
+    use truesight_core::domain::{HeroId, ItemId, Side};
+    use truesight_core::ports::{DraftEvent, ItemMetaRepository};
+
+    let mut session = AppSession::new().unwrap();
+    assert!(execute_command(&mut session, "ally 1 anti-mage").unwrap());
+    assert!(execute_command(&mut session, "ally 4 nyx assassin").unwrap());
+    assert!(execute_command(&mut session, "enemy 1 phantom assassin").unwrap());
+    assert!(execute_command(&mut session, "enemy 4 riki").unwrap());
+
+    session.apply_event(DraftEvent::LocalPlayerHeroDetected {
+        hero_slug: "antimage".into(),
+    });
+    session.apply_event(DraftEvent::GameRulesStateChanged {
+        state_name: "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS".into(),
+        game_time_secs: 900,
+    });
+    assert!(session.is_post_draft_build_view());
+    assert_eq!(session.build_view_hero, None);
+    assert_eq!(session.active_build_hero().map(|(h, _)| h), Some(HeroId(1)));
+
+    let am_base = session
+        .compute_recommended_build()
+        .expect("local Anti-Mage must produce a build");
+    let am_step0_id = am_base.steps[0].item_id;
+
+    // Collect Nyx step, variant, starting, and optional IDs before restoring default focus.
+    session.select_build_view_hero(HeroId(88));
+    let nyx_base = session
+        .compute_recommended_build()
+        .expect("fallback ally Nyx must produce a build");
+    let nyx_step0_id = nyx_base.steps[0].item_id;
+    let nyx_variant_pair = nyx_base
+        .steps
+        .iter()
+        .find_map(|s| s.variants.first().map(|v| (s.item_id, v.item_id)));
+    let nyx_start_id = nyx_base.starting_items.first().copied();
+    let nyx_opt_id = nyx_base.optional_items.first().map(|o| o.item_id);
+    session.build_view_hero = None;
+
+    let mut owned_ids: Vec<ItemId> = vec![am_step0_id, nyx_step0_id];
+    if let Some((_, var_id)) = nyx_variant_pair {
+        owned_ids.push(var_id);
+    }
+    if let Some(sid) = nyx_start_id {
+        owned_ids.push(sid);
+    }
+    if let Some(oid) = nyx_opt_id {
+        owned_ids.push(oid);
+    }
+    let item_slugs: Vec<String> = owned_ids
+        .into_iter()
+        .filter_map(|id| {
+            session
+                .item_repo
+                .item_catalog(id)
+                .map(|e| format!("item_{}", e.slug))
+        })
+        .collect();
+    session.apply_event(DraftEvent::InventoryUpdated { item_slugs });
+
+    assert_eq!(session.owned_items_owner, Some(HeroId(1)));
+    assert_eq!(
+        session.active_build_owned_items(),
+        session.owned_items.as_slice()
+    );
+    let am_owned = session.compute_recommended_build().unwrap();
+    assert!(am_owned.steps[0].owned);
+
+    // Click '×' on confirmed local hero Anti-Mage with no explicit browse selection:
+    // fallback ally Nyx becomes active_build_hero, while inventory stays bound to Anti-Mage.
+    session.clear_slot_manual(Side::Allies, 0);
+    assert_eq!(session.local_player_hero, None);
+    assert_eq!(session.build_view_hero, None);
+    assert_eq!(
+        session.active_build_hero().map(|(h, _)| h),
+        Some(HeroId(88)),
+        "clearing Ally 1 must fall back active_build_hero to Ally 4 Nyx"
+    );
+    assert!(
+        !session.owned_items.is_empty(),
+        "inventory remains recorded while bound to its confirmed owner"
+    );
+    assert_eq!(session.owned_items_owner, Some(HeroId(1)));
+    assert!(
+        session.active_build_owned_items().is_empty(),
+        "fallback ally must NOT inherit cleared local hero's inventory"
+    );
+
+    let nyx_fallback = session.compute_recommended_build().unwrap();
+    assert!(
+        nyx_fallback
+            .steps
+            .iter()
+            .all(|s| !s.owned && s.owned_components == 0),
+        "fallback ally steps must remain unowned after clearing local hero: {:?}",
+        nyx_fallback.steps
+    );
+    assert_eq!(nyx_fallback.next_unowned_index, Some(0));
+    assert!(
+        nyx_fallback.optional_items.iter().all(|o| !o.owned),
+        "fallback ally optional items must remain unowned after clearing local hero"
+    );
+
+    // Re-adding Anti-Mage manually restores ownership recognition for Anti-Mage's build.
+    session.set_slot_manual(Side::Allies, 0, HeroId(1));
+    assert_eq!(
+        session.active_build_owned_items(),
+        session.owned_items.as_slice()
+    );
+    let am_readded = session.compute_recommended_build().unwrap();
+    assert!(am_readded.steps[0].owned);
+
+    // Resetting the draft clears both inventory items and their bound owner.
+    session.reset_draft();
+    assert!(session.owned_items.is_empty());
+    assert_eq!(session.owned_items_owner, None);
+}
+
+#[test]
+fn vision_populating_active_build_hero_in_build_view_triggers_item_refresh() {
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use std::time::Duration;
+    use truesight_adapters::sync::LocalCacheManager;
+    use truesight_core::domain::{Bracket, HeroId, ItemId, Role, Side};
+    use truesight_core::ports::{DraftEvent, ItemMetaRepository};
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_vision_build_refresh_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    let cache_dir = tmp_dir.join("cache");
+    std::fs::create_dir_all(&cache_dir).unwrap();
+    let cfg_path = tmp_dir.join("config.toml");
+
+    let mgr = LocalCacheManager::with_optional_account(cache_dir.clone(), None);
+    let mut session = AppSession::with_cache_and_config(mgr, Some(cfg_path)).unwrap();
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let recorded_targets: Arc<Mutex<Vec<Vec<HeroId>>>> = Arc::new(Mutex::new(Vec::new()));
+    let calls_bg = Arc::clone(&calls);
+    let targets_bg = Arc::clone(&recorded_targets);
+    let cache_dir_bg = cache_dir.clone();
+
+    session.set_background_sync_runner(move |bg_mgr, _force| {
+        calls_bg.fetch_add(1, Ordering::SeqCst);
+        targets_bg
+            .lock()
+            .unwrap()
+            .push(bg_mgr.target_item_hero_ids.clone());
+        let mut entries = Vec::new();
+        for hid in &bg_mgr.target_item_hero_ids {
+            entries.push(format!(
+                r#"{{"heroId":{},"itemStartingPurchase":[],"itemFullPurchase":[{{"itemId":1,"time":11,"matchCount":5120,"winCount":2900}}]}}"#,
+                hid.0
+            ));
+        }
+        std::fs::write(
+            cache_dir_bg.join("hero_item_stats.json"),
+            format!("[{}]", entries.join(",")),
+        )
+        .map_err(|e| e.to_string())?;
+        Ok("Item cache synced".into())
+    });
+
+    // Open Build view while no allies are picked yet.
+    session.toggle_post_draft_build_view();
+    assert!(session.is_post_draft_build_view());
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    // Vision detects an uncached allied hero while Build view is already open.
+    session.apply_vision_events(vec![DraftEvent::PickDetected {
+        side: Side::Allies,
+        slot: 0,
+        hero_id: HeroId(88),
+        role: None,
+    }]);
+
+    assert_eq!(
+        session.active_build_hero().map(|(h, _)| h),
+        Some(HeroId(88))
+    );
+    assert!(
+        session.sync_in_flight,
+        "vision populating active build hero in Build view must start item refresh"
+    );
+
+    for _ in 0..100 {
+        session.poll_live_sources(None, None);
+        if !session.sync_in_flight {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!session.sync_in_flight);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(recorded_targets.lock().unwrap()[0].contains(&HeroId(88)));
+    let nyx_stats = session
+        .item_repo
+        .hero_item_stats(HeroId(88), Role::Carry, Bracket::Ancient)
+        .unwrap();
+    assert!(
+        nyx_stats
+            .iter()
+            .any(|s| s.item_id == ItemId(1) && s.match_count == 5120),
+        "vision-triggered item refresh must populate item_repo for Ally Nyx: {nyx_stats:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn unlinking_steam_account_preserves_and_drains_queued_item_refresh() {
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    };
+    use std::time::Duration;
+    use truesight_adapters::sync::LocalCacheManager;
+    use truesight_core::domain::{Bracket, HeroId, ItemId, Role, Side};
+    use truesight_core::ports::ItemMetaRepository;
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_unlink_preserves_queue_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    let cache_dir = tmp_dir.join("cache");
+    std::fs::create_dir_all(&cache_dir).unwrap();
+    let cfg_path = tmp_dir.join("config.toml");
+
+    let mgr = LocalCacheManager::with_optional_account(cache_dir.clone(), Some(12345));
+    let mut session = AppSession::with_cache_and_config(mgr, Some(cfg_path)).unwrap();
+    session.set_slot_manual(Side::Allies, 0, HeroId(1)); // Anti-Mage
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let recorded_targets: Arc<Mutex<Vec<Vec<HeroId>>>> = Arc::new(Mutex::new(Vec::new()));
+    let (gate_tx, gate_rx) = mpsc::sync_channel::<()>(1);
+    let gate_rx = Arc::new(Mutex::new(gate_rx));
+    let block_next_call = Arc::new(Mutex::new(false));
+    let (blocked_started_tx, blocked_started_rx) = mpsc::sync_channel::<()>(2);
+    let file_lock = Arc::new(Mutex::new(()));
+
+    let calls_bg = Arc::clone(&calls);
+    let targets_bg = Arc::clone(&recorded_targets);
+    let cache_dir_bg = cache_dir.clone();
+    let gate_rx_bg = Arc::clone(&gate_rx);
+    let block_bg = Arc::clone(&block_next_call);
+    let blocked_started_bg = blocked_started_tx.clone();
+    let file_lock_bg = Arc::clone(&file_lock);
+
+    session.set_background_sync_runner(move |bg_mgr, _force| {
+        calls_bg.fetch_add(1, Ordering::SeqCst);
+        targets_bg
+            .lock()
+            .unwrap()
+            .push(bg_mgr.target_item_hero_ids.clone());
+        let should_block = {
+            let mut flag = block_bg.lock().unwrap();
+            let v = *flag;
+            *flag = false;
+            v
+        };
+        if should_block {
+            let _ = blocked_started_bg.send(());
+            let _ = gate_rx_bg.lock().unwrap().recv();
+        }
+        let _guard = file_lock_bg.lock().unwrap();
+        let mut entries = Vec::new();
+        for hid in &bg_mgr.target_item_hero_ids {
+            entries.push(format!(
+                r#"{{"heroId":{},"itemStartingPurchase":[],"itemFullPurchase":[{{"itemId":1,"time":15,"matchCount":6789,"winCount":3600}}]}}"#,
+                hid.0
+            ));
+        }
+        let existing_path = cache_dir_bg.join("hero_item_stats.json");
+        let existing_inner = std::fs::read_to_string(&existing_path)
+            .ok()
+            .map(|s| {
+                s.trim()
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .to_string()
+            })
+            .filter(|s| !s.is_empty());
+        if let Some(prev) = existing_inner {
+            entries.insert(0, prev);
+        }
+        std::fs::write(&existing_path, format!("[{}]", entries.join(",")))
+            .map_err(|e| e.to_string())?;
+        Ok("Item cache synced".into())
+    });
+
+    // Open Build view and drain initial sync for Anti-Mage (call #1).
+    session.toggle_post_draft_build_view();
+    assert!(session.is_post_draft_build_view());
+    for _ in 0..100 {
+        session.poll_live_sources(None, None);
+        if !session.sync_in_flight {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    // Start a blocked sync (call #2), then replace active ally with uncached Nyx (88) -> queues refresh.
+    *block_next_call.lock().unwrap() = true;
+    assert!(session.start_background_sync(true));
+    blocked_started_rx
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap();
+    session.set_slot_manual(Side::Allies, 0, HeroId(88));
+    assert_eq!(
+        session.active_build_hero().map(|(h, _)| h),
+        Some(HeroId(88))
+    );
+
+    // Unlink Steam account while sync #2 is in flight and queued refresh is pending.
+    session.set_account_id(None, true);
+    assert!(
+        session.sync_in_flight,
+        "unlinking Steam account must immediately drain pending queued item refresh into a fresh sync"
+    );
+
+    // Unblock cancelled sync #2 and wait for the fresh post-unlink sync #3 to complete.
+    gate_tx.send(()).unwrap();
+    for _ in 0..100 {
+        session.poll_live_sources(None, None);
+        if !session.sync_in_flight && calls.load(Ordering::SeqCst) >= 3 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!session.sync_in_flight);
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    assert!(
+        recorded_targets.lock().unwrap()[2].contains(&HeroId(88)),
+        "post-unlink queued refresh must target replaced hero Nyx (88): {:?}",
+        *recorded_targets.lock().unwrap()
+    );
+    let nyx_stats = session
+        .item_repo
+        .hero_item_stats(HeroId(88), Role::Carry, Bracket::Ancient)
+        .unwrap();
+    assert!(
+        nyx_stats
+            .iter()
+            .any(|s| s.item_id == ItemId(1) && s.match_count == 6789),
+        "post-unlink item refresh must reload item_repo with synced Nyx stats: {nyx_stats:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
