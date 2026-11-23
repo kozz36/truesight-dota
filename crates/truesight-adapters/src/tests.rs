@@ -5070,6 +5070,7 @@ fn gsi_parser_extracts_local_player_items_ignores_empty_and_coalesces_in_queue()
     let events = parse_gsi_json_events(local_payload);
     assert!(
         events.contains(&DraftEvent::InventoryUpdated {
+            hero_slug: Some("npc_dota_hero_antimage".to_string()),
             item_slugs: vec![
                 "bfury".to_string(),
                 "power_treads".to_string(),
@@ -5083,7 +5084,8 @@ fn gsi_parser_extracts_local_player_items_ignores_empty_and_coalesces_in_queue()
     );
     assert!(
         !events.iter().any(|ev| match ev {
-            DraftEvent::InventoryUpdated { item_slugs } => item_slugs.iter().any(|s| s == "rapier"),
+            DraftEvent::InventoryUpdated { item_slugs, .. } =>
+                item_slugs.iter().any(|s| s == "rapier"),
             _ => false,
         }),
         "must never parse allplayers inventories"
@@ -5100,6 +5102,7 @@ fn gsi_parser_extracts_local_player_items_ignores_empty_and_coalesces_in_queue()
     let empty_events = parse_gsi_json_events(all_empty_payload);
     assert!(
         empty_events.contains(&DraftEvent::InventoryUpdated {
+            hero_slug: None,
             item_slugs: Vec::new(),
         }),
         "all-empty recognized slots must still emit empty InventoryUpdated: {empty_events:?}"
@@ -5119,18 +5122,21 @@ fn gsi_parser_extracts_local_player_items_ignores_empty_and_coalesces_in_queue()
     assert!(queue.push_for_epoch(
         0,
         DraftEvent::InventoryUpdated {
+            hero_slug: Some("npc_dota_hero_antimage".to_string()),
             item_slugs: vec!["bfury".to_string()],
         },
     ));
     assert!(queue.push_for_epoch(
         0,
         DraftEvent::InventoryUpdated {
+            hero_slug: Some("npc_dota_hero_antimage".to_string()),
             item_slugs: vec!["bfury".to_string(), "manta".to_string()],
         },
     ));
     assert!(queue.push_for_epoch(
         0,
         DraftEvent::InventoryUpdated {
+            hero_slug: Some("npc_dota_hero_antimage".to_string()),
             item_slugs: vec![
                 "bfury".to_string(),
                 "manta".to_string(),
@@ -5148,12 +5154,33 @@ fn gsi_parser_extracts_local_player_items_ignores_empty_and_coalesces_in_queue()
     }));
     assert!(drained.contains(&DraftEvent::DraftReset));
     assert!(drained.contains(&DraftEvent::InventoryUpdated {
+        hero_slug: Some("npc_dota_hero_antimage".to_string()),
         item_slugs: vec![
             "bfury".to_string(),
             "manta".to_string(),
             "skadi".to_string(),
         ],
     }));
+
+    // Hero change without new items must evict stale queued inventory and overflow snapshot.
+    let gsi_queue = BoundedDraftQueue::new(16);
+    assert!(gsi_queue.record_and_push_gsi_events(parse_gsi_json_events(local_payload)));
+    let next_hero_no_items = r#"{
+        "map": { "game_state": "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS", "clock_time": 905 },
+        "player": { "steamid": "76561198000000001", "team_name": "radiant" },
+        "hero": { "name": "npc_dota_hero_nyx_assassin" }
+    }"#;
+    assert!(gsi_queue.record_and_push_gsi_events(parse_gsi_json_events(next_hero_no_items)));
+    let reconciled = gsi_queue.drain_and_reconcile_gsi();
+    assert!(reconciled.contains(&DraftEvent::LocalPlayerHeroDetected {
+        hero_slug: "npc_dota_hero_nyx_assassin".to_string(),
+    }));
+    assert!(
+        !reconciled
+            .iter()
+            .any(|ev| matches!(ev, DraftEvent::InventoryUpdated { .. })),
+        "switching queued local hero without items must evict prior hero inventory: {reconciled:?}"
+    );
 }
 
 #[test]

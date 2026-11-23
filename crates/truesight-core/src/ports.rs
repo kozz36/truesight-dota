@@ -54,8 +54,11 @@ pub enum DraftEvent {
     BanDetected {
         hero_id: HeroId,
     },
-    /// Local player's active inventory, backpack, stash, TP, and neutral item slugs parsed from GSI.
+    /// Local player's active inventory, backpack, stash, TP, and neutral item slugs parsed from GSI,
+    /// tagged with the payload's `hero.name` slug when present so coalescing and overflow resync
+    /// never attribute one hero's snapshot to another hero.
     InventoryUpdated {
+        hero_slug: Option<String>,
         item_slugs: Vec<String>,
     },
     DraftReset,

@@ -987,9 +987,24 @@ impl AppSession {
                     let _ = self.draft.toggle_ban(hero_id);
                 }
             }
-            DraftEvent::InventoryUpdated { item_slugs } => {
-                if let Some(local_id) = self.local_player_hero {
-                    self.owned_items_owner = Some(local_id);
+            DraftEvent::InventoryUpdated {
+                hero_slug,
+                item_slugs,
+            } => {
+                let explicit_owner = match hero_slug.as_deref() {
+                    Some(slug) => match self.find_hero(slug) {
+                        Some(id) => Some(id),
+                        None => return,
+                    },
+                    None => None,
+                };
+                if let (Some(local_id), Some(inv_owner)) = (self.local_player_hero, explicit_owner)
+                    && local_id != inv_owner
+                {
+                    return;
+                }
+                if let Some(owner_id) = explicit_owner.or(self.local_player_hero) {
+                    self.owned_items_owner = Some(owner_id);
                 }
                 self.owned_items = item_slugs
                     .iter()

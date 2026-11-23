@@ -3274,6 +3274,7 @@ fn session_transitions_to_post_draft_build_ticks_owned_items_and_swaps_variants(
 
     // InventoryUpdated populates owned_items and advances next_unowned_index.
     session.apply_event(DraftEvent::InventoryUpdated {
+        hero_slug: None,
         item_slugs: vec![format!("item_{first_slug}")],
     });
     assert!(session.owned_items.contains(&first_step.item_id));
@@ -3484,6 +3485,7 @@ fn variant_selection_persists_across_step_reorder_by_original_item_id() {
 
     // Owning the first two steps plus the first step's variant shifts `orig_idx` to a new index.
     session.apply_event(DraftEvent::InventoryUpdated {
+        hero_slug: None,
         item_slugs: owned_slugs,
     });
 
@@ -4157,7 +4159,10 @@ fn local_inventory_applies_only_to_local_hero_build_not_browsed_teammate() {
                 .map(|e| format!("item_{}", e.slug))
         })
         .collect();
-    session.apply_event(DraftEvent::InventoryUpdated { item_slugs });
+    session.apply_event(DraftEvent::InventoryUpdated {
+        hero_slug: Some("antimage".into()),
+        item_slugs,
+    });
 
     // 1. On the local player hero (Anti-Mage), owned_items apply normally.
     assert_eq!(
@@ -4455,7 +4460,10 @@ fn clearing_confirmed_local_hero_keeps_inventory_bound_and_does_not_leak_to_fall
                 .map(|e| format!("item_{}", e.slug))
         })
         .collect();
-    session.apply_event(DraftEvent::InventoryUpdated { item_slugs });
+    session.apply_event(DraftEvent::InventoryUpdated {
+        hero_slug: Some("antimage".into()),
+        item_slugs,
+    });
 
     assert_eq!(session.owned_items_owner, Some(HeroId(1)));
     assert_eq!(
@@ -4823,6 +4831,7 @@ fn identity_change_without_inventory_event_does_not_reassign_stored_inventory() 
 
     let mixed_slugs = to_slugs(&session, &owned_ids);
     session.apply_event(DraftEvent::InventoryUpdated {
+        hero_slug: Some("antimage".into()),
         item_slugs: mixed_slugs,
     });
     assert_eq!(session.owned_items_owner, Some(HeroId(1)));
@@ -4860,6 +4869,7 @@ fn identity_change_without_inventory_event_does_not_reassign_stored_inventory() 
     // Once Nyx's own InventoryUpdated arrives, Nyx becomes the owner and marks its item owned.
     let nyx_slug = to_slugs(&session, &[nyx_step0_id]);
     session.apply_event(DraftEvent::InventoryUpdated {
+        hero_slug: Some("nyx_assassin".into()),
         item_slugs: nyx_slug,
     });
     assert_eq!(session.owned_items_owner, Some(HeroId(88)));
@@ -4893,4 +4903,136 @@ fn identity_change_without_inventory_event_does_not_reassign_stored_inventory() 
     assert_eq!(am_after_map.next_unowned_index, Some(0));
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn gsi_queue_coalescing_and_overflow_never_assign_previous_hero_inventory_to_next_hero() {
+    use truesight_adapters::gsi::{BoundedDraftQueue, parse_gsi_json_events};
+    use truesight_core::domain::{HeroId, ItemId};
+    use truesight_core::ports::ItemMetaRepository;
+
+    // 1. Live queue coalescing: Anti-Mage with Magic Wand -> Nyx Assassin without items before poll.
+    let mut session = AppSession::new().unwrap();
+    let queue = BoundedDraftQueue::new(16);
+
+    let am_with_wand = r#"{
+        "map": { "game_state": "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS", "clock_time": 600 },
+        "player": { "team_name": "radiant" },
+        "hero": { "name": "npc_dota_hero_antimage" },
+        "items": { "slot0": { "name": "item_magic_wand" } }
+    }"#;
+    let nyx_without_items = r#"{
+        "map": { "game_state": "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS", "clock_time": 601 },
+        "player": { "team_name": "radiant" },
+        "hero": { "name": "npc_dota_hero_nyx_assassin" }
+    }"#;
+
+    assert!(queue.record_and_push_gsi_events(parse_gsi_json_events(am_with_wand)));
+    assert!(queue.record_and_push_gsi_events(parse_gsi_json_events(nyx_without_items)));
+
+    for ev in queue.drain_and_reconcile_gsi() {
+        session.apply_event(ev);
+    }
+
+    assert_eq!(session.local_player_hero, Some(HeroId(88)));
+    assert_eq!(
+        session.active_build_hero().map(|(h, _)| h),
+        Some(HeroId(88))
+    );
+    assert!(
+        session.active_build_owned_items().is_empty(),
+        "queued coalescing from Anti-Mage + wand -> Nyx without items must not assign Anti-Mage's wand to Nyx"
+    );
+    let nyx_before = session.compute_recommended_build().unwrap();
+    assert!(
+        nyx_before
+            .steps
+            .iter()
+            .all(|s| !s.owned && s.owned_components == 0),
+        "Nyx build steps must stay unowned when previous queued hero's items were discarded: {:?}",
+        nyx_before.steps
+    );
+    assert_eq!(nyx_before.next_unowned_index, Some(0));
+    assert!(nyx_before.optional_items.iter().all(|o| !o.owned));
+
+    // Fresh inventory for Nyx arrives through the queue and applies normally.
+    let nyx_step0_id = nyx_before.steps[0].item_id;
+    let nyx_step0_slug = session
+        .item_repo
+        .item_catalog(nyx_step0_id)
+        .expect("Nyx step0 item must exist in catalog")
+        .slug;
+    let nyx_with_own_item = format!(
+        r#"{{
+            "map": {{ "game_state": "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS", "clock_time": 605 }},
+            "player": {{ "team_name": "radiant" }},
+            "hero": {{ "name": "npc_dota_hero_nyx_assassin" }},
+            "items": {{ "slot0": {{ "name": "item_{nyx_step0_slug}" }} }}
+        }}"#
+    );
+    assert!(queue.record_and_push_gsi_events(parse_gsi_json_events(&nyx_with_own_item)));
+    for ev in queue.drain_and_reconcile_gsi() {
+        session.apply_event(ev);
+    }
+    assert_eq!(session.owned_items_owner, Some(HeroId(88)));
+    assert_eq!(session.active_build_owned_items(), &[nyx_step0_id]);
+    let nyx_after = session.compute_recommended_build().unwrap();
+    assert!(nyx_after.steps[0].owned);
+    assert_ne!(nyx_after.next_unowned_index, Some(0));
+
+    // 2. Overflow recovery path: Axe with Blink Dagger -> overflowed Earthshaker without items.
+    let mut overflow_session = AppSession::new().unwrap();
+    let small_queue = BoundedDraftQueue::new(3);
+    let axe_with_blink = r#"{
+        "map": { "game_state": "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS", "clock_time": 900 },
+        "player": { "team_name": "radiant" },
+        "hero": { "name": "npc_dota_hero_axe" },
+        "items": { "slot0": { "name": "item_blink" } },
+        "draft": { "team2": { "ban0_id": 3, "ban1_id": 4, "ban2_id": 6, "ban3_id": 7 } }
+    }"#;
+    let es_without_items = r#"{
+        "map": { "game_state": "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS", "clock_time": 902 },
+        "player": { "team_name": "radiant" },
+        "hero": { "name": "npc_dota_hero_earthshaker" }
+    }"#;
+    assert!(small_queue.record_and_push_gsi_events(parse_gsi_json_events(axe_with_blink)));
+    assert!(small_queue.record_and_push_gsi_events(parse_gsi_json_events(es_without_items)));
+
+    for ev in small_queue.drain_and_reconcile_gsi() {
+        overflow_session.apply_event(ev);
+    }
+    let q_stats = small_queue.stats();
+    assert!(
+        q_stats.dropped > 0 && q_stats.recovered_resyncs == 1,
+        "expected overflow reconciliation to run: {q_stats:?}"
+    );
+    let es_id = overflow_session.find_hero("earthshaker").unwrap();
+    assert_eq!(overflow_session.local_player_hero, Some(es_id));
+    assert!(
+        overflow_session.active_build_owned_items().is_empty(),
+        "overflow recovery must not replay Axe's Blink Dagger onto Earthshaker"
+    );
+    let es_before = overflow_session.compute_recommended_build().unwrap();
+    assert!(
+        es_before
+            .steps
+            .iter()
+            .all(|s| !s.owned && s.owned_components == 0),
+        "Earthshaker steps must stay unowned after overflow resync: {:?}",
+        es_before.steps
+    );
+
+    // Fresh Blink Dagger event for Earthshaker applies cleanly after overflow recovery.
+    let es_with_blink = r#"{
+        "map": { "game_state": "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS", "clock_time": 910 },
+        "player": { "team_name": "radiant" },
+        "hero": { "name": "npc_dota_hero_earthshaker" },
+        "items": { "slot0": { "name": "item_blink" } }
+    }"#;
+    assert!(small_queue.record_and_push_gsi_events(parse_gsi_json_events(es_with_blink)));
+    for ev in small_queue.drain_and_reconcile_gsi() {
+        overflow_session.apply_event(ev);
+    }
+    assert_eq!(overflow_session.owned_items_owner, Some(es_id));
+    assert_eq!(overflow_session.active_build_owned_items(), &[ItemId(1)]);
 }
