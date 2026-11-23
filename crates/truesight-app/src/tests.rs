@@ -4754,3 +4754,143 @@ fn unlinking_steam_account_preserves_and_drains_queued_item_refresh() {
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+#[test]
+fn identity_change_without_inventory_event_does_not_reassign_stored_inventory() {
+    use truesight_adapters::sync::LocalCacheManager;
+    use truesight_core::domain::{Faction, HeroId, ItemId};
+    use truesight_core::ports::{DraftEvent, ItemMetaRepository};
+
+    let tmp_dir =
+        std::env::temp_dir().join(format!("truesight_identity_no_inv_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let mgr = LocalCacheManager::with_optional_account(tmp_dir.clone(), None);
+    let mut session = AppSession::with_cache_and_config(mgr, None).unwrap();
+    assert!(execute_command(&mut session, "ally 1 anti-mage").unwrap());
+    assert!(execute_command(&mut session, "ally 4 nyx assassin").unwrap());
+    assert!(execute_command(&mut session, "enemy 1 phantom assassin").unwrap());
+    assert!(execute_command(&mut session, "enemy 4 riki").unwrap());
+
+    // Confirm Hero A (Anti-Mage) and enter post-draft Build view.
+    session.apply_event(DraftEvent::LocalPlayerHeroDetected {
+        hero_slug: "antimage".into(),
+    });
+    session.apply_event(DraftEvent::GameRulesStateChanged {
+        state_name: "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS".into(),
+        game_time_secs: 900,
+    });
+    assert!(session.is_post_draft_build_view());
+
+    let am_base = session
+        .compute_recommended_build()
+        .expect("Anti-Mage must produce a build");
+    let am_step0_id = am_base.steps[0].item_id;
+
+    // Collect Nyx items before clearing back to default focus.
+    session.select_build_view_hero(HeroId(88));
+    let nyx_base = session
+        .compute_recommended_build()
+        .expect("Nyx Assassin must produce a build");
+    let nyx_step0_id = nyx_base.steps[0].item_id;
+    let nyx_variant_id = nyx_base
+        .steps
+        .iter()
+        .find_map(|s| s.variants.first().map(|v| v.item_id));
+    let nyx_start_id = nyx_base.starting_items.first().copied();
+    let nyx_opt_id = nyx_base.optional_items.first().map(|o| o.item_id);
+    session.build_view_hero = None;
+
+    let mut owned_ids: Vec<ItemId> = vec![am_step0_id, nyx_step0_id];
+    if let Some(vid) = nyx_variant_id {
+        owned_ids.push(vid);
+    }
+    if let Some(sid) = nyx_start_id {
+        owned_ids.push(sid);
+    }
+    if let Some(oid) = nyx_opt_id {
+        owned_ids.push(oid);
+    }
+    let to_slugs = |s: &AppSession, ids: &[ItemId]| -> Vec<String> {
+        ids.iter()
+            .filter_map(|id| {
+                s.item_repo
+                    .item_catalog(*id)
+                    .map(|e| format!("item_{}", e.slug))
+            })
+            .collect()
+    };
+
+    let mixed_slugs = to_slugs(&session, &owned_ids);
+    session.apply_event(DraftEvent::InventoryUpdated {
+        item_slugs: mixed_slugs,
+    });
+    assert_eq!(session.owned_items_owner, Some(HeroId(1)));
+    assert!(session.compute_recommended_build().unwrap().steps[0].owned);
+
+    // 1. Identity event for Hero B (Nyx) arrives WITHOUT a new InventoryUpdated:
+    // Nyx must NOT inherit Anti-Mage's stored purchases or advance [NEXT].
+    session.apply_event(DraftEvent::LocalPlayerHeroDetected {
+        hero_slug: "nyx_assassin".into(),
+    });
+    assert_eq!(session.local_player_hero, Some(HeroId(88)));
+    assert_eq!(
+        session.active_build_hero().map(|(h, _)| h),
+        Some(HeroId(88))
+    );
+    assert!(
+        session.active_build_owned_items().is_empty(),
+        "Hero B must not inherit Hero A's stored inventory after LocalPlayerHeroDetected without InventoryUpdated"
+    );
+    let nyx_before_inv = session.compute_recommended_build().unwrap();
+    assert!(
+        nyx_before_inv
+            .steps
+            .iter()
+            .all(|s| !s.owned && s.owned_components == 0),
+        "Hero B build steps must stay unowned before Hero B's InventoryUpdated: {:?}",
+        nyx_before_inv.steps
+    );
+    assert_eq!(nyx_before_inv.next_unowned_index, Some(0));
+    assert!(
+        nyx_before_inv.optional_items.iter().all(|o| !o.owned),
+        "Hero B optional items must stay unowned before Hero B's InventoryUpdated"
+    );
+
+    // Once Nyx's own InventoryUpdated arrives, Nyx becomes the owner and marks its item owned.
+    let nyx_slug = to_slugs(&session, &[nyx_step0_id]);
+    session.apply_event(DraftEvent::InventoryUpdated {
+        item_slugs: nyx_slug,
+    });
+    assert_eq!(session.owned_items_owner, Some(HeroId(88)));
+    let nyx_after_inv = session.compute_recommended_build().unwrap();
+    assert!(nyx_after_inv.steps[0].owned);
+    assert_ne!(nyx_after_inv.next_unowned_index, Some(0));
+
+    // 2. PlayerHeroMapped path: account links and emits Hero A (Anti-Mage) WITHOUT InventoryUpdated:
+    // Anti-Mage must NOT inherit Nyx's stored purchases either.
+    session.set_account_id(Some(4242), true);
+    session.apply_event(DraftEvent::PlayerHeroMapped {
+        steam32: 4242,
+        faction: Faction::Radiant,
+        hero_slug: "antimage".into(),
+    });
+    assert_eq!(session.local_player_hero, Some(HeroId(1)));
+    assert_eq!(session.active_build_hero().map(|(h, _)| h), Some(HeroId(1)));
+    assert!(
+        session.active_build_owned_items().is_empty(),
+        "PlayerHeroMapped identity switch without InventoryUpdated must not inherit previous hero's inventory"
+    );
+    let am_after_map = session.compute_recommended_build().unwrap();
+    assert!(
+        am_after_map
+            .steps
+            .iter()
+            .all(|s| !s.owned && s.owned_components == 0),
+        "Anti-Mage steps must stay unowned until fresh InventoryUpdated arrives: {:?}",
+        am_after_map.steps
+    );
+    assert_eq!(am_after_map.next_unowned_index, Some(0));
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}

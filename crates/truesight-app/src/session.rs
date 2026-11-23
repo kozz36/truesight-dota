@@ -958,19 +958,7 @@ impl AppSession {
             }
             DraftEvent::LocalPlayerHeroDetected { hero_slug } => {
                 if let Some(id) = self.find_hero(&hero_slug) {
-                    let hero_changed = self.local_player_hero != Some(id);
-                    self.local_player_hero = Some(id);
-                    self.local_player_hero_from_gsi = true;
-                    self.owned_items_owner = Some(id);
-                    if hero_changed {
-                        self.build_view_hero = None;
-                    }
-                    self.apply_side_pick(Side::Allies, 0, id, None);
-                    self.sync_local_player_target_role();
-                    self.sync_target_item_heroes_to_cache();
-                    if hero_changed && self.is_post_draft_build_view() {
-                        let _ = self.request_item_build_refresh_if_uncached();
-                    }
+                    self.apply_local_hero_identity(id, true);
                 }
             }
             DraftEvent::PlayerHeroMapped {
@@ -981,18 +969,7 @@ impl AppSession {
                 if self.cache_mgr.player_account_id == Some(steam32) {
                     self.set_ally_faction(faction);
                     if let Some(id) = self.find_hero(&hero_slug) {
-                        let hero_changed = self.local_player_hero != Some(id);
-                        self.local_player_hero = Some(id);
-                        self.local_player_hero_from_gsi = true;
-                        self.owned_items_owner = Some(id);
-                        if hero_changed {
-                            self.build_view_hero = None;
-                        }
-                        self.sync_local_player_target_role();
-                        self.sync_target_item_heroes_to_cache();
-                        if hero_changed && self.is_post_draft_build_view() {
-                            let _ = self.request_item_build_refresh_if_uncached();
-                        }
+                        self.apply_local_hero_identity(id, false);
                     }
                 }
             }
@@ -1306,6 +1283,33 @@ impl AppSession {
             self.last_rules_state.as_deref(),
             Some("DOTA_GAMERULES_STATE_PRE_GAME" | "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS")
         ))
+    }
+
+    fn invalidate_inventory_on_identity_change(&mut self, new_hero_id: HeroId) {
+        if self.owned_items_owner != Some(new_hero_id)
+            && (!self.owned_items.is_empty() || self.owned_items_owner.is_some())
+        {
+            self.owned_items.clear();
+            self.owned_items_owner = None;
+        }
+    }
+
+    fn apply_local_hero_identity(&mut self, id: HeroId, place_ally_pick: bool) {
+        let hero_changed = self.local_player_hero != Some(id);
+        self.local_player_hero = Some(id);
+        self.local_player_hero_from_gsi = true;
+        if hero_changed {
+            self.invalidate_inventory_on_identity_change(id);
+            self.build_view_hero = None;
+        }
+        if place_ally_pick {
+            self.apply_side_pick(Side::Allies, 0, id, None);
+        }
+        self.sync_local_player_target_role();
+        self.sync_target_item_heroes_to_cache();
+        if hero_changed && self.is_post_draft_build_view() {
+            let _ = self.request_item_build_refresh_if_uncached();
+        }
     }
 
     fn refresh_item_build_if_hero_changed(&mut self, prev_active_hero: Option<HeroId>) {
