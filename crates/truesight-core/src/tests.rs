@@ -1866,10 +1866,7 @@ fn recommend_item_build_protects_late_upgrade_chains_and_blocks_low_share_phase_
     .expect("build should succeed");
 
     assert!(
-        build
-            .steps
-            .iter()
-            .all(|s| s.item_id != ItemId(1107)),
+        build.steps.iter().all(|s| s.item_id != ItemId(1107)),
         "low-share Core filler Phylactery (33 vs 642) must not be promoted as primary step: {:?}",
         build.steps
     );

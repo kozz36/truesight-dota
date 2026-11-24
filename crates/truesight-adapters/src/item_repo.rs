@@ -150,11 +150,7 @@ impl ItemMetaRepository for SeededItemMetaRepository {
                 .filter(|stat| {
                     stat.phase == ItemPhase::Starting
                         || stat.phase == ItemPhase::Situational
-                        || is_valid_timed_progression_item_for_phase(
-                            self,
-                            stat.item_id,
-                            stat.phase,
-                        )
+                        || is_valid_timed_progression_item_for_phase(self, stat.item_id, stat.phase)
                 })
                 .map(|mut stat| {
                     if apply_fallback_scale

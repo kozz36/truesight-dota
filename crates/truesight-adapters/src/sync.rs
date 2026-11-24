@@ -1093,8 +1093,7 @@ impl LocalCacheManager {
                     );
                     let mut hero_stats_accum: Vec<HeroItemStat> = Vec::new();
                     if let Ok(ib_body) = fetch_opendota_url(&url) {
-                        let grouped =
-                            parse_cached_hero_item_stats_entries(&ib_body, &catalog_repo);
+                        let grouped = parse_cached_hero_item_stats_entries(&ib_body, &catalog_repo);
                         if !grouped.is_empty() {
                             for (hid, _, _, stats) in grouped {
                                 if hid == hero_id {

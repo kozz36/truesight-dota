@@ -6127,12 +6127,13 @@ fn parse_stratz_live_bracketed_item_purchases_handles_minute_buckets_and_boot_ti
         }
     }"#;
 
-    let parsed = parse_stratz_live_bracketed_item_purchases_json(
-        live_payload,
-        HeroId(32),
-        Some(Role::Mid),
+    let parsed =
+        parse_stratz_live_bracketed_item_purchases_json(live_payload, HeroId(32), Some(Role::Mid));
+    assert_eq!(
+        parsed.len(),
+        4,
+        "expected all 4 STRATZ bracket buckets: {parsed:?}"
     );
-    assert_eq!(parsed.len(), 4, "expected all 4 STRATZ bracket buckets: {parsed:?}");
 
     let la = &parsed
         .iter()
@@ -6141,12 +6142,20 @@ fn parse_stratz_live_bracketed_item_purchases_handles_minute_buckets_and_boot_ti
         .3;
     let la_boot = la.iter().find(|s| s.item_id == ItemId(63)).unwrap();
     // 24011080 / 42287 / 60 = 9.463m
-    assert!((la_boot.avg_time_mins - 9.46).abs() < 0.05, "boot mins: {}", la_boot.avg_time_mins);
+    assert!(
+        (la_boot.avg_time_mins - 9.46).abs() < 0.05,
+        "boot mins: {}",
+        la_boot.avg_time_mins
+    );
     assert_eq!(la_boot.phase, ItemPhase::Early);
 
     let la_diff = la.iter().find(|s| s.item_id == ItemId(174)).unwrap();
     // Weighted minutes: (4200*14 + 1800*16)/6000 = 14.6m
-    assert!((la_diff.avg_time_mins - 14.6).abs() < 0.05, "diff mins: {}", la_diff.avg_time_mins);
+    assert!(
+        (la_diff.avg_time_mins - 14.6).abs() < 0.05,
+        "diff mins: {}",
+        la_diff.avg_time_mins
+    );
     assert_eq!(la_diff.match_count, 6000);
     assert_eq!(la_diff.phase, ItemPhase::Core);
 
@@ -6155,9 +6164,15 @@ fn parse_stratz_live_bracketed_item_purchases_handles_minute_buckets_and_boot_ti
         .find(|(_, _, b, _)| b.map(|v| v.cache_key()) == Some("HERALD_GUARDIAN"))
         .expect("HERALD_GUARDIAN bucket present")
         .3;
-    assert!(hg.iter().any(|s| s.item_id == ItemId(20) && s.phase == ItemPhase::Starting));
+    assert!(
+        hg.iter()
+            .any(|s| s.item_id == ItemId(20) && s.phase == ItemPhase::Starting)
+    );
     assert!(!hg.iter().any(|s| s.item_id == ItemId(44)));
-    assert!(hg.iter().any(|s| s.item_id == ItemId(108) && s.phase == ItemPhase::Late));
+    assert!(
+        hg.iter()
+            .any(|s| s.item_id == ItemId(108) && s.phase == ItemPhase::Late)
+    );
 }
 
 #[test]
@@ -6217,7 +6232,9 @@ fn hero_item_stats_v2_cache_roundtrips_role_bracket_and_scales_unbracketed_fallb
         |url| match url {
             "https://api.opendota.com/api/heroStats" => Ok(hero_stats_json.to_string()),
             "https://api.opendota.com/api/constants/items" => Ok(item_constants_json.to_string()),
-            other => Err(truesight_core::ports::PortError(format!("unexpected {other}"))),
+            other => Err(truesight_core::ports::PortError(format!(
+                "unexpected {other}"
+            ))),
         },
         |_token| Ok(r#"{"data":{"heroStats":{"matchUp":[]}}}"#.to_string()),
         |_token, hero_id, role| {
@@ -6253,8 +6270,16 @@ fn hero_item_stats_v2_cache_roundtrips_role_bracket_and_scales_unbracketed_fallb
     assert!(!divine.iter().any(|s| s.item_id == ItemId(1107)));
     assert!(divine.iter().any(|s| s.item_id == ItemId(1097)));
 
-    let div_diff = divine.iter().find(|s| s.item_id == ItemId(174)).unwrap().avg_time_mins;
-    let imm_diff = immortal.iter().find(|s| s.item_id == ItemId(174)).unwrap().avg_time_mins;
+    let div_diff = divine
+        .iter()
+        .find(|s| s.item_id == ItemId(174))
+        .unwrap()
+        .avg_time_mins;
+    let imm_diff = immortal
+        .iter()
+        .find(|s| s.item_id == ItemId(174))
+        .unwrap()
+        .avg_time_mins;
     assert!(
         div_diff > imm_diff,
         "intra-bucket scaling must keep Divine ({div_diff}) > Immortal ({imm_diff})"
@@ -6283,9 +6308,21 @@ fn hero_item_stats_v2_cache_roundtrips_role_bracket_and_scales_unbracketed_fallb
     let u_immortal = unbracketed_repo
         .hero_item_stats(HeroId(99), Role::Offlane, Bracket::Immortal)
         .unwrap();
-    let t_herald = u_herald.iter().find(|s| s.item_id == ItemId(1)).unwrap().avg_time_mins;
-    let t_legend = u_legend.iter().find(|s| s.item_id == ItemId(1)).unwrap().avg_time_mins;
-    let t_immortal = u_immortal.iter().find(|s| s.item_id == ItemId(1)).unwrap().avg_time_mins;
+    let t_herald = u_herald
+        .iter()
+        .find(|s| s.item_id == ItemId(1))
+        .unwrap()
+        .avg_time_mins;
+    let t_legend = u_legend
+        .iter()
+        .find(|s| s.item_id == ItemId(1))
+        .unwrap()
+        .avg_time_mins;
+    let t_immortal = u_immortal
+        .iter()
+        .find(|s| s.item_id == ItemId(1))
+        .unwrap()
+        .avg_time_mins;
     assert!(
         t_herald > t_legend && t_legend > t_immortal,
         "unbracketed cached fallback must scale Herald ({t_herald}) > Legend ({t_legend}) > Immortal ({t_immortal})"
@@ -6295,10 +6332,9 @@ fn hero_item_stats_v2_cache_roundtrips_role_bracket_and_scales_unbracketed_fallb
 }
 
 #[test]
-fn is_valid_timed_progression_item_for_phase_allows_early_core_high_value_and_blocks_basic_and_late_raw() {
-    use crate::item_repo::{
-        SeededItemMetaRepository, is_valid_timed_progression_item_for_phase,
-    };
+fn is_valid_timed_progression_item_for_phase_allows_early_core_high_value_and_blocks_basic_and_late_raw()
+ {
+    use crate::item_repo::{SeededItemMetaRepository, is_valid_timed_progression_item_for_phase};
     use truesight_core::domain::{ItemId, ItemPhase};
 
     let repo = SeededItemMetaRepository::default();
