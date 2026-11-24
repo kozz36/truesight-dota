@@ -3471,3 +3471,796 @@ fn gui_clicking_second_ally_sets_build_view_hero_without_setting_local_player_he
         "clicking an ally without GSI identity must never assign local_player_hero"
     );
 }
+
+fn find_all_painted_text_rects(shape: &egui::epaint::Shape, target: &str, out: &mut Vec<Rect>) {
+    match shape {
+        egui::epaint::Shape::Text(ts) if ts.galley.text() == target => {
+            out.push(ts.visual_bounding_rect());
+        }
+        egui::epaint::Shape::Vec(v) => {
+            for s in v {
+                find_all_painted_text_rects(s, target, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn make_four_late_steps_mock_repo() -> truesight_adapters::item_repo::SeededItemMetaRepository {
+    use truesight_core::domain::{HeroItemStat, ItemPhase};
+    let mut repo = truesight_adapters::item_repo::SeededItemMetaRepository::new();
+    repo.custom_hero_stats.push((
+        HeroId(41),
+        Some(Role::Carry),
+        None,
+        vec![
+            HeroItemStat {
+                item_id: truesight_core::domain::ItemId(11),
+                phase: ItemPhase::Starting,
+                avg_time_mins: 0.0,
+                match_count: 1000,
+                win_count: 520,
+            },
+            HeroItemStat {
+                item_id: truesight_core::domain::ItemId(75),
+                phase: ItemPhase::Early,
+                avg_time_mins: 6.0,
+                match_count: 620,
+                win_count: 320,
+            },
+            HeroItemStat {
+                item_id: truesight_core::domain::ItemId(63),
+                phase: ItemPhase::Early,
+                avg_time_mins: 9.0,
+                match_count: 980,
+                win_count: 520,
+            },
+            HeroItemStat {
+                item_id: truesight_core::domain::ItemId(50),
+                phase: ItemPhase::Early,
+                avg_time_mins: 8.5,
+                match_count: 600,
+                win_count: 320,
+            },
+            HeroItemStat {
+                item_id: truesight_core::domain::ItemId(180),
+                phase: ItemPhase::Early,
+                avg_time_mins: 8.5,
+                match_count: 500,
+                win_count: 265,
+            },
+            HeroItemStat {
+                item_id: truesight_core::domain::ItemId(214),
+                phase: ItemPhase::Early,
+                avg_time_mins: 8.5,
+                match_count: 450,
+                win_count: 238,
+            },
+            HeroItemStat {
+                item_id: truesight_core::domain::ItemId(166),
+                phase: ItemPhase::Core,
+                avg_time_mins: 15.0,
+                match_count: 880,
+                win_count: 480,
+            },
+            HeroItemStat {
+                item_id: truesight_core::domain::ItemId(147),
+                phase: ItemPhase::Core,
+                avg_time_mins: 21.0,
+                match_count: 840,
+                win_count: 470,
+            },
+            HeroItemStat {
+                item_id: truesight_core::domain::ItemId(158),
+                phase: ItemPhase::Late,
+                avg_time_mins: 26.0,
+                match_count: 760,
+                win_count: 440,
+            },
+            HeroItemStat {
+                item_id: truesight_core::domain::ItemId(139),
+                phase: ItemPhase::Late,
+                avg_time_mins: 28.5,
+                match_count: 690,
+                win_count: 405,
+            },
+            HeroItemStat {
+                item_id: truesight_core::domain::ItemId(160),
+                phase: ItemPhase::Late,
+                avg_time_mins: 31.0,
+                match_count: 620,
+                win_count: 370,
+            },
+            HeroItemStat {
+                item_id: truesight_core::domain::ItemId(141),
+                phase: ItemPhase::Late,
+                avg_time_mins: 33.5,
+                match_count: 580,
+                win_count: 350,
+            },
+            // Extra Late candidates attaching as 3+ variants under Late primaries.
+            HeroItemStat {
+                item_id: truesight_core::domain::ItemId(156),
+                phase: ItemPhase::Late,
+                avg_time_mins: 35.0,
+                match_count: 540,
+                win_count: 325,
+            },
+            HeroItemStat {
+                item_id: truesight_core::domain::ItemId(135),
+                phase: ItemPhase::Late,
+                avg_time_mins: 36.0,
+                match_count: 500,
+                win_count: 300,
+            },
+            HeroItemStat {
+                item_id: truesight_core::domain::ItemId(116),
+                phase: ItemPhase::Late,
+                avg_time_mins: 27.0,
+                match_count: 490,
+                win_count: 295,
+            },
+        ],
+    ));
+    repo
+}
+
+#[test]
+fn paint_item_icon_fallback_draws_monogram_when_texture_is_absent() {
+    use super::theme::{P_LINE, item_monogram, paint_item_icon_with_fallback};
+
+    assert_eq!(item_monogram("Sabatons of Mordiggian"), "SM");
+    assert_eq!(item_monogram("Blink"), "BL");
+    assert_eq!(item_monogram("#1999"), "19");
+    assert_eq!(item_monogram("Ristul's Devotion"), "RD");
+
+    let ctx = egui::Context::default();
+    let out = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(120.0, 80.0))),
+            ..Default::default()
+        },
+        |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let (rect, _) = ui.allocate_exact_size(vec2(36.0, 26.0), egui::Sense::hover());
+                paint_item_icon_with_fallback(
+                    ui.painter(),
+                    rect,
+                    None,
+                    Some("Sabatons of Mordiggian"),
+                    P_LINE,
+                    false,
+                );
+            });
+        },
+    );
+
+    let mut texts = Vec::new();
+    for c in &out.shapes {
+        collect_painted_texts(&c.shape, &mut texts);
+    }
+    assert!(
+        texts.iter().any(|t| t == "SM"),
+        "missing texture must render uppercase monogram 'SM': {texts:?}"
+    );
+}
+
+#[test]
+fn build_bar_renders_four_late_items_in_2x2_grid_on_desktop() {
+    let mut session = AppSession::new().unwrap();
+    assert!(execute_command(&mut session, "ally 1 faceless void").unwrap());
+    session.item_repo = make_four_late_steps_mock_repo();
+    session.toggle_post_draft_build_view();
+
+    let mut app = TrueSightGuiApp::new(session, None, None);
+    app.onboarding_open = false;
+    let ctx = egui::Context::default();
+    let out = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(920.0, 420.0))),
+            ..Default::default()
+        },
+        |ctx| {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE)
+                .show(ctx, |ui| {
+                    let _ = app.render_item_build_card(ui);
+                });
+        },
+    );
+
+    let mut texts = Vec::new();
+    for c in &out.shapes {
+        collect_painted_texts(&c.shape, &mut texts);
+    }
+    for name in ["Mjollnir", "Butterfly", "Eye of Skadi", "Daedalus"] {
+        assert!(
+            texts.iter().any(|t| t == name),
+            "2x2 Late grid must render '{name}': {texts:?}"
+        );
+    }
+
+    let rect_of = |label: &str| {
+        let mut rects = Vec::new();
+        for c in &out.shapes {
+            find_all_painted_text_rects(&c.shape, label, &mut rects);
+        }
+        rects.into_iter().next().expect(label)
+    };
+    let r_mjollnir = rect_of("Mjollnir");
+    let r_butter = rect_of("Butterfly");
+    let r_skadi = rect_of("Eye of Skadi");
+    let r_daed = rect_of("Daedalus");
+
+    // Items 0 & 1 occupy row 1 cleanly side by side; items 2 & 3 sit below on row 2.
+    assert!(
+        (r_mjollnir.min.y - r_butter.min.y).abs() < 4.0 && r_butter.min.x > r_mjollnir.max.x,
+        "Mjollnir ({r_mjollnir:?}) and Butterfly ({r_butter:?}) must share Late row 1"
+    );
+    assert!(
+        r_skadi.min.y > r_mjollnir.max.y + 8.0 && (r_skadi.min.y - r_daed.min.y).abs() < 4.0,
+        "Eye of Skadi ({r_skadi:?}) and Daedalus ({r_daed:?}) must share Late row 2 below row 1"
+    );
+}
+
+#[test]
+fn overlay_build_switches_late_between_4x1_wide_and_2x2_tall_and_wraps_three_variants() {
+    use super::overlay_build::{max_overlay_variant_rows, select_overlay_late_grid_2x2};
+
+    // Pure geometry switch checks
+    assert!(!select_overlay_late_grid_2x2(548.0, 90.0, 4));
+    assert!(select_overlay_late_grid_2x2(408.0, 204.0, 4));
+    assert!(max_overlay_variant_rows(90.0, 32.0, 15.0) >= 2);
+
+    let mut session = AppSession::new().unwrap();
+    assert!(execute_command(&mut session, "ally 1 faceless void").unwrap());
+    session.item_repo = make_four_late_steps_mock_repo();
+    session.overlay_mode = true;
+    session.toggle_post_draft_build_view();
+
+    let build = session.compute_recommended_build().unwrap();
+    let max_vars = build
+        .steps
+        .iter()
+        .map(|s| s.variants.len())
+        .max()
+        .unwrap_or(0);
+    assert!(
+        max_vars >= 3,
+        "fixture build should have a step with 3 variants for wrap check: {:?}",
+        build.steps
+    );
+
+    let mut app = TrueSightGuiApp::new(session, None, None);
+    app.onboarding_open = false;
+    let ctx = egui::Context::default();
+
+    let collect_late_timing_rects = |full: &egui::FullOutput| {
+        let mut out = Vec::new();
+        for t in ["26m", "29m", "31m", "34m"] {
+            let mut rects = Vec::new();
+            for c in &full.shapes {
+                find_all_painted_text_rects(&c.shape, t, &mut rects);
+            }
+            out.push((t, rects));
+        }
+        out
+    };
+
+    // 1. Wide/low 560x145 -> 4x1 horizontal Late row (all 4 share similar Y).
+    let wide_vp = vec2(560.0, 145.0);
+    let wide_out = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), wide_vp)),
+            ..Default::default()
+        },
+        |vctx| {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE)
+                .show(vctx, |ui| {
+                    let _ = app.render_overlay_panel(ui);
+                });
+        },
+    );
+    let wide_pills = collect_late_timing_rects(&wide_out);
+    assert!(
+        wide_pills.iter().all(|(_, r)| !r.is_empty()),
+        "4x1 wide overlay must paint all 4 Late timing pills: {wide_pills:?}"
+    );
+    let y0 = wide_pills[0].1[0].min.y;
+    for (lbl, rects) in &wide_pills {
+        assert!(
+            (rects[0].min.y - y0).abs() < 4.0,
+            "4x1 wide overlay must keep Late item '{lbl}' on one row (y0={y0}, got={:?})",
+            rects[0]
+        );
+    }
+
+    // 2. Taller/compact 420x270 -> 2x2 Late grid + >= 2 variant rows (>= 3 variant icons rendered).
+    let tall_vp = vec2(420.0, 270.0);
+    let tall_out = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), tall_vp)),
+            ..Default::default()
+        },
+        |vctx| {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE)
+                .show(vctx, |ui| {
+                    let _ = app.render_overlay_panel(ui);
+                });
+        },
+    );
+    let tall_pills = collect_late_timing_rects(&tall_out);
+    let row1_y = tall_pills[0].1[0].min.y.min(tall_pills[1].1[0].min.y);
+    let row2_y = tall_pills[2].1[0].min.y.min(tall_pills[3].1[0].min.y);
+    assert!(
+        row2_y > row1_y + 18.0,
+        "2x2 tall overlay must place items 3-4 below items 1-2: {tall_pills:?}"
+    );
+    fn count_build_textures(shape: &egui::epaint::Shape) -> usize {
+        match shape {
+            egui::epaint::Shape::Mesh(m)
+                if !matches!(m.texture_id, egui::TextureId::Managed(0)) =>
+            {
+                1
+            }
+            egui::epaint::Shape::Vec(v) => v.iter().map(count_build_textures).sum(),
+            _ => 0,
+        }
+    }
+
+    // Count item texture meshes across overlay: 1 starting + 8 primaries + 3 variants = 12+ textures
+    // (previously capped at 1 + 6 + 2 = 9).
+    let tex_count: usize = tall_out
+        .shapes
+        .iter()
+        .map(|c| count_build_textures(&c.shape))
+        .sum();
+    assert!(
+        tex_count >= 12,
+        "expanded tall overlay must render all 8 primaries + >=3 multi-row variants (+starting), got {tex_count} textures"
+    );
+}
+
+#[test]
+fn build_bar_and_overlay_label_blessing_upgrade_and_highlight_child_when_scepter_owned() {
+    use super::build_bar::variant_chip_label_and_highlight;
+    use truesight_adapters::item_repo::SeededItemMetaRepository;
+    use truesight_core::domain::{HeroItemStat, ItemCatalogEntry, ItemId, ItemPhase};
+
+    assert_eq!(
+        variant_chip_label_and_highlight("Eye of Skadi", false, true, false),
+        ("Eye of Skadi".to_string(), false)
+    );
+    assert_eq!(
+        variant_chip_label_and_highlight("Aghanim's Blessing", true, false, false),
+        ("UPG · Aghanim's Blessing".to_string(), false)
+    );
+    assert_eq!(
+        variant_chip_label_and_highlight("Aghanim's Blessing", true, true, false),
+        ("UPG READY · Aghanim's Blessing".to_string(), true)
+    );
+
+    let make_repo = || SeededItemMetaRepository {
+        custom_catalog: vec![
+            ItemCatalogEntry {
+                id: ItemId(214),
+                slug: "tranquil_boots".into(),
+                display_name: "Tranquil Boots".into(),
+                cost: 900,
+                components: vec![],
+                is_recipe: false,
+                is_consumable_drop: false,
+            },
+            ItemCatalogEntry {
+                id: ItemId(108),
+                slug: "ultimate_scepter".into(),
+                display_name: "Aghanim's Scepter".into(),
+                cost: 4200,
+                components: vec![ItemId(60), ItemId(23), ItemId(21), ItemId(22)],
+                is_recipe: false,
+                is_consumable_drop: false,
+            },
+            ItemCatalogEntry {
+                id: ItemId(271),
+                slug: "ultimate_scepter_2".into(),
+                display_name: "Aghanim's Blessing".into(),
+                cost: 5800,
+                components: vec![ItemId(108)],
+                is_recipe: false,
+                is_consumable_drop: false,
+            },
+            ItemCatalogEntry {
+                id: ItemId(256),
+                slug: "aeon_disk".into(),
+                display_name: "Aeon Disk".into(),
+                cost: 3000,
+                components: vec![],
+                is_recipe: false,
+                is_consumable_drop: false,
+            },
+        ],
+        custom_hero_stats: vec![(
+            HeroId(5),
+            None,
+            None,
+            vec![
+                HeroItemStat {
+                    item_id: ItemId(214),
+                    phase: ItemPhase::Early,
+                    avg_time_mins: 8.0,
+                    match_count: 1800,
+                    win_count: 940,
+                },
+                HeroItemStat {
+                    item_id: ItemId(108),
+                    phase: ItemPhase::Late,
+                    avg_time_mins: 32.0,
+                    match_count: 1000,
+                    win_count: 520,
+                },
+                HeroItemStat {
+                    item_id: ItemId(271),
+                    phase: ItemPhase::Late,
+                    avg_time_mins: 48.0,
+                    match_count: 300,
+                    win_count: 222,
+                },
+                HeroItemStat {
+                    item_id: ItemId(256),
+                    phase: ItemPhase::Late,
+                    avg_time_mins: 36.0,
+                    match_count: 900,
+                    win_count: 500,
+                },
+            ],
+        )],
+        ..Default::default()
+    };
+
+    let render_texts = |owned_scepter: bool| {
+        let mut session = AppSession::new().unwrap();
+        assert!(execute_command(&mut session, "ally 5 crystal maiden").unwrap());
+        session.local_player_hero = Some(HeroId(5));
+        session.owned_items_owner = Some(HeroId(5));
+        session.item_repo = make_repo();
+        session.owned_items = if owned_scepter {
+            vec![ItemId(214), ItemId(108)]
+        } else {
+            vec![ItemId(214)]
+        };
+        session.toggle_post_draft_build_view();
+
+        let mut app = TrueSightGuiApp::new(session, None, None);
+        app.onboarding_open = false;
+        let ctx = egui::Context::default();
+        let desk_out = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(920.0, 420.0))),
+                ..Default::default()
+            },
+            |vctx| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(vctx, |ui| {
+                        let _ = app.render_item_build_card(ui);
+                    });
+            },
+        );
+        let mut desk_texts = Vec::new();
+        for c in &desk_out.shapes {
+            collect_painted_texts(&c.shape, &mut desk_texts);
+        }
+
+        app.session.overlay_mode = true;
+        let ovl_out = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(520.0, 240.0))),
+                ..Default::default()
+            },
+            |vctx| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(vctx, |ui| {
+                        let _ = app.render_overlay_panel(ui);
+                    });
+            },
+        );
+        let mut ovl_texts = Vec::new();
+        for c in &ovl_out.shapes {
+            collect_painted_texts(&c.shape, &mut ovl_texts);
+        }
+        (desk_texts, ovl_texts)
+    };
+
+    let (desk_unowned, ovl_unowned) = render_texts(false);
+    assert!(
+        desk_unowned.iter().any(|t| t == "UPG · Aghanim's Blessing"),
+        "desktop build bar must label Blessing as an upgrade before Scepter is owned: {desk_unowned:?}"
+    );
+    assert!(
+        ovl_unowned.iter().any(|t| t == "UPG"),
+        "overlay child upgrade must display micro UPG badge: {ovl_unowned:?}"
+    );
+
+    let (desk_owned, ovl_owned) = render_texts(true);
+    assert!(
+        desk_owned
+            .iter()
+            .any(|t| t == "UPG READY · Aghanim's Blessing"),
+        "desktop build bar must highlight Blessing upgrade availability below owned Scepter: {desk_owned:?}"
+    );
+    assert!(
+        desk_owned.iter().filter(|t| t.as_str() == "OK").count() >= 2,
+        "owned Tranquil Boots + owned Scepter cards must remain marked OK: {desk_owned:?}"
+    );
+    assert!(
+        ovl_owned.iter().any(|t| t == "UPG"),
+        "overlay must continue labeling Blessing child tile when Scepter is owned: {ovl_owned:?}"
+    );
+}
+
+#[test]
+fn direct_upgrade_chip_in_build_bar_and_overlay_is_informational_and_preserves_owned_scepter() {
+    use truesight_adapters::item_repo::SeededItemMetaRepository;
+    use truesight_core::domain::{HeroItemStat, ItemCatalogEntry, ItemId, ItemPhase};
+    use truesight_core::ports::DraftEvent;
+
+    let mut session = AppSession::new().unwrap();
+    assert!(execute_command(&mut session, "ally 5 crystal maiden").unwrap());
+    session.local_player_hero = Some(HeroId(5));
+    session.item_repo = SeededItemMetaRepository {
+        custom_catalog: vec![
+            ItemCatalogEntry {
+                id: ItemId(214),
+                slug: "tranquil_boots".into(),
+                display_name: "Tranquil Boots".into(),
+                cost: 900,
+                components: vec![],
+                is_recipe: false,
+                is_consumable_drop: false,
+            },
+            ItemCatalogEntry {
+                id: ItemId(180),
+                slug: "arcane_boots".into(),
+                display_name: "Arcane Boots".into(),
+                cost: 1400,
+                components: vec![],
+                is_recipe: false,
+                is_consumable_drop: false,
+            },
+            ItemCatalogEntry {
+                id: ItemId(108),
+                slug: "ultimate_scepter".into(),
+                display_name: "Aghanim's Scepter".into(),
+                cost: 4200,
+                components: vec![ItemId(60), ItemId(23), ItemId(21), ItemId(22)],
+                is_recipe: false,
+                is_consumable_drop: false,
+            },
+            ItemCatalogEntry {
+                id: ItemId(271),
+                slug: "ultimate_scepter_2".into(),
+                display_name: "Aghanim's Blessing".into(),
+                cost: 5800,
+                components: vec![ItemId(108)],
+                is_recipe: false,
+                is_consumable_drop: false,
+            },
+            ItemCatalogEntry {
+                id: ItemId(256),
+                slug: "aeon_disk".into(),
+                display_name: "Aeon Disk".into(),
+                cost: 3000,
+                components: vec![],
+                is_recipe: false,
+                is_consumable_drop: false,
+            },
+        ],
+        custom_hero_stats: vec![(
+            HeroId(5),
+            None,
+            None,
+            vec![
+                HeroItemStat {
+                    item_id: ItemId(214),
+                    phase: ItemPhase::Early,
+                    avg_time_mins: 8.0,
+                    match_count: 1800,
+                    win_count: 940,
+                },
+                HeroItemStat {
+                    item_id: ItemId(180),
+                    phase: ItemPhase::Early,
+                    avg_time_mins: 9.0,
+                    match_count: 1600,
+                    win_count: 830,
+                },
+                HeroItemStat {
+                    item_id: ItemId(108),
+                    phase: ItemPhase::Late,
+                    avg_time_mins: 32.0,
+                    match_count: 1000,
+                    win_count: 520,
+                },
+                HeroItemStat {
+                    item_id: ItemId(271),
+                    phase: ItemPhase::Late,
+                    avg_time_mins: 48.0,
+                    match_count: 300,
+                    win_count: 222,
+                },
+                HeroItemStat {
+                    item_id: ItemId(256),
+                    phase: ItemPhase::Late,
+                    avg_time_mins: 36.0,
+                    match_count: 900,
+                    win_count: 500,
+                },
+            ],
+        )],
+        ..Default::default()
+    };
+    session.apply_event(DraftEvent::InventoryUpdated {
+        hero_slug: Some("npc_dota_hero_crystal_maiden".into()),
+        item_slugs: vec!["item_tranquil_boots".into(), "item_ultimate_scepter".into()],
+    });
+    session.toggle_post_draft_build_view();
+
+    let mut app = TrueSightGuiApp::new(session, None, None);
+    app.onboarding_open = false;
+
+    let ctx = egui::Context::default();
+    let desk_vp = vec2(920.0, 420.0);
+    let run_desktop = |app: &mut TrueSightGuiApp, events: Vec<egui::Event>| {
+        ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), desk_vp)),
+                events,
+                ..Default::default()
+            },
+            |vctx| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(vctx, |ui| {
+                        let _ = app.render_item_build_card(ui);
+                    });
+            },
+        )
+    };
+
+    // Pass 1: locate the desktop `UPG READY · Aghanim's Blessing` chip and `Arcane Boots` chip.
+    let desk_init = run_desktop(&mut app, Vec::new());
+    let mut upg_rects = Vec::new();
+    let mut arcane_rects = Vec::new();
+    for c in &desk_init.shapes {
+        find_all_painted_text_rects(&c.shape, "UPG READY · Aghanim's Blessing", &mut upg_rects);
+        find_all_painted_text_rects(&c.shape, "Arcane Boots", &mut arcane_rects);
+    }
+    let upg_center = upg_rects
+        .first()
+        .expect("desktop build bar must render UPG READY · Aghanim's Blessing chip")
+        .center();
+    let arcane_center = arcane_rects
+        .first()
+        .expect("desktop build bar must render Arcane Boots alternative chip")
+        .center();
+
+    // Pass 2: click the desktop `UPG READY · Aghanim's Blessing` chip -> Scepter stays owned primary!
+    for pressed in [true, false] {
+        let _ = run_desktop(
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(upg_center),
+                egui::Event::PointerButton {
+                    pos: upg_center,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+    }
+    let after_desk_upg = app.session.compute_recommended_build().unwrap();
+    let desk_scepter = after_desk_upg
+        .steps
+        .iter()
+        .find(|s| s.item_id == ItemId(108))
+        .expect("clicking UPG READY chip in desktop build bar must preserve owned Scepter primary");
+    assert!(desk_scepter.owned);
+    assert_eq!(
+        desk_scepter.variants.first().map(|v| v.item_id),
+        Some(ItemId(271))
+    );
+    assert_eq!(
+        after_desk_upg
+            .next_unowned_index
+            .map(|idx| after_desk_upg.steps[idx].item_id),
+        Some(ItemId(256)),
+        "clicking UPG READY chip must keep NEXT on Aeon Disk"
+    );
+
+    // Pass 3: click the `UPG` micro tile in the overlay -> owned Scepter & NEXT stay unchanged!
+    app.session.overlay_mode = true;
+    let ovl_vp = vec2(520.0, 240.0);
+    let run_overlay = |app: &mut TrueSightGuiApp, events: Vec<egui::Event>| {
+        ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), ovl_vp)),
+                events,
+                ..Default::default()
+            },
+            |vctx| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(vctx, |ui| {
+                        let _ = app.render_overlay_panel(ui);
+                    });
+            },
+        )
+    };
+    let ovl_init = run_overlay(&mut app, Vec::new());
+    let mut ovl_upg_rects = Vec::new();
+    for c in &ovl_init.shapes {
+        find_all_painted_text_rects(&c.shape, "UPG", &mut ovl_upg_rects);
+    }
+    let ovl_upg_center = ovl_upg_rects
+        .first()
+        .expect("overlay must paint UPG pill over Blessing child tile")
+        .center();
+    for pressed in [true, false] {
+        let _ = run_overlay(
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(ovl_upg_center),
+                egui::Event::PointerButton {
+                    pos: ovl_upg_center,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+    }
+    let after_ovl_upg = app.session.compute_recommended_build().unwrap();
+    let ovl_scepter = after_ovl_upg
+        .steps
+        .iter()
+        .find(|s| s.item_id == ItemId(108))
+        .expect("clicking UPG tile in overlay must preserve owned Scepter primary");
+    assert!(ovl_scepter.owned);
+    assert_eq!(
+        after_ovl_upg
+            .next_unowned_index
+            .map(|idx| after_ovl_upg.steps[idx].item_id),
+        Some(ItemId(256))
+    );
+
+    // Pass 4: clicking ordinary alternative `Arcane Boots` in desktop build bar still swaps cleanly!
+    app.session.overlay_mode = false;
+    let _ = run_desktop(&mut app, Vec::new());
+    for pressed in [true, false] {
+        let _ = run_desktop(
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(arcane_center),
+                egui::Event::PointerButton {
+                    pos: arcane_center,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+    }
+    let after_alt_click = app.session.compute_recommended_build().unwrap();
+    assert!(
+        after_alt_click
+            .steps
+            .iter()
+            .any(|s| s.item_id == ItemId(180)),
+        "clicking ordinary alternative chip (Arcane Boots) must still swap into primary slot: {:?}",
+        after_alt_click.steps
+    );
+}

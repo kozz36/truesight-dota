@@ -11,6 +11,21 @@ pub(super) struct BuildBarRenderOutput {
     pub(super) card: Rect,
 }
 
+pub(super) fn variant_chip_label_and_highlight(
+    var_name: &str,
+    is_direct_upgrade: bool,
+    parent_owned: bool,
+    var_owned: bool,
+) -> (String, bool) {
+    if !is_direct_upgrade {
+        (var_name.to_string(), false)
+    } else if parent_owned && !var_owned {
+        (format!("UPG READY · {var_name}"), true)
+    } else {
+        (format!("UPG · {var_name}"), false)
+    }
+}
+
 fn format_game_clock(secs: i32) -> String {
     let abs = secs.unsigned_abs();
     let mins = abs / 60;
@@ -43,6 +58,170 @@ fn format_phase_timing_window(steps: &[(usize, &BuildStep)]) -> String {
 }
 
 impl TrueSightGuiApp {
+    fn render_build_step_card(
+        &self,
+        ui: &mut egui::Ui,
+        step: &BuildStep,
+        is_next: bool,
+        clicked_variant: &mut Option<(ItemId, ItemId)>,
+    ) {
+        let border_color = if step.owned {
+            P_GEM_DEEP
+        } else if is_next {
+            P_GEM
+        } else {
+            P_LINE
+        };
+        let fill_color = if step.owned { P_INDIGO_1 } else { P_INDIGO_2 };
+        let (name, cost) = self
+            .session
+            .item_repo
+            .item_catalog(step.item_id)
+            .map(|e| (e.display_name, e.cost))
+            .unwrap_or_else(|| (format!("Item #{}", step.item_id.0), 0));
+        let step_tex = self.textures.items.get(&step.item_id);
+
+        egui::Frame::NONE
+            .fill(fill_color)
+            .stroke(Stroke::new(
+                if is_next { 1.5_f32 } else { 1.0_f32 },
+                border_color,
+            ))
+            .inner_margin(Margin::symmetric(5, 3))
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!("~{:.0}m", step.avg_time_mins))
+                            .size(8.5)
+                            .color(P_MUTED),
+                    );
+                    if step.owned {
+                        paint_mini_badge_scaled(ui, "OK", P_GEM, P_GEM_DEEP, 8.0, 3);
+                    } else if is_next {
+                        paint_mini_badge_scaled(ui, "NEXT", P_GEM, P_GEM, 8.0, 3);
+                    } else if step.owned_components > 0 {
+                        paint_mini_badge_scaled(
+                            ui,
+                            &format!("{}/{}", step.owned_components, step.total_components),
+                            P_CYAN,
+                            P_LINE,
+                            8.0,
+                            3,
+                        );
+                    }
+                    if let Some(tr) = step.counter_trait {
+                        ui.label(
+                            RichText::new(format!("CNT: {}", tr.label()))
+                                .size(8.0)
+                                .strong()
+                                .color(P_NEUTRAL),
+                        );
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    paint_item_icon_named(
+                        ui,
+                        step_tex,
+                        Some(name.as_str()),
+                        vec2(32.0, 24.0),
+                        border_color,
+                        step.owned,
+                    );
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 1.0;
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(&name)
+                                    .size(10.0)
+                                    .strong()
+                                    .color(if step.owned { P_MUTED } else { P_GLINT }),
+                            )
+                            .truncate(),
+                        );
+                        ui.label(RichText::new(format!("{cost}g")).size(9.0).color(P_MUTED));
+                    });
+                });
+            });
+
+        if !step.variants.is_empty() {
+            let owned_items = self.session.active_build_owned_items();
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(4.0, 3.0);
+                for var in &step.variants {
+                    let var_entry = self.session.item_repo.item_catalog(var.item_id);
+                    let is_direct_upgrade = var_entry
+                        .as_ref()
+                        .is_some_and(|e| e.components.contains(&step.item_id));
+                    let var_name = var_entry
+                        .map(|e| e.display_name)
+                        .unwrap_or_else(|| format!("Item #{}", var.item_id.0));
+                    let var_owned = owned_items.contains(&var.item_id);
+                    let (chip_label, highlight) = variant_chip_label_and_highlight(
+                        &var_name,
+                        is_direct_upgrade,
+                        step.owned,
+                        var_owned,
+                    );
+                    let var_img = self
+                        .textures
+                        .items
+                        .get(&var.item_id)
+                        .map(|t| egui::Image::new((t.id(), vec2(18.0, 13.0))));
+                    let chip_stroke = if highlight {
+                        Stroke::new(1.5_f32, P_CYAN)
+                    } else {
+                        Stroke::new(1.0_f32, P_LINE)
+                    };
+                    let chip_text_col = if highlight { P_GLINT } else { P_SILVER };
+                    let var_btn = egui::Button::opt_image_and_text(
+                        var_img,
+                        Some(
+                            RichText::new(chip_label)
+                                .size(9.0)
+                                .color(chip_text_col)
+                                .into(),
+                        ),
+                    )
+                    .fill(P_INDIGO_2)
+                    .stroke(chip_stroke)
+                    .sense(if is_direct_upgrade {
+                        Sense::hover()
+                    } else {
+                        Sense::click()
+                    });
+                    let trait_note = var
+                        .counter_trait
+                        .map(|t| format!(" | CNT: {}", t.label()))
+                        .unwrap_or_default();
+                    let hover = if highlight {
+                        format!(
+                            "Upgrade available ({var_name}) · ~{:.0}m{trait_note}",
+                            var.avg_time_mins
+                        )
+                    } else if is_direct_upgrade {
+                        format!(
+                            "Upgrade ({var_name}, score {:.2}, ~{:.0}m{trait_note})",
+                            var.score, var.avg_time_mins
+                        )
+                    } else {
+                        format!(
+                            "Swap into primary slot (score {:.2}, ~{:.0}m{trait_note})",
+                            var.score, var.avg_time_mins
+                        )
+                    };
+                    let var_resp = ui.add(var_btn).on_hover_text(hover);
+                    if !is_direct_upgrade && var_resp.clicked() {
+                        *clicked_variant = Some((step.item_id, var.item_id));
+                    }
+                }
+            });
+        }
+    }
+
+    #[expect(clippy::too_many_arguments)]
     fn render_phase_column(
         &self,
         ui: &mut egui::Ui,
@@ -50,6 +229,7 @@ impl TrueSightGuiApp {
         col_w: f32,
         steps: &[(usize, &BuildStep)],
         next_unowned_index: Option<usize>,
+        two_col_grid: bool,
         clicked_variant: &mut Option<(ItemId, ItemId)>,
     ) {
         let timing_summary = format_phase_timing_window(steps);
@@ -79,141 +259,41 @@ impl TrueSightGuiApp {
                             return;
                         }
 
-                        for &(idx, step) in steps {
-                            let is_next = next_unowned_index == Some(idx);
-                            let border_color = if step.owned {
-                                P_GEM_DEEP
-                            } else if is_next {
-                                P_GEM
-                            } else {
-                                P_LINE
-                            };
-                            let fill_color = if step.owned { P_INDIGO_1 } else { P_INDIGO_2 };
-                            let (name, cost) = self
-                                .session
-                                .item_repo
-                                .item_catalog(step.item_id)
-                                .map(|e| (e.display_name, e.cost))
-                                .unwrap_or_else(|| (format!("Item #{}", step.item_id.0), 0));
-                            let step_tex = self.textures.items.get(&step.item_id);
-
-                            egui::Frame::NONE
-                                .fill(fill_color)
-                                .stroke(Stroke::new(
-                                    if is_next { 1.5_f32 } else { 1.0_f32 },
-                                    border_color,
-                                ))
-                                .inner_margin(Margin::symmetric(5, 3))
-                                .show(ui, |ui| {
-                                    ui.set_min_width(ui.available_width());
-                                    ui.horizontal(|ui| {
-                                        ui.label(
-                                            RichText::new(format!("~{:.0}m", step.avg_time_mins))
-                                                .size(8.5)
-                                                .color(P_MUTED),
+                        if two_col_grid && steps.len() >= 3 && inner_w >= 210.0 {
+                            let tile_gap = 6.0_f32;
+                            let cell_w = ((inner_w - tile_gap) / 2.0).floor().max(95.0);
+                            for row in steps.chunks(2) {
+                                ui.horizontal_top(|ui| {
+                                    ui.spacing_mut().item_spacing.x = tile_gap;
+                                    for &(idx, step) in row {
+                                        ui.allocate_ui_with_layout(
+                                            vec2(cell_w, 0.0),
+                                            Layout::top_down(Align::Min),
+                                            |ui| {
+                                                ui.set_min_width(cell_w);
+                                                ui.set_max_width(cell_w);
+                                                self.render_build_step_card(
+                                                    ui,
+                                                    step,
+                                                    next_unowned_index == Some(idx),
+                                                    clicked_variant,
+                                                );
+                                            },
                                         );
-                                        if step.owned {
-                                            paint_mini_badge_scaled(
-                                                ui, "OK", P_GEM, P_GEM_DEEP, 8.0, 3,
-                                            );
-                                        } else if is_next {
-                                            paint_mini_badge_scaled(
-                                                ui, "NEXT", P_GEM, P_GEM, 8.0, 3,
-                                            );
-                                        } else if step.owned_components > 0 {
-                                            paint_mini_badge_scaled(
-                                                ui,
-                                                &format!(
-                                                    "{}/{}",
-                                                    step.owned_components, step.total_components
-                                                ),
-                                                P_CYAN,
-                                                P_LINE,
-                                                8.0,
-                                                3,
-                                            );
-                                        }
-                                        if let Some(tr) = step.counter_trait {
-                                            ui.label(
-                                                RichText::new(format!("CNT: {}", tr.label()))
-                                                    .size(8.0)
-                                                    .strong()
-                                                    .color(P_NEUTRAL),
-                                            );
-                                        }
-                                    });
-
-                                    ui.horizontal(|ui| {
-                                        ui.spacing_mut().item_spacing.x = 6.0;
-                                        paint_item_icon(
-                                            ui,
-                                            step_tex,
-                                            vec2(32.0, 24.0),
-                                            border_color,
-                                            step.owned,
-                                        );
-                                        ui.vertical(|ui| {
-                                            ui.spacing_mut().item_spacing.y = 1.0;
-                                            ui.add(
-                                                egui::Label::new(
-                                                    RichText::new(name).size(10.0).strong().color(
-                                                        if step.owned { P_MUTED } else { P_GLINT },
-                                                    ),
-                                                )
-                                                .truncate(),
-                                            );
-                                            ui.label(
-                                                RichText::new(format!("{cost}g"))
-                                                    .size(9.0)
-                                                    .color(P_MUTED),
-                                            );
-                                        });
-                                    });
-                                });
-
-                            if !step.variants.is_empty() {
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.spacing_mut().item_spacing = vec2(4.0, 3.0);
-                                    for var in &step.variants {
-                                        let var_name = self
-                                            .session
-                                            .item_repo
-                                            .item_catalog(var.item_id)
-                                            .map(|e| e.display_name)
-                                            .unwrap_or_else(|| format!("Item #{}", var.item_id.0));
-                                        let var_img =
-                                            self.textures.items.get(&var.item_id).map(|t| {
-                                                egui::Image::new((t.id(), vec2(18.0, 13.0)))
-                                            });
-                                        let var_btn = egui::Button::opt_image_and_text(
-                                            var_img,
-                                            Some(
-                                                RichText::new(var_name)
-                                                    .size(9.0)
-                                                    .color(P_SILVER)
-                                                    .into(),
-                                            ),
-                                        )
-                                        .fill(P_INDIGO_2)
-                                        .stroke(Stroke::new(1.0_f32, P_LINE));
-                                        let trait_note = var
-                                            .counter_trait
-                                            .map(|t| format!(" | CNT: {}", t.label()))
-                                            .unwrap_or_default();
-                                        if ui
-                                            .add(var_btn)
-                                            .on_hover_text(format!(
-                                                "Swap into primary slot (score {:.2}, ~{:.0}m{})",
-                                                var.score, var.avg_time_mins, trait_note
-                                            ))
-                                            .clicked()
-                                        {
-                                            *clicked_variant = Some((step.item_id, var.item_id));
-                                        }
                                     }
                                 });
+                                ui.add_space(4.0);
                             }
-                            ui.add_space(4.0);
+                        } else {
+                            for &(idx, step) in steps {
+                                self.render_build_step_card(
+                                    ui,
+                                    step,
+                                    next_unowned_index == Some(idx),
+                                    clicked_variant,
+                                );
+                                ui.add_space(4.0);
+                            }
                         }
                     },
                 );
@@ -276,9 +356,10 @@ impl TrueSightGuiApp {
                                     .show(ui, |ui| {
                                         ui.horizontal(|ui| {
                                             ui.spacing_mut().item_spacing.x = 5.0;
-                                            paint_item_icon(
+                                            paint_item_icon_named(
                                                 ui,
                                                 opt_tex,
+                                                Some(name.as_str()),
                                                 vec2(28.0, 20.0),
                                                 border,
                                                 opt.owned,
@@ -465,9 +546,10 @@ impl TrueSightGuiApp {
                                     .show(ui, |ui| {
                                         ui.horizontal(|ui| {
                                             ui.spacing_mut().item_spacing.x = 4.0;
-                                            paint_item_icon(
+                                            paint_item_icon_named(
                                                 ui,
                                                 tex,
+                                                Some(name.as_str()),
                                                 vec2(22.0, 16.0),
                                                 P_LINE,
                                                 false,
@@ -505,32 +587,45 @@ impl TrueSightGuiApp {
                         .collect();
 
                     let col_gap = 6.0_f32;
+                    let use_late_2x2 = late_steps.len() >= 3;
                     if avail_w >= 520.0 {
-                        let col_w = ((avail_w - 2.0 * col_gap - 4.0) / 3.0).floor().max(120.0);
+                        let usable_w = (avail_w - 2.0 * col_gap - 4.0).max(360.0);
+                        let (early_w, core_w, late_w) = if use_late_2x2 && avail_w >= 560.0 {
+                            let ew = (usable_w * 0.24).floor().max(110.0);
+                            let cw = (usable_w * 0.26).floor().max(115.0);
+                            let lw = (usable_w - ew - cw).floor().max(220.0);
+                            (ew, cw, lw)
+                        } else {
+                            let eq = (usable_w / 3.0).floor().max(120.0);
+                            (eq, eq, eq)
+                        };
                         ui.horizontal_top(|ui| {
                             ui.spacing_mut().item_spacing.x = col_gap;
                             self.render_phase_column(
                                 ui,
                                 tr.phase_early,
-                                col_w,
+                                early_w,
                                 &early_steps,
                                 build.next_unowned_index,
+                                false,
                                 &mut clicked_variant,
                             );
                             self.render_phase_column(
                                 ui,
                                 tr.phase_core,
-                                col_w,
+                                core_w,
                                 &core_steps,
                                 build.next_unowned_index,
+                                false,
                                 &mut clicked_variant,
                             );
                             self.render_phase_column(
                                 ui,
                                 tr.phase_late,
-                                col_w,
+                                late_w,
                                 &late_steps,
                                 build.next_unowned_index,
+                                use_late_2x2,
                                 &mut clicked_variant,
                             );
                         });
@@ -544,6 +639,7 @@ impl TrueSightGuiApp {
                                 two_w,
                                 &early_steps,
                                 build.next_unowned_index,
+                                false,
                                 &mut clicked_variant,
                             );
                             self.render_phase_column(
@@ -552,6 +648,7 @@ impl TrueSightGuiApp {
                                 two_w,
                                 &core_steps,
                                 build.next_unowned_index,
+                                false,
                                 &mut clicked_variant,
                             );
                         });
@@ -562,6 +659,7 @@ impl TrueSightGuiApp {
                             avail_w,
                             &late_steps,
                             build.next_unowned_index,
+                            use_late_2x2,
                             &mut clicked_variant,
                         );
                     } else {
@@ -571,6 +669,7 @@ impl TrueSightGuiApp {
                             avail_w,
                             &early_steps,
                             build.next_unowned_index,
+                            false,
                             &mut clicked_variant,
                         );
                         ui.add_space(4.0);
@@ -580,6 +679,7 @@ impl TrueSightGuiApp {
                             avail_w,
                             &core_steps,
                             build.next_unowned_index,
+                            false,
                             &mut clicked_variant,
                         );
                         ui.add_space(4.0);
@@ -589,6 +689,7 @@ impl TrueSightGuiApp {
                             avail_w,
                             &late_steps,
                             build.next_unowned_index,
+                            use_late_2x2,
                             &mut clicked_variant,
                         );
                     }

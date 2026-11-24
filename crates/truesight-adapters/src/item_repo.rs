@@ -123,7 +123,7 @@ impl ItemMetaRepository for SeededItemMetaRepository {
         bracket: Bracket,
     ) -> Result<Vec<HeroItemStat>, PortError> {
         let scale = bracket_timing_scale(bracket);
-        if let Some((_, _, _, stats)) = self
+        if let Some((_, _, matched_bracket, stats)) = self
             .custom_hero_stats
             .iter()
             .find(|(hid, r, b, _)| *hid == hero_id && *r == Some(role) && *b == Some(bracket))
@@ -135,16 +135,33 @@ impl ItemMetaRepository for SeededItemMetaRepository {
             .or_else(|| {
                 self.custom_hero_stats
                     .iter()
+                    .find(|(hid, r, b, _)| *hid == hero_id && r.is_none() && *b == Some(bracket))
+            })
+            .or_else(|| {
+                self.custom_hero_stats
+                    .iter()
                     .find(|(hid, r, b, _)| *hid == hero_id && r.is_none() && b.is_none())
             })
         {
+            let apply_fallback_scale = matched_bracket.is_none();
             let mut out: Vec<HeroItemStat> = stats
                 .iter()
                 .copied()
                 .filter(|stat| {
                     stat.phase == ItemPhase::Starting
                         || stat.phase == ItemPhase::Situational
-                        || is_valid_timed_progression_item(self, stat.item_id)
+                        || is_valid_timed_progression_item_for_phase(self, stat.item_id, stat.phase)
+                })
+                .map(|mut stat| {
+                    if apply_fallback_scale
+                        && matches!(
+                            stat.phase,
+                            ItemPhase::Early | ItemPhase::Core | ItemPhase::Late
+                        )
+                    {
+                        stat.avg_time_mins = (stat.avg_time_mins * scale).max(1.0);
+                    }
+                    stat
                 })
                 .collect();
             append_counter_situational_candidates(&mut out, role, scale);
@@ -155,18 +172,43 @@ impl ItemMetaRepository for SeededItemMetaRepository {
     }
 }
 
-/// Returns `true` if `item_id` represents a completed build target (or standalone non-combinable
-/// core item such as Blink Dagger, Ghost Scepter, Bottle, or Aghanim's Shard) eligible for
-/// `Early`/`Core`/`Late` progression recommendations rather than raw ingredients or consumables.
-pub(crate) fn is_valid_timed_progression_item(
+/// Returns `true` if `item_id` represents a completed build target, a standalone non-combinable
+/// progression item, or an Early/Core high-value stepping stone (`Ultimate Orb`, `Sacred Relic`,
+/// `Hyperstone`) eligible for `phase` rather than raw cheap stats or consumables.
+pub(crate) fn is_valid_timed_progression_item_for_phase(
     repo: &SeededItemMetaRepository,
     item_id: ItemId,
+    phase: ItemPhase,
 ) -> bool {
-    // Exclude pure intermediate stepping stones (`Oblivion Staff`, `Perseverance`) and all
-    // consumables, wards, smokes, or detection items from timed progression columns.
+    // Exclude basic raw stats/ingredients (`Ogre Axe`, `Blade of Alacrity`, `Oblivion Staff`,
+    // `Perseverance`, `Cornucopia`), consumables, wards, smokes, detection items, and cheap
+    // early aura sub-components (`Buckler`, `Ring of Basilius`, `Headdress`) in Core/Late.
+    if matches!(phase, ItemPhase::Core | ItemPhase::Late) && matches!(item_id.0, 86 | 88 | 94) {
+        return false;
+    }
     if matches!(
         item_id.0,
-        30 | 38 | 39 | 40 | 42 | 43 | 44 | 46 | 67 | 69 | 188 | 216 | 218 | 237 | 1123
+        2..=10
+            | 12..=23
+            | 25..=34
+            | 38..=40
+            | 42..=46
+            | 56..=61
+            | 67
+            | 69
+            | 188
+            | 216
+            | 218
+            | 237
+            | 240
+            | 265
+            | 1122
+            | 1123
+            | 1125
+            | 1575
+            | 1802
+            | 1847..=1849
+            | 1872
     ) {
         return false;
     }
@@ -176,11 +218,22 @@ pub(crate) fn is_valid_timed_progression_item(
     if (entry.cost == 0 && entry.is_consumable_drop) || entry.is_recipe {
         return false;
     }
-    matches!(item_id.0, 1 | 37 | 41 | 609)
+    let allow_high_value_early_core =
+        matches!(phase, ItemPhase::Early | ItemPhase::Core) && matches!(item_id.0, 24 | 54 | 55);
+    allow_high_value_early_core
+        || matches!(item_id.0, 1 | 37 | 41 | 609)
         || !entry.components.is_empty()
         || EMBEDDED_ITEM_CATALOG
             .iter()
             .any(|row| row.id == item_id.0 && !row.components.is_empty())
+}
+
+/// Strict timed progression item check used for untimed/noisy feeds (`Late` strictness).
+pub(crate) fn is_valid_timed_progression_item(
+    repo: &SeededItemMetaRepository,
+    item_id: ItemId,
+) -> bool {
+    is_valid_timed_progression_item_for_phase(repo, item_id, ItemPhase::Late)
 }
 
 fn stat(

@@ -3,6 +3,27 @@ use super::{
     run_cli_loop, spawn_input_reader,
 };
 
+fn wait_for_sync_until<F>(session: &mut AppSession, mut ready: F)
+where
+    F: FnMut() -> bool,
+{
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        session.poll_live_sources(None, None);
+        if !session.sync_in_flight && ready() {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+fn wait_for_sync_idle(session: &mut AppSession) {
+    wait_for_sync_until(session, || true);
+}
+
 #[test]
 fn interactive_commands_update_5v5_table_and_recommendations() {
     use truesight_adapters::sync::LocalCacheManager;
@@ -50,13 +71,7 @@ fn interactive_commands_update_5v5_table_and_recommendations() {
 
     assert!(execute_command(&mut session, "account 76561198061460213").unwrap());
     assert_eq!(session.cache_mgr.player_account_id, Some(101_194_485));
-    for _ in 0..100 {
-        session.poll_live_sources(None, None);
-        if !session.sync_in_flight {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
+    wait_for_sync_idle(&mut session);
     assert!(session.db_status.contains("Player #101194485"));
 
     // Explicit account override must not be overwritten by GSI SteamID
@@ -71,13 +86,7 @@ fn interactive_commands_update_5v5_table_and_recommendations() {
         steam32: 222_333_444,
     });
     assert_eq!(session.cache_mgr.player_account_id, Some(222_333_444));
-    for _ in 0..100 {
-        session.poll_live_sources(None, None);
-        if !session.sync_in_flight {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
+    wait_for_sync_idle(&mut session);
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
 
@@ -306,13 +315,7 @@ fn background_sync_reloads_active_matrix_preserves_model_on_error_and_guards_acc
     session.set_bracket(Bracket::Divine);
     gate_tx.send(()).unwrap();
 
-    for _ in 0..100 {
-        session.poll_live_sources(None, None);
-        if !session.sync_in_flight {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    wait_for_sync_idle(&mut session);
     assert!(!session.sync_in_flight);
     assert_eq!(session.draft.bracket, Bracket::Divine);
     assert!(
@@ -326,13 +329,7 @@ fn background_sync_reloads_active_matrix_preserves_model_on_error_and_guards_acc
 
     // Failed refresh must preserve last valid model and report status clearly
     assert!(session.start_background_sync_with(true, |_, _| Err("network timeout".into())));
-    for _ in 0..100 {
-        session.poll_live_sources(None, None);
-        if !session.sync_in_flight {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    wait_for_sync_idle(&mut session);
     assert!(!session.sync_in_flight);
     assert!(session.matrix.hero(HeroId(1)).unwrap().role_winrates[0] > 0.62);
     assert!(
@@ -1478,13 +1475,7 @@ fn gsi_http_listener_reconciles_full_session_state_after_overflow_when_peer_stop
     );
 
     // Drain any auto-triggered player sync completion before verifying idle poll stability.
-    for _ in 0..100 {
-        if !session.sync_in_flight {
-            break;
-        }
-        let _ = session.poll_live_sources(None, None);
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    wait_for_sync_idle(&mut session);
 
     // 5. Polling again with no traffic must not falsely increment recovered_resyncs
     assert!(!session.poll_live_sources(Some(&mut listener), None));
@@ -1543,13 +1534,7 @@ fn sync_coordinator_serializes_generations_rejects_stale_writes_and_preserves_va
         Ok("Worker 2 newer cache".into())
     }));
 
-    for _ in 0..100 {
-        session.poll_live_sources(None, None);
-        if !session.sync_in_flight {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    wait_for_sync_idle(&mut session);
     assert!(!session.sync_in_flight);
     assert!(session.matrix.hero(HeroId(1)).unwrap().role_winrates[0] > 0.62);
     assert_eq!(session.matrix.hero(HeroId(2)).unwrap().personal_matches, 50);
@@ -2193,7 +2178,6 @@ fn player_account_link_auto_syncs_stale_player_cache_from_gsi_and_cli() {
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
-    use std::time::Duration;
     use truesight_adapters::sync::LocalCacheManager;
     use truesight_core::domain::HeroId;
     use truesight_core::ports::DraftEvent;
@@ -2250,13 +2234,7 @@ fn player_account_link_auto_syncs_stale_player_cache_from_gsi_and_cli() {
         "PlayerSteamIdDetected must start background sync when new account cache is stale"
     );
 
-    for _ in 0..100 {
-        session.poll_live_sources(None, None);
-        if !session.sync_in_flight {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    wait_for_sync_idle(&mut session);
     assert!(!session.sync_in_flight);
     assert_eq!(sync_calls.load(Ordering::SeqCst), 1);
     assert_eq!(
@@ -2289,13 +2267,7 @@ fn player_account_link_auto_syncs_stale_player_cache_from_gsi_and_cli() {
         session.sync_in_flight,
         "CLI account command must start background sync when player cache is stale"
     );
-    for _ in 0..100 {
-        session.poll_live_sources(None, None);
-        if !session.sync_in_flight {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    wait_for_sync_idle(&mut session);
     assert!(!session.sync_in_flight);
     assert_eq!(sync_calls.load(Ordering::SeqCst), 2);
     assert_eq!(session.matrix.hero(HeroId(1)).unwrap().personal_matches, 25);
@@ -2394,13 +2366,7 @@ fn reapplying_same_account_preserves_in_flight_sync_while_switching_cancels_it()
 
     // 3. Release the held first worker and confirm it completes without cancellation and populates Comfort v3.
     gate_tx.send(()).unwrap();
-    for _ in 0..100 {
-        session.poll_live_sources(None, None);
-        if !session.sync_in_flight {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    wait_for_sync_idle(&mut session);
     assert!(!session.sync_in_flight);
     assert!(!first_was_cancelled.load(Ordering::SeqCst));
     assert_eq!(sync_calls.load(Ordering::SeqCst), 1);
@@ -2538,13 +2504,7 @@ fn bracket_auto_selects_from_rank_tier_and_persists_manual_selection() {
         Ok("Synced player profile".to_string())
     });
     assert!(s_sync.start_background_sync(true));
-    for _ in 0..100 {
-        s_sync.poll_live_sources(None, None);
-        if !s_sync.sync_in_flight {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
+    wait_for_sync_idle(&mut s_sync);
     assert_eq!(s_sync.draft.bracket, Bracket::Ancient);
     assert_eq!(s_sync.bracket_config, BracketConfig::Auto);
 
@@ -2585,13 +2545,7 @@ fn bracket_auto_selects_from_rank_tier_and_persists_manual_selection() {
         Ok("Synced lower tier".to_string())
     });
     assert!(restarted.start_background_sync(true));
-    for _ in 0..100 {
-        restarted.poll_live_sources(None, None);
-        if !restarted.sync_in_flight {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
+    wait_for_sync_idle(&mut restarted);
     assert_eq!(restarted.draft.bracket, Bracket::Immortal);
 
     // 4. `bracket auto` CLI command clears explicit override and switches back to cached rank_tier.
@@ -3993,13 +3947,7 @@ fn item_build_refresh_triggers_on_gsi_entry_and_queues_while_sync_in_flight() {
         session.sync_in_flight,
         "GSI transition to PRE_GAME must trigger item refresh for uncached active build hero"
     );
-    for _ in 0..100 {
-        session.poll_live_sources(None, None);
-        if !session.sync_in_flight {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    wait_for_sync_idle(&mut session);
     assert!(!session.sync_in_flight);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert!(
@@ -4039,13 +3987,7 @@ fn item_build_refresh_triggers_on_gsi_entry_and_queues_while_sync_in_flight() {
     assert!(session.is_post_draft_build_view());
     gate_tx.send(()).unwrap();
 
-    for _ in 0..100 {
-        session.poll_live_sources(None, None);
-        if !session.sync_in_flight && calls.load(Ordering::SeqCst) >= 3 {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    wait_for_sync_until(&mut session, || calls.load(Ordering::SeqCst) >= 3);
     assert_eq!(
         calls.load(Ordering::SeqCst),
         3,
@@ -4078,13 +4020,7 @@ fn item_build_refresh_triggers_on_gsi_entry_and_queues_while_sync_in_flight() {
     assert!(session.is_post_draft_build_view());
     gate_tx.send(()).unwrap();
 
-    for _ in 0..100 {
-        session.poll_live_sources(None, None);
-        if !session.sync_in_flight && calls.load(Ordering::SeqCst) >= 5 {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    wait_for_sync_until(&mut session, || calls.load(Ordering::SeqCst) >= 5);
     assert!(!session.sync_in_flight);
     assert_eq!(
         calls.load(Ordering::SeqCst),
@@ -4308,13 +4244,7 @@ fn manual_slot_replacement_in_build_view_requests_or_queues_item_refresh() {
     session.toggle_post_draft_build_view();
     assert!(session.is_post_draft_build_view());
     assert!(session.sync_in_flight);
-    for _ in 0..100 {
-        session.poll_live_sources(None, None);
-        if !session.sync_in_flight {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    wait_for_sync_idle(&mut session);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
     // 1. Replace active slot while Build view is open -> immediate background refresh for Nyx (88).
@@ -4327,13 +4257,7 @@ fn manual_slot_replacement_in_build_view_requests_or_queues_item_refresh() {
         session.sync_in_flight,
         "replacing active build ally in Build view must start background refresh when uncached"
     );
-    for _ in 0..100 {
-        session.poll_live_sources(None, None);
-        if !session.sync_in_flight {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    wait_for_sync_idle(&mut session);
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     assert!(recorded_targets.lock().unwrap()[1].contains(&HeroId(88)));
     let nyx_stats = session
@@ -4365,13 +4289,7 @@ fn manual_slot_replacement_in_build_view_requests_or_queues_item_refresh() {
         "replacing active build ally during an in-flight sync must wait for active sync instead of spawning duplicate"
     );
     gate_tx.send(()).unwrap();
-    for _ in 0..100 {
-        session.poll_live_sources(None, None);
-        if !session.sync_in_flight && calls.load(Ordering::SeqCst) >= 4 {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    wait_for_sync_until(&mut session, || calls.load(Ordering::SeqCst) >= 4);
     assert_eq!(calls.load(Ordering::SeqCst), 4);
     assert!(recorded_targets.lock().unwrap()[3].contains(&HeroId(50)));
 
@@ -4387,13 +4305,7 @@ fn manual_slot_replacement_in_build_view_requests_or_queues_item_refresh() {
         session.sync_in_flight,
         "clearing active slot in Build view must refresh newly fallen-back uncached hero"
     );
-    for _ in 0..100 {
-        session.poll_live_sources(None, None);
-        if !session.sync_in_flight {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    wait_for_sync_idle(&mut session);
     assert_eq!(calls.load(Ordering::SeqCst), 5);
     assert!(recorded_targets.lock().unwrap()[4].contains(&HeroId(121)));
 
@@ -4529,7 +4441,6 @@ fn vision_populating_active_build_hero_in_build_view_triggers_item_refresh() {
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     };
-    use std::time::Duration;
     use truesight_adapters::sync::LocalCacheManager;
     use truesight_core::domain::{Bracket, HeroId, ItemId, Role, Side};
     use truesight_core::ports::{DraftEvent, ItemMetaRepository};
@@ -4595,13 +4506,7 @@ fn vision_populating_active_build_hero_in_build_view_triggers_item_refresh() {
         "vision populating active build hero in Build view must start item refresh"
     );
 
-    for _ in 0..100 {
-        session.poll_live_sources(None, None);
-        if !session.sync_in_flight {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    wait_for_sync_idle(&mut session);
     assert!(!session.sync_in_flight);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert!(recorded_targets.lock().unwrap()[0].contains(&HeroId(88)));
@@ -4705,13 +4610,7 @@ fn unlinking_steam_account_preserves_and_drains_queued_item_refresh() {
     // Open Build view and drain initial sync for Anti-Mage (call #1).
     session.toggle_post_draft_build_view();
     assert!(session.is_post_draft_build_view());
-    for _ in 0..100 {
-        session.poll_live_sources(None, None);
-        if !session.sync_in_flight {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    wait_for_sync_idle(&mut session);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
     // Start a blocked sync (call #2), then replace active ally with uncached Nyx (88) -> queues refresh.
@@ -4735,13 +4634,7 @@ fn unlinking_steam_account_preserves_and_drains_queued_item_refresh() {
 
     // Unblock cancelled sync #2 and wait for the fresh post-unlink sync #3 to complete.
     gate_tx.send(()).unwrap();
-    for _ in 0..100 {
-        session.poll_live_sources(None, None);
-        if !session.sync_in_flight && calls.load(Ordering::SeqCst) >= 3 {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    wait_for_sync_until(&mut session, || calls.load(Ordering::SeqCst) >= 3);
     assert!(!session.sync_in_flight);
     assert_eq!(calls.load(Ordering::SeqCst), 3);
     assert!(
@@ -5171,4 +5064,361 @@ fn gsi_overflow_reconcile_emits_hero_identity_before_fresh_inventory() {
         "Nyx must retain Magic Wand after overflow reconciliation: {:?}",
         session.active_build_owned_items()
     );
+}
+
+#[test]
+fn sync_target_item_heroes_tracks_role_pairs_and_refreshes_on_role_change() {
+    use truesight_adapters::sync::LocalCacheManager;
+    use truesight_core::domain::{HeroId, Role, Side};
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_role_swap_refresh_test_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    std::fs::write(
+        tmp_dir.join("hero_item_stats.json"),
+        r#"[{"heroId":32,"role":"Mid","bracket":"HERALD_GUARDIAN","itemStartingPurchase":[],"itemFullPurchase":[{"itemId":174,"phase":"Core","timeSecs":1080,"instance":0,"matchCount":1000,"winCount":520}]},{"heroId":32,"role":"Mid","bracket":"CRUSADER_ARCHON","itemStartingPurchase":[],"itemFullPurchase":[{"itemId":174,"phase":"Core","timeSecs":960,"instance":0,"matchCount":1000,"winCount":540}]},{"heroId":32,"role":"Mid","bracket":"LEGEND_ANCIENT","itemStartingPurchase":[],"itemFullPurchase":[{"itemId":174,"phase":"Core","timeSecs":900,"instance":0,"matchCount":1000,"winCount":550}]},{"heroId":32,"role":"Mid","bracket":"DIVINE_IMMORTAL","itemStartingPurchase":[],"itemFullPurchase":[{"itemId":174,"phase":"Core","timeSecs":840,"instance":0,"matchCount":1000,"winCount":570}]}]"#,
+    )
+    .unwrap();
+
+    let token = "eyJhbGciOinone.eyJleHAiOjQxMDI0NDQ4MDB9.sig".to_string();
+    let mut mgr = LocalCacheManager::with_optional_account(tmp_dir.clone(), None);
+    mgr.stratz_api_token = Some(token.clone());
+    let mut session =
+        AppSession::with_cache_and_config(mgr, Some(tmp_dir.join("config.toml"))).unwrap();
+    session.cache_mgr.stratz_api_token = Some(token);
+
+    assert!(execute_command(&mut session, "ally 2 riki").unwrap());
+    assert!(
+        session
+            .cache_mgr
+            .target_item_hero_roles
+            .contains(&(HeroId(32), Role::Mid)),
+        "ally 2 Riki must track (HeroId(32), Role::Mid) in cache_mgr: {:?}",
+        session.cache_mgr.target_item_hero_roles
+    );
+    assert!(session.cache_mgr.target_item_hero_ids.contains(&HeroId(32)));
+
+    session.toggle_post_draft_build_view();
+    assert!(session.is_post_draft_build_view());
+
+    // Wait for any initial background check to settle cleanly.
+    wait_for_sync_idle(&mut session);
+
+    // Swapping Riki from Pos 2 (Mid) -> Pos 1 (Carry) changes active_build_hero().role
+    // and must trigger background refresh for uncached Role::Carry.
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls_bg = std::sync::Arc::clone(&calls);
+    session.set_background_sync_runner(move |_mgr, _force| {
+        calls_bg.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok("ok".into())
+    });
+
+    session.swap_slots(Side::Allies, 1, 0);
+    assert!(
+        session
+            .cache_mgr
+            .target_item_hero_roles
+            .contains(&(HeroId(32), Role::Carry)),
+        "swap_slots must update target_item_hero_roles to Carry: {:?}",
+        session.cache_mgr.target_item_hero_roles
+    );
+    assert!(
+        calls.load(std::sync::atomic::Ordering::SeqCst) >= 1 || session.sync_in_flight,
+        "changing active build hero role from Mid -> Carry must trigger uncached item refresh"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn select_build_variant_for_direct_upgrade_preserves_owned_scepter_and_next_pointer() {
+    use truesight_adapters::item_repo::SeededItemMetaRepository;
+    use truesight_core::domain::{HeroId, HeroItemStat, ItemCatalogEntry, ItemId, ItemPhase};
+    use truesight_core::ports::DraftEvent;
+
+    let mut session = AppSession::new().unwrap();
+    assert!(execute_command(&mut session, "ally 5 crystal maiden").unwrap());
+    session.local_player_hero = Some(HeroId(5));
+    session.item_repo = SeededItemMetaRepository {
+        custom_catalog: vec![
+            ItemCatalogEntry {
+                id: ItemId(214),
+                slug: "tranquil_boots".into(),
+                display_name: "Tranquil Boots".into(),
+                cost: 900,
+                components: vec![],
+                is_recipe: false,
+                is_consumable_drop: false,
+            },
+            ItemCatalogEntry {
+                id: ItemId(180),
+                slug: "arcane_boots".into(),
+                display_name: "Arcane Boots".into(),
+                cost: 1400,
+                components: vec![],
+                is_recipe: false,
+                is_consumable_drop: false,
+            },
+            ItemCatalogEntry {
+                id: ItemId(108),
+                slug: "ultimate_scepter".into(),
+                display_name: "Aghanim's Scepter".into(),
+                cost: 4200,
+                components: vec![ItemId(60), ItemId(23), ItemId(21), ItemId(22)],
+                is_recipe: false,
+                is_consumable_drop: false,
+            },
+            ItemCatalogEntry {
+                id: ItemId(271),
+                slug: "ultimate_scepter_2".into(),
+                display_name: "Aghanim's Blessing".into(),
+                cost: 5800,
+                components: vec![ItemId(108)],
+                is_recipe: false,
+                is_consumable_drop: false,
+            },
+            ItemCatalogEntry {
+                id: ItemId(256),
+                slug: "aeon_disk".into(),
+                display_name: "Aeon Disk".into(),
+                cost: 3000,
+                components: vec![],
+                is_recipe: false,
+                is_consumable_drop: false,
+            },
+        ],
+        custom_hero_stats: vec![(
+            HeroId(5),
+            None,
+            None,
+            vec![
+                HeroItemStat {
+                    item_id: ItemId(214),
+                    phase: ItemPhase::Early,
+                    avg_time_mins: 8.0,
+                    match_count: 1800,
+                    win_count: 940,
+                },
+                HeroItemStat {
+                    item_id: ItemId(180),
+                    phase: ItemPhase::Early,
+                    avg_time_mins: 9.0,
+                    match_count: 1600,
+                    win_count: 830,
+                },
+                HeroItemStat {
+                    item_id: ItemId(108),
+                    phase: ItemPhase::Late,
+                    avg_time_mins: 32.0,
+                    match_count: 1000,
+                    win_count: 520,
+                },
+                HeroItemStat {
+                    item_id: ItemId(271),
+                    phase: ItemPhase::Late,
+                    avg_time_mins: 48.0,
+                    match_count: 300,
+                    win_count: 222,
+                },
+                HeroItemStat {
+                    item_id: ItemId(256),
+                    phase: ItemPhase::Late,
+                    avg_time_mins: 36.0,
+                    match_count: 900,
+                    win_count: 500,
+                },
+            ],
+        )],
+        ..Default::default()
+    };
+
+    session.apply_event(DraftEvent::InventoryUpdated {
+        hero_slug: Some("npc_dota_hero_crystal_maiden".into()),
+        item_slugs: vec!["item_tranquil_boots".into(), "item_ultimate_scepter".into()],
+    });
+
+    let initial = session.compute_recommended_build().unwrap();
+    let scepter_idx = initial
+        .steps
+        .iter()
+        .position(|s| s.item_id == ItemId(108))
+        .expect("Scepter (108) must be primary");
+    assert!(initial.steps[scepter_idx].owned);
+    assert_eq!(
+        initial.steps[scepter_idx]
+            .variants
+            .first()
+            .map(|v| v.item_id),
+        Some(ItemId(271))
+    );
+    assert_eq!(
+        initial
+            .next_unowned_index
+            .map(|idx| initial.steps[idx].item_id),
+        Some(ItemId(256)),
+        "NEXT must initially point to unowned Aeon Disk (256)"
+    );
+
+    // Invoking direct-upgrade selection by item ID or step index must be a no-op so owned Scepter
+    // stays intact and NEXT remains on Aeon Disk.
+    session.select_build_variant_for_item(ItemId(108), ItemId(271));
+    session.select_build_variant(scepter_idx, ItemId(271));
+
+    let after_upgrade_click = session.compute_recommended_build().unwrap();
+    let scepter_after = after_upgrade_click
+        .steps
+        .iter()
+        .find(|s| s.item_id == ItemId(108))
+        .expect("owned Scepter card must NOT be replaced by unowned Blessing");
+    assert!(scepter_after.owned);
+    assert_eq!(
+        scepter_after.variants.first().map(|v| v.item_id),
+        Some(ItemId(271)),
+        "Blessing (271) must stay in its child upgrade position under Scepter"
+    );
+    assert_eq!(
+        after_upgrade_click
+            .next_unowned_index
+            .map(|idx| after_upgrade_click.steps[idx].item_id),
+        Some(ItemId(256)),
+        "NEXT must remain on Aeon Disk (256), not move onto Blessing"
+    );
+
+    // Ordinary non-upgrade alternatives (e.g. Arcane Boots under Tranquil Boots) must still swap cleanly.
+    session.select_build_variant_for_item(ItemId(214), ItemId(180));
+    let swapped = session.compute_recommended_build().unwrap();
+    let arcane_step = swapped
+        .steps
+        .iter()
+        .find(|s| s.item_id == ItemId(180))
+        .expect("ordinary alternative Arcane Boots (180) must still swap into primary slot");
+    assert!(
+        arcane_step
+            .variants
+            .iter()
+            .any(|v| v.item_id == ItemId(214)),
+        "Tranquil Boots (214) should move to variants after swapping to Arcane Boots"
+    );
+
+    // Clicking the original primary item restores Tranquil Boots (214).
+    session.select_build_variant_for_item(ItemId(180), ItemId(214));
+    let restored = session.compute_recommended_build().unwrap();
+    assert!(
+        restored.steps.iter().any(|s| s.item_id == ItemId(214)),
+        "switching back to Tranquil Boots (214) must restore original primary"
+    );
+}
+
+#[test]
+fn set_ally_faction_clears_stale_build_view_hero_and_refreshes_uncached_team_items() {
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use truesight_adapters::sync::LocalCacheManager;
+    use truesight_core::domain::{Faction, HeroId, Role};
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_faction_flip_refresh_test_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    // Cache TA (46, Carry) and Hoodwink (123, SoftSupport) across all 4 STRATZ buckets;
+    // leave Dire heroes Juggernaut (8, Carry) and Invoker (74, SoftSupport) uncached.
+    let make_hero_entries = |hero_id: u16, role: &str, item_id: u16| {
+        [
+            "HERALD_GUARDIAN",
+            "CRUSADER_ARCHON",
+            "LEGEND_ANCIENT",
+            "DIVINE_IMMORTAL",
+        ]
+        .into_iter()
+        .map(|b| {
+            format!(
+                r#"{{"heroId":{hero_id},"role":"{role}","bracket":"{b}","itemStartingPurchase":[],"itemFullPurchase":[{{"itemId":{item_id},"phase":"Core","timeSecs":960,"instance":0,"matchCount":1000,"winCount":540}}]}}"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+    };
+    let cached_json = format!(
+        "[{},{}]",
+        make_hero_entries(46, "Carry", 236),
+        make_hero_entries(123, "SoftSupport", 232)
+    );
+    std::fs::write(tmp_dir.join("hero_item_stats.json"), cached_json).unwrap();
+
+    let token = "eyJhbGciOinone.eyJleHAiOjQxMDI0NDQ4MDB9.sig".to_string();
+    let mut mgr = LocalCacheManager::with_optional_account(tmp_dir.clone(), None);
+    mgr.stratz_api_token = Some(token.clone());
+    let mut session =
+        AppSession::with_cache_and_config(mgr, Some(tmp_dir.join("config.toml"))).unwrap();
+    session.cache_mgr.stratz_api_token = Some(token);
+
+    assert!(execute_command(&mut session, "ally 1 templar assassin").unwrap());
+    assert!(execute_command(&mut session, "ally 4 hoodwink").unwrap());
+    assert!(execute_command(&mut session, "enemy 1 juggernaut").unwrap());
+    assert!(execute_command(&mut session, "enemy 4 invoker").unwrap());
+
+    session.select_build_view_hero(HeroId(123)); // Explicitly inspect ally Hoodwink on Radiant.
+    session.toggle_post_draft_build_view();
+    assert!(session.is_post_draft_build_view());
+    wait_for_sync_idle(&mut session);
+
+    type RecordedRolesLog = Arc<Mutex<Vec<Vec<(HeroId, Role)>>>>;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let recorded_roles: RecordedRolesLog = Arc::new(Mutex::new(Vec::new()));
+    let calls_bg = Arc::clone(&calls);
+    let recorded_bg = Arc::clone(&recorded_roles);
+    session.set_background_sync_runner(move |mgr, _force| {
+        calls_bg.fetch_add(1, Ordering::SeqCst);
+        recorded_bg
+            .lock()
+            .unwrap()
+            .push(mgr.target_item_hero_roles.clone());
+        Ok("ok".into())
+    });
+
+    // Flipping faction Radiant -> Dire swaps allies/enemies:
+    // Hoodwink moved to enemies so `build_view_hero` must clear, target_item_hero_roles
+    // must switch to Dire allies (Juggernaut + Invoker), and an item refresh must launch.
+    session.set_ally_faction(Faction::Dire);
+
+    assert_eq!(
+        session.build_view_hero, None,
+        "stale build_view_hero moved to Enemies must clear on faction flip"
+    );
+    assert!(
+        session
+            .cache_mgr
+            .target_item_hero_roles
+            .contains(&(HeroId(8), Role::Carry))
+            && session
+                .cache_mgr
+                .target_item_hero_roles
+                .contains(&(HeroId(74), Role::SoftSupport))
+            && !session
+                .cache_mgr
+                .target_item_hero_roles
+                .iter()
+                .any(|&(h, _)| h == HeroId(123)),
+        "target_item_hero_roles must update to Dire allies after faction flip: {:?}",
+        session.cache_mgr.target_item_hero_roles
+    );
+
+    wait_for_sync_until(&mut session, || calls.load(Ordering::SeqCst) >= 1);
+    let batches = recorded_roles.lock().unwrap();
+    assert!(
+        batches
+            .iter()
+            .any(|b| b.contains(&(HeroId(74), Role::SoftSupport))),
+        "faction flip into Build view must trigger sync for uncached Dire heroes: {batches:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
 }

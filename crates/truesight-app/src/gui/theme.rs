@@ -269,10 +269,39 @@ pub(super) fn paint_portrait_16_9(
     resp
 }
 
-pub(super) fn paint_item_icon_on(
+/// Extracts a crisp 2-character uppercase monogram from an item display name for missing-icon fallback.
+pub(super) fn item_monogram(label: &str) -> String {
+    let words: Vec<&str> = label.split_whitespace().collect();
+    let sig: Vec<&str> = words
+        .iter()
+        .copied()
+        .filter(|w| !matches!(w.to_ascii_lowercase().as_str(), "of" | "the" | "and"))
+        .collect();
+    let chosen = if sig.len() >= 2 { &sig } else { &words };
+    if chosen.len() >= 2 {
+        let mut out = String::with_capacity(2);
+        for word in chosen.iter().take(2) {
+            if let Some(ch) = word.chars().find(|c| c.is_ascii_alphanumeric()) {
+                out.push(ch.to_ascii_uppercase());
+            }
+        }
+        if out.len() >= 2 {
+            return out;
+        }
+    }
+    label
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(2)
+        .map(|c| c.to_ascii_uppercase())
+        .collect()
+}
+
+pub(super) fn paint_item_icon_with_fallback(
     painter: &egui::Painter,
     rect: Rect,
     tex: Option<&TextureHandle>,
+    fallback_name: Option<&str>,
     border_color: Color32,
     owned: bool,
 ) {
@@ -284,6 +313,19 @@ pub(super) fn paint_item_icon_on(
             Color32::WHITE
         };
         painter.image(t.id(), rect, uv_full(), tint);
+    } else if let Some(name) = fallback_name {
+        let mono = item_monogram(name);
+        if !mono.is_empty() {
+            let font_sz = (rect.height() * 0.44).clamp(7.0, 12.0);
+            let txt_col = if owned { P_MUTED } else { P_SILVER };
+            painter.text(
+                rect.center(),
+                Align2::CENTER_CENTER,
+                mono,
+                FontId::proportional(font_sz),
+                txt_col,
+            );
+        }
     }
     painter.rect_stroke(
         rect,
@@ -293,15 +335,16 @@ pub(super) fn paint_item_icon_on(
     );
 }
 
-pub(super) fn paint_item_icon(
+pub(super) fn paint_item_icon_named(
     ui: &mut egui::Ui,
     tex: Option<&TextureHandle>,
+    fallback_name: Option<&str>,
     size: Vec2,
     border_color: Color32,
     owned: bool,
 ) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
-    paint_item_icon_on(ui.painter(), rect, tex, border_color, owned);
+    paint_item_icon_with_fallback(ui.painter(), rect, tex, fallback_name, border_color, owned);
     resp
 }
 

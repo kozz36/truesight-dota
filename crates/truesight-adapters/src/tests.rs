@@ -5453,17 +5453,26 @@ fn sync_fetches_and_atomically_publishes_item_constants_and_builds_from_empty_ca
         "cached item_constants.json must preserve resolved recipe components"
     );
 
-    let am_stats = repo
-        .hero_item_stats(HeroId(1), Role::Carry, Bracket::Divine)
-        .expect("Anti-Mage item stats should load");
-    let am_bfury = am_stats
+    let am_legend_stats = repo
+        .hero_item_stats(HeroId(1), Role::Carry, Bracket::Legend)
+        .expect("Anti-Mage Legend item stats should load");
+    let am_bfury_legend = am_legend_stats
         .iter()
         .find(|s| s.item_id == ItemId(145))
         .expect("Anti-Mage should have cached Battle Fury timing");
-    assert_eq!(am_bfury.phase, ItemPhase::Core);
-    assert!((am_bfury.avg_time_mins - 14.0).abs() < 0.01);
-    assert_eq!(am_bfury.match_count, 100);
-    assert_eq!(am_bfury.win_count, 60);
+    assert_eq!(am_bfury_legend.phase, ItemPhase::Core);
+    assert!((am_bfury_legend.avg_time_mins - 14.0).abs() < 0.01);
+    assert_eq!(am_bfury_legend.match_count, 100);
+    assert_eq!(am_bfury_legend.win_count, 60);
+
+    let am_divine_stats = repo
+        .hero_item_stats(HeroId(1), Role::Carry, Bracket::Divine)
+        .expect("Anti-Mage Divine item stats should load");
+    let am_bfury_divine = am_divine_stats
+        .iter()
+        .find(|s| s.item_id == ItemId(145))
+        .expect("Anti-Mage Divine should scale unbracketed fallback");
+    assert!((am_bfury_divine.avg_time_mins - (14.0 * 0.92)).abs() < 0.02);
 
     let axe_stats = repo
         .hero_item_stats(HeroId(2), Role::Offlane, Bracket::Divine)
@@ -5502,9 +5511,14 @@ fn sync_from_sources_with_stratz_token_preserves_requested_hero_id_without_row_e
 
     let payload = stratz_hero_item_purchases_graphql_payload(2);
     assert!(
-        payload.contains("itemStartingPurchase(heroId: 2)")
-            && payload.contains("itemFullPurchase(heroId: 2)"),
-        "STRATZ item query must target requested heroId: 2, got: {payload}"
+        payload.contains("heroId: 2")
+            && payload.contains("itemStartingPurchase(")
+            && payload.contains("itemBootPurchase(")
+            && payload.contains("itemFullPurchase(")
+            && payload.contains("HERALD_GUARDIAN")
+            && payload.contains("DIVINE_IMMORTAL")
+            && !payload.contains("itemStartingPurchase(heroId: 2) { itemId time"),
+        "STRATZ item query must target heroId: 2 across all brackets without starting time field, got: {payload}"
     );
 
     let hero_stats_json = r#"[{"id": 2, "4_pick": 1000, "4_win": 530}]"#;
@@ -5831,8 +5845,8 @@ fn embedded_item_atlas_decodes_all_embedded_catalog_items() {
     let ids = crate::item_repo::embedded_item_ids();
     assert!(!ids.is_empty());
     assert!(
-        ids.len() >= 150,
-        "expanded catalog should cover at least 150 items"
+        ids.len() >= 199,
+        "expanded catalog should cover all 199 active items"
     );
     assert_eq!(atlas.items.len(), ids.len());
     for id in ids {
@@ -5842,6 +5856,28 @@ fn embedded_item_atlas_decodes_all_embedded_catalog_items() {
             .unwrap_or_else(|| panic!("missing embedded icon for item {:?}", id));
         assert_eq!(rgb.len(), 44 * 32 * 3);
     }
+
+    let catalog_repo = crate::item_repo::SeededItemMetaRepository::default();
+    for patch_item_id in [635_u16, 692, 1942, 1944, 1946, 1948, 1953, 1955] {
+        let iid = truesight_core::domain::ItemId(patch_item_id);
+        assert!(
+            atlas.items.contains_key(&iid),
+            "item_atlas.bin must contain patch item #{patch_item_id}"
+        );
+        assert!(
+            truesight_core::ports::ItemMetaRepository::item_catalog(&catalog_repo, iid).is_some(),
+            "EMBEDDED_ITEM_CATALOG must contain patch item #{patch_item_id}"
+        );
+    }
+    assert_eq!(
+        truesight_core::ports::ItemMetaRepository::item_catalog(
+            &catalog_repo,
+            truesight_core::domain::ItemId(1953)
+        )
+        .unwrap()
+        .display_name,
+        "Sabatons of Mordiggian"
+    );
 }
 
 #[test]
@@ -6009,4 +6045,1058 @@ fn opendota_item_timings_aggregates_weighted_times_and_item_popularity_parses_ph
             .iter()
             .all(|s| s.item_id != ItemId(30) && s.item_id != ItemId(90))
     );
+}
+
+#[test]
+fn stratz_item_query_omits_starting_time_and_aliases_all_four_brackets() {
+    use crate::sync::stratz_hero_item_purchases_graphql_payload_for_role;
+    use truesight_core::domain::Role;
+
+    let payload = stratz_hero_item_purchases_graphql_payload_for_role(32, Some(Role::Mid));
+    for expected in [
+        "heroId: 32",
+        "positionIds: [POSITION_2]",
+        "HERALD_GUARDIAN",
+        "CRUSADER_ARCHON",
+        "LEGEND_ANCIENT",
+        "DIVINE_IMMORTAL",
+        "hgStart:",
+        "hgBoot:",
+        "hgFull:",
+        "diStart:",
+        "diBoot:",
+        "diFull:",
+        "matchLimit: 5",
+    ] {
+        assert!(
+            payload.contains(expected),
+            "expected {expected:?} in payload: {payload}"
+        );
+    }
+    assert!(
+        !payload.contains("wasGiven") || !payload.contains("hgStart: itemStartingPurchase(heroId: 32, positionIds: [POSITION_2], bracketBasicIds: [HERALD_GUARDIAN]) { itemId time"),
+        "starting item query must NOT request `time` on HeroItemStartingPurchaseType: {payload}"
+    );
+    // Explicitly check the field list inside hgStart has no `time`.
+    let start_idx = payload.find("hgStart:").unwrap();
+    let brace_rel = payload[start_idx..].find('{').unwrap();
+    let end_rel = payload[start_idx + brace_rel..].find('}').unwrap();
+    let start_fields = &payload[start_idx + brace_rel..=start_idx + brace_rel + end_rel];
+    assert!(
+        !start_fields.contains("time"),
+        "itemStartingPurchase must omit `time`, got: {start_fields}"
+    );
+}
+
+#[test]
+fn parse_stratz_live_bracketed_item_purchases_handles_minute_buckets_and_boot_time_sums() {
+    use crate::sync::parse_stratz_live_bracketed_item_purchases_json;
+    use truesight_core::domain::{HeroId, ItemId, ItemPhase, Role};
+
+    let live_payload = r#"{
+        "data": {
+            "heroStats": {
+                "hgStart": [
+                    {"itemId": 20, "matchCount": 1800, "winCount": 950, "wasGiven": false},
+                    {"itemId": 44, "matchCount": 900, "winCount": 460, "wasGiven": true}
+                ],
+                "hgBoot": [
+                    {"itemId": 63, "time": 2860000, "matchCount": 3700, "winCount": 1950}
+                ],
+                "hgFull": [
+                    {"itemId": 174, "time": 18, "matchCount": 2000, "winCount": 1060},
+                    {"itemId": 147, "time": 28, "matchCount": 1400, "winCount": 780},
+                    {"itemId": 108, "time": 34, "matchCount": 900, "winCount": 520}
+                ],
+                "caStart": [{"itemId": 14, "matchCount": 800, "winCount": 420, "wasGiven": false}],
+                "caBoot": [{"itemId": 63, "time": 540000, "matchCount": 900, "winCount": 490}],
+                "caFull": [{"itemId": 174, "time": 16, "matchCount": 1500, "winCount": 820}],
+                "laStart": [{"itemId": 14, "matchCount": 1200, "winCount": 650, "wasGiven": false}],
+                "laBoot": [{"itemId": 63, "time": 24011080, "matchCount": 42287, "winCount": 25455}],
+                "laFull": [
+                    {"itemId": 174, "time": 14, "matchCount": 4200, "winCount": 2500},
+                    {"itemId": 174, "time": 16, "matchCount": 1800, "winCount": 1020},
+                    {"itemId": 1097, "time": 32, "matchCount": 1900, "winCount": 1250}
+                ],
+                "diStart": [{"itemId": 14, "matchCount": 500, "winCount": 280, "wasGiven": false}],
+                "diBoot": [{"itemId": 63, "time": 7932913, "matchCount": 14398, "winCount": 8331}],
+                "diFull": [
+                    {"itemId": 174, "time": 13, "matchCount": 1600, "winCount": 940},
+                    {"itemId": 143, "time": 29, "matchCount": 1100, "winCount": 710}
+                ]
+            }
+        }
+    }"#;
+
+    let parsed =
+        parse_stratz_live_bracketed_item_purchases_json(live_payload, HeroId(32), Some(Role::Mid));
+    assert_eq!(
+        parsed.len(),
+        4,
+        "expected all 4 STRATZ bracket buckets: {parsed:?}"
+    );
+
+    let la = &parsed
+        .iter()
+        .find(|(_, _, b, _)| b.map(|v| v.cache_key()) == Some("LEGEND_ANCIENT"))
+        .expect("LEGEND_ANCIENT bucket present")
+        .3;
+    let la_boot = la.iter().find(|s| s.item_id == ItemId(63)).unwrap();
+    // 24011080 / 42287 / 60 = 9.463m
+    assert!(
+        (la_boot.avg_time_mins - 9.46).abs() < 0.05,
+        "boot mins: {}",
+        la_boot.avg_time_mins
+    );
+    assert_eq!(la_boot.phase, ItemPhase::Early);
+
+    let la_diff = la.iter().find(|s| s.item_id == ItemId(174)).unwrap();
+    // Weighted minutes: (4200*14 + 1800*16)/6000 = 14.6m
+    assert!(
+        (la_diff.avg_time_mins - 14.6).abs() < 0.05,
+        "diff mins: {}",
+        la_diff.avg_time_mins
+    );
+    assert_eq!(la_diff.match_count, 6000);
+    assert_eq!(la_diff.phase, ItemPhase::Core);
+
+    let hg = &parsed
+        .iter()
+        .find(|(_, _, b, _)| b.map(|v| v.cache_key()) == Some("HERALD_GUARDIAN"))
+        .expect("HERALD_GUARDIAN bucket present")
+        .3;
+    assert!(
+        hg.iter()
+            .any(|s| s.item_id == ItemId(20) && s.phase == ItemPhase::Starting)
+    );
+    assert!(!hg.iter().any(|s| s.item_id == ItemId(44)));
+    assert!(
+        hg.iter()
+            .any(|s| s.item_id == ItemId(108) && s.phase == ItemPhase::Late)
+    );
+}
+
+#[test]
+fn hero_item_stats_v2_cache_roundtrips_role_bracket_and_scales_unbracketed_fallback() {
+    use crate::sync::LocalCacheManager;
+    use truesight_core::domain::{Bracket, HeroId, ItemId, Role};
+    use truesight_core::ports::ItemMetaRepository;
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_v2_item_cache_test_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    let mut mgr = LocalCacheManager::with_optional_account(tmp_dir.clone(), None);
+    mgr.stratz_api_token = Some("eyJhbGciOinone.eyJleHAiOjQxMDI0NDQ4MDB9.sig".to_string());
+    mgr.set_target_item_hero_roles(vec![(HeroId(32), Role::Mid)]);
+    assert_eq!(mgr.target_item_hero_ids, vec![HeroId(32)]);
+    assert!(mgr.is_target_item_heroes_uncached());
+
+    let now = 1_795_000_000_u64;
+    let hero_stats_json = r#"[{"id": 32, "4_pick": 1000, "4_win": 530}]"#;
+    let item_constants_json = r#"{
+        "diffusal_blade": {"id": 174, "dname": "Diffusal Blade", "cost": 2500, "components": ["blade_of_alacrity", "robe"]},
+        "disperser": {"id": 1097, "dname": "Disperser", "cost": 6100, "components": ["diffusal_blade", "eagle"]},
+        "manta": {"id": 147, "dname": "Manta Style", "cost": 4550, "components": ["yasha", "diadem"]},
+        "phylactery": {"id": 1107, "dname": "Phylactery", "cost": 2600, "components": ["pers", "diadem"]}
+    }"#;
+    let stratz_aliased = r#"{
+        "data": {
+            "heroStats": {
+                "hgStart": [],
+                "hgBoot": [{"itemId": 63, "time": 660000, "matchCount": 1000, "winCount": 510}],
+                "hgFull": [
+                    {"itemId": 174, "time": 18, "matchCount": 1000, "winCount": 520},
+                    {"itemId": 1107, "time": 20, "matchCount": 900, "winCount": 490}
+                ],
+                "caStart": [],
+                "caBoot": [{"itemId": 63, "time": 540000, "matchCount": 1000, "winCount": 520}],
+                "caFull": [{"itemId": 174, "time": 16, "matchCount": 1000, "winCount": 530}],
+                "laStart": [],
+                "laBoot": [{"itemId": 63, "time": 510000, "matchCount": 1000, "winCount": 540}],
+                "laFull": [{"itemId": 174, "time": 15, "matchCount": 1000, "winCount": 560}],
+                "diStart": [],
+                "diBoot": [{"itemId": 63, "time": 420000, "matchCount": 1000, "winCount": 550}],
+                "diFull": [
+                    {"itemId": 174, "time": 14, "matchCount": 1000, "winCount": 570},
+                    {"itemId": 1097, "time": 26, "matchCount": 900, "winCount": 540}
+                ]
+            }
+        }
+    }"#;
+
+    mgr.sync_from_sources_with_role_items(
+        false,
+        now,
+        |url| match url {
+            "https://api.opendota.com/api/heroStats" => Ok(hero_stats_json.to_string()),
+            "https://api.opendota.com/api/constants/items" => Ok(item_constants_json.to_string()),
+            other => Err(truesight_core::ports::PortError(format!(
+                "unexpected {other}"
+            ))),
+        },
+        |_token| Ok(r#"{"data":{"heroStats":{"matchUp":[]}}}"#.to_string()),
+        |_token, hero_id, role| {
+            assert_eq!(hero_id, 32);
+            assert_eq!(role, Some(Role::Mid));
+            Ok(stratz_aliased.to_string())
+        },
+    )
+    .expect("v2 role-bracketed STRATZ sync should succeed");
+
+    assert!(
+        !mgr.is_target_item_heroes_uncached(),
+        "cached (HeroId(32), Mid) with STRATZ buckets should mark hero+role cached"
+    );
+    mgr.set_target_item_hero_roles(vec![(HeroId(32), Role::SoftSupport)]);
+    assert!(
+        mgr.is_target_item_heroes_uncached(),
+        "requesting uncached SoftSupport role on same hero must mark uncached"
+    );
+
+    let repo = mgr.build_item_repository();
+    let herald = repo
+        .hero_item_stats(HeroId(32), Role::Mid, Bracket::Herald)
+        .unwrap();
+    let divine = repo
+        .hero_item_stats(HeroId(32), Role::Mid, Bracket::Divine)
+        .unwrap();
+    let immortal = repo
+        .hero_item_stats(HeroId(32), Role::Mid, Bracket::Immortal)
+        .unwrap();
+
+    assert!(herald.iter().any(|s| s.item_id == ItemId(1107)));
+    assert!(!divine.iter().any(|s| s.item_id == ItemId(1107)));
+    assert!(divine.iter().any(|s| s.item_id == ItemId(1097)));
+
+    let div_diff = divine
+        .iter()
+        .find(|s| s.item_id == ItemId(174))
+        .unwrap()
+        .avg_time_mins;
+    let imm_diff = immortal
+        .iter()
+        .find(|s| s.item_id == ItemId(174))
+        .unwrap()
+        .avg_time_mins;
+    assert!(
+        div_diff > imm_diff,
+        "intra-bucket scaling must keep Divine ({div_diff}) > Immortal ({imm_diff})"
+    );
+
+    // Unbracketed custom_hero_stats fallback must still scale by bracket_timing_scale.
+    let mut unbracketed_repo = crate::item_repo::SeededItemMetaRepository::default();
+    unbracketed_repo.custom_hero_stats.push((
+        HeroId(99),
+        None,
+        None,
+        vec![truesight_core::domain::HeroItemStat {
+            item_id: ItemId(1),
+            phase: truesight_core::domain::ItemPhase::Core,
+            avg_time_mins: 15.0,
+            match_count: 500,
+            win_count: 270,
+        }],
+    ));
+    let u_herald = unbracketed_repo
+        .hero_item_stats(HeroId(99), Role::Offlane, Bracket::Herald)
+        .unwrap();
+    let u_legend = unbracketed_repo
+        .hero_item_stats(HeroId(99), Role::Offlane, Bracket::Legend)
+        .unwrap();
+    let u_immortal = unbracketed_repo
+        .hero_item_stats(HeroId(99), Role::Offlane, Bracket::Immortal)
+        .unwrap();
+    let t_herald = u_herald
+        .iter()
+        .find(|s| s.item_id == ItemId(1))
+        .unwrap()
+        .avg_time_mins;
+    let t_legend = u_legend
+        .iter()
+        .find(|s| s.item_id == ItemId(1))
+        .unwrap()
+        .avg_time_mins;
+    let t_immortal = u_immortal
+        .iter()
+        .find(|s| s.item_id == ItemId(1))
+        .unwrap()
+        .avg_time_mins;
+    assert!(
+        t_herald > t_legend && t_legend > t_immortal,
+        "unbracketed cached fallback must scale Herald ({t_herald}) > Legend ({t_legend}) > Immortal ({t_immortal})"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn is_valid_timed_progression_item_for_phase_allows_early_core_high_value_and_blocks_basic_and_late_raw()
+ {
+    use crate::item_repo::{SeededItemMetaRepository, is_valid_timed_progression_item_for_phase};
+    use truesight_core::domain::{ItemId, ItemPhase};
+
+    let repo = SeededItemMetaRepository::default();
+    // High-value Early/Core stepping stones are valid in Core.
+    for id in [24_u16, 54, 55, 170, 149] {
+        assert!(
+            is_valid_timed_progression_item_for_phase(&repo, ItemId(id), ItemPhase::Core),
+            "expected item #{id} to be valid in Core"
+        );
+    }
+    // Raw Secret Shop orbs/rel/hyperstone must stay blocked in Late.
+    for raw_late_id in [24_u16, 54, 55] {
+        assert!(
+            !is_valid_timed_progression_item_for_phase(&repo, ItemId(raw_late_id), ItemPhase::Late),
+            "expected raw stepping stone #{raw_late_id} to remain excluded in Late"
+        );
+    }
+    // Cheap basic ingredients must stay blocked in Early, Core, and Late.
+    for basic_id in [21_u16, 22, 67, 69, 1125] {
+        for ph in [ItemPhase::Early, ItemPhase::Core, ItemPhase::Late] {
+            assert!(
+                !is_valid_timed_progression_item_for_phase(&repo, ItemId(basic_id), ph),
+                "expected basic item #{basic_id} to be blocked in {ph:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn sync_partial_stratz_buckets_keeps_opendota_fallback_for_uncovered_brackets() {
+    use crate::sync::LocalCacheManager;
+    use truesight_core::domain::{Bracket, HeroId, ItemId, Role};
+    use truesight_core::math::recommend_item_build;
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_partial_stratz_fallback_test_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    let mut mgr = LocalCacheManager::with_optional_account(tmp_dir.clone(), None);
+    mgr.stratz_api_token = Some("eyJhbGciOinone.eyJleHAiOjQxMDI0NDQ4MDB9.sig".to_string());
+    mgr.set_target_item_hero_roles(vec![(HeroId(32), Role::Mid)]);
+
+    // Partial cache with ONLY DIVINE_IMMORTAL and no unbracketed fallback must stay uncached when STRATZ token is active.
+    std::fs::write(
+        tmp_dir.join("hero_item_stats.json"),
+        r#"[{"heroId":32,"role":"Mid","bracket":"DIVINE_IMMORTAL","itemStartingPurchase":[],"itemFullPurchase":[{"itemId":1097,"phase":"Late","timeSecs":1560,"instance":0,"matchCount":900,"winCount":540}]}]"#,
+    )
+    .unwrap();
+    assert!(
+        mgr.is_target_item_heroes_uncached(),
+        "single-bucket STRATZ cache without fallback must be treated as uncached for uncovered brackets"
+    );
+
+    // Start from empty cache and return DI-only from STRATZ alongside valid OpenDota fallback.
+    let _ = std::fs::remove_file(tmp_dir.join("hero_item_stats.json"));
+    let now = 1_795_000_000_u64;
+    let hero_stats_json = r#"[{"id": 32, "4_pick": 1000, "4_win": 530}]"#;
+    let item_constants_json = r#"{
+        "diffusal_blade": {"id": 174, "dname": "Diffusal Blade", "cost": 2500, "components": ["blade_of_alacrity", "robe"]},
+        "disperser": {"id": 1097, "dname": "Disperser", "cost": 6100, "components": ["diffusal_blade", "eagle"]},
+        "manta": {"id": 147, "dname": "Manta Style", "cost": 4550, "components": ["yasha", "diadem"]},
+        "butterfly": {"id": 139, "dname": "Butterfly", "cost": 4975, "components": ["eagle"]}
+    }"#;
+    let partial_stratz = r#"{
+        "data": {
+            "heroStats": {
+                "hgStart": [], "hgBoot": [], "hgFull": [],
+                "caStart": [], "caBoot": [], "caFull": [],
+                "laStart": [], "laBoot": [], "laFull": [],
+                "diStart": [],
+                "diBoot": [{"itemId": 63, "time": 420000, "matchCount": 1000, "winCount": 550}],
+                "diFull": [
+                    {"itemId": 174, "time": 14, "matchCount": 1000, "winCount": 570},
+                    {"itemId": 1097, "time": 26, "matchCount": 900, "winCount": 540}
+                ]
+            }
+        }
+    }"#;
+    let opendota_timings = r#"[
+        {"hero_id": 32, "item": "diffusal_blade", "time": 960, "games": "1200", "wins": "660"},
+        {"hero_id": 32, "item": "manta", "time": 1440, "games": "1100", "wins": "630"},
+        {"hero_id": 32, "item": "butterfly", "time": 1920, "games": "800", "wins": "490"}
+    ]"#;
+    let opendota_popularity = r#"{"start_game_items":{"44":900},"early_game_items":{"63":1200},"mid_game_items":{},"late_game_items":{}}"#;
+
+    let mut timings_calls = 0_usize;
+    mgr.sync_from_sources_with_role_items(
+        false,
+        now,
+        |url| match url {
+            "https://api.opendota.com/api/heroStats" => Ok(hero_stats_json.to_string()),
+            "https://api.opendota.com/api/constants/items" => Ok(item_constants_json.to_string()),
+            "https://api.opendota.com/api/scenarios/itemTimings?hero_id=32" => {
+                timings_calls += 1;
+                Ok(opendota_timings.to_string())
+            }
+            "https://api.opendota.com/api/heroes/32/itemPopularity" => {
+                Ok(opendota_popularity.to_string())
+            }
+            other => Err(truesight_core::ports::PortError(format!(
+                "unexpected URL {other}"
+            ))),
+        },
+        |_token| Ok(r#"{"data":{"heroStats":{"matchUp":[]}}}"#.to_string()),
+        |_token, hero_id, role| {
+            assert_eq!(hero_id, 32);
+            assert_eq!(role, Some(Role::Mid));
+            Ok(partial_stratz.to_string())
+        },
+    )
+    .expect("partial STRATZ sync with OpenDota fallback should succeed");
+
+    assert!(
+        timings_calls >= 1,
+        "partial STRATZ response leaving uncovered buckets must still fetch OpenDota fallback"
+    );
+    assert!(
+        !mgr.is_target_item_heroes_uncached(),
+        "once partial STRATZ buckets + OpenDota fallback are persisted, resync check must converge"
+    );
+
+    let repo = mgr.build_item_repository();
+    let enemies = [None; 5];
+    let divine_build = recommend_item_build(
+        &repo,
+        HeroId(32),
+        Role::Mid,
+        Bracket::Divine,
+        &enemies,
+        &[],
+        300,
+    )
+    .unwrap();
+    let herald_build = recommend_item_build(
+        &repo,
+        HeroId(32),
+        Role::Mid,
+        Bracket::Herald,
+        &enemies,
+        &[],
+        300,
+    )
+    .unwrap();
+
+    assert!(
+        divine_build.steps.iter().any(|s| s.item_id == ItemId(1097))
+            && divine_build.steps.iter().all(|s| s.item_id != ItemId(139)),
+        "covered Divine bracket must use exact STRATZ DI data (Disperser 1097): {:?}",
+        divine_build.steps
+    );
+    assert!(
+        herald_build.steps.iter().any(|s| s.item_id == ItemId(147))
+            && herald_build.steps.iter().any(|s| s.item_id == ItemId(139))
+            && herald_build.steps.iter().all(|s| s.item_id != ItemId(1097)),
+        "uncovered Herald bracket must use OpenDota fallback (Manta 147 / Butterfly 139) rather than embedded snapshot: {:?}",
+        herald_build.steps
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn hero_item_stats_v2_cache_preserves_early_boot_phase_and_support_core_phase_on_roundtrip() {
+    use crate::sync::{LocalCacheManager, parse_stratz_live_bracketed_item_purchases_json};
+    use truesight_core::domain::{Bracket, HeroId, ItemId, ItemPhase, Role};
+    use truesight_core::math::recommend_item_build;
+    use truesight_core::ports::ItemMetaRepository;
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_v2_phase_roundtrip_test_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    let mut mgr = LocalCacheManager::with_optional_account(tmp_dir.clone(), None);
+    mgr.stratz_api_token = Some("eyJhbGciOinone.eyJleHAiOjQxMDI0NDQ4MDB9.sig".to_string());
+    mgr.set_target_item_hero_roles(vec![(HeroId(79), Role::SoftSupport)]);
+
+    let stratz_payload = r#"{
+        "data": {
+            "heroStats": {
+                "hgStart": [],
+                "hgBoot": [{"itemId": 48, "time": 780000, "matchCount": 1000, "winCount": 560}],
+                "hgFull": [
+                    {"itemId": 1, "time": 21, "matchCount": 1200, "winCount": 670},
+                    {"itemId": 232, "time": 26, "matchCount": 1100, "winCount": 610},
+                    {"itemId": 254, "time": 27, "matchCount": 950, "winCount": 510},
+                    {"itemId": 100, "time": 32, "matchCount": 800, "winCount": 460}
+                ],
+                "caStart": [], "caBoot": [], "caFull": [],
+                "laStart": [],
+                "laBoot": [{"itemId": 48, "time": 780000, "matchCount": 1000, "winCount": 560}],
+                "laFull": [
+                    {"itemId": 1, "time": 21, "matchCount": 1200, "winCount": 670},
+                    {"itemId": 232, "time": 26, "matchCount": 1100, "winCount": 610},
+                    {"itemId": 254, "time": 27, "matchCount": 950, "winCount": 510},
+                    {"itemId": 100, "time": 32, "matchCount": 800, "winCount": 460}
+                ],
+                "diStart": [], "diBoot": [], "diFull": []
+            }
+        }
+    }"#;
+
+    let live_entries = parse_stratz_live_bracketed_item_purchases_json(
+        stratz_payload,
+        HeroId(79),
+        Some(Role::SoftSupport),
+    );
+    let live_la = &live_entries
+        .iter()
+        .find(|(_, _, b, _)| b.map(|v| v.cache_key()) == Some("LEGEND_ANCIENT"))
+        .unwrap()
+        .3;
+    let live_bot = live_la.iter().find(|s| s.item_id == ItemId(48)).unwrap();
+    assert_eq!(live_bot.phase, ItemPhase::Early);
+    let live_lens = live_la.iter().find(|s| s.item_id == ItemId(232)).unwrap();
+    assert_eq!(
+        live_lens.phase,
+        ItemPhase::Core,
+        "26m item on SoftSupport must be classified as Core (<= 28.5m)"
+    );
+
+    let now = 1_795_000_000_u64;
+    let hero_stats_json = r#"[{"id": 79, "4_pick": 1000, "4_win": 520}]"#;
+    let item_constants_json = r#"{
+        "blink": {"id": 1, "dname": "Blink Dagger", "cost": 2250, "components": null},
+        "aether_lens": {"id": 232, "dname": "Aether Lens", "cost": 2100, "components": ["void_stone", "energy_booster"]},
+        "glimmer_cape": {"id": 254, "dname": "Glimmer Cape", "cost": 2150, "components": ["shadow_amulet", "cloak"]},
+        "cyclone": {"id": 100, "dname": "Eul's Scepter of Divinity", "cost": 2600, "components": ["staff_of_wizardry", "void_stone", "wind_lace"]}
+    }"#;
+
+    mgr.sync_from_sources_with_role_items(
+        false,
+        now,
+        |url| match url {
+            "https://api.opendota.com/api/heroStats" => Ok(hero_stats_json.to_string()),
+            "https://api.opendota.com/api/constants/items" => Ok(item_constants_json.to_string()),
+            _ => Ok("[]".to_string()),
+        },
+        |_token| Ok(r#"{"data":{"heroStats":{"matchUp":[]}}}"#.to_string()),
+        |_token, _hero_id, _role| Ok(stratz_payload.to_string()),
+    )
+    .expect("v2 phase sync should succeed");
+
+    let repo = mgr.build_item_repository();
+    let cached_stats = repo
+        .hero_item_stats(HeroId(79), Role::SoftSupport, Bracket::Legend)
+        .unwrap();
+    let cached_bot = cached_stats
+        .iter()
+        .find(|s| s.item_id == ItemId(48))
+        .expect("Boots of Travel present after reload");
+    assert_eq!(
+        cached_bot.phase,
+        ItemPhase::Early,
+        "13m STRATZ itemBootPurchase row for Boots of Travel must preserve Early phase after v2 cache roundtrip"
+    );
+    let cached_lens = cached_stats
+        .iter()
+        .find(|s| s.item_id == ItemId(232))
+        .expect("Aether Lens present after reload");
+    assert_eq!(
+        cached_lens.phase,
+        ItemPhase::Core,
+        "26m Support Core item must preserve Core phase after v2 cache roundtrip"
+    );
+
+    let enemies = [None; 5];
+    let build = recommend_item_build(
+        &repo,
+        HeroId(79),
+        Role::SoftSupport,
+        Bracket::Legend,
+        &enemies,
+        &[],
+        300,
+    )
+    .unwrap();
+    let bot_step = build
+        .steps
+        .iter()
+        .find(|s| s.item_id == ItemId(48))
+        .expect("Boots of Travel step must be recommended");
+    assert_eq!(
+        bot_step.phase,
+        ItemPhase::Early,
+        "Boots of Travel must stay in Early rather than competing for Core: {:?}",
+        build.steps
+    );
+    assert_eq!(
+        build
+            .steps
+            .iter()
+            .filter(|s| s.phase == ItemPhase::Core)
+            .count(),
+        2,
+        "Core should hold Blink + Aether Lens without Boots of Travel competing: {:?}",
+        build.steps
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn sync_from_sources_with_role_items_publishes_stratz_items_when_opendota_player_or_meta_fails() {
+    use crate::sync::LocalCacheManager;
+    use truesight_core::domain::{Bracket, HeroId, ItemId, Role};
+    use truesight_core::ports::{ItemMetaRepository, PortError};
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_partial_opendota_fail_test_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    let now = 1_795_000_000_u64;
+    let valid_token = "eyJhbGciOinone.eyJleHAiOjQxMDI0NDQ4MDB9.sig".to_string();
+    let sample_stratz = |full_item_id: u16| {
+        format!(
+            r#"{{
+                "data": {{
+                    "heroStats": {{
+                        "hgStart": [{{"itemId": 44, "instance": 0, "matchCount": 800, "winCount": 410, "wasGiven": false}}],
+                        "hgBoot": [{{"itemId": 63, "time": 540000, "matchCount": 900, "winCount": 460}}],
+                        "hgFull": [{{"itemId": {full_item_id}, "time": 16, "matchCount": 900, "winCount": 510}}],
+                        "caStart": [{{"itemId": 44, "instance": 0, "matchCount": 800, "winCount": 410, "wasGiven": false}}],
+                        "caBoot": [{{"itemId": 63, "time": 540000, "matchCount": 900, "winCount": 460}}],
+                        "caFull": [{{"itemId": {full_item_id}, "time": 16, "matchCount": 900, "winCount": 520}}],
+                        "laStart": [{{"itemId": 44, "instance": 0, "matchCount": 800, "winCount": 410, "wasGiven": false}}],
+                        "laBoot": [{{"itemId": 63, "time": 540000, "matchCount": 900, "winCount": 460}}],
+                        "laFull": [{{"itemId": {full_item_id}, "time": 15, "matchCount": 900, "winCount": 540}}],
+                        "diStart": [{{"itemId": 44, "instance": 0, "matchCount": 800, "winCount": 410, "wasGiven": false}}],
+                        "diBoot": [{{"itemId": 63, "time": 540000, "matchCount": 900, "winCount": 460}}],
+                        "diFull": [{{"itemId": {full_item_id}, "time": 14, "matchCount": 900, "winCount": 550}}]
+                    }}
+                }}
+            }}"#
+        )
+    };
+
+    // Case A: Meta is fresh (<24h), linked player comfort is stale (>1h), OpenDota player endpoint times out.
+    // STRATZ item builds for Invoker (74, SoftSupport) MUST still be published!
+    let item_constants_json =
+        r#"{"blink":{"id":1,"dname":"Blink Dagger","cost":2250,"components":null}}"#;
+    let mut mgr = LocalCacheManager::with_optional_account(tmp_dir.clone(), Some(127_255_741));
+    mgr.stratz_api_token = Some(valid_token.clone());
+    mgr.publish_staged_cache_with_items(
+        Some(r#"[{"id": 74, "5_pick": 1000, "5_win": 520}]"#),
+        None,
+        Some(item_constants_json),
+        None,
+        Some("[]"),
+        None,
+        None,
+        now - 7_200, // 2h ago: Meta fresh (<24h), Player stale (>1h)
+    )
+    .unwrap();
+    mgr.set_target_item_hero_roles(vec![(HeroId(74), Role::SoftSupport)]);
+
+    let msg_a = mgr
+        .sync_from_sources_with_role_items(
+            false,
+            now,
+            |url| Err(PortError(format!("OpenDota timeout on {url}"))),
+            |_token| Err(PortError("unexpected stratz syn".into())),
+            |_token, hero_id, role| {
+                assert_eq!(hero_id, 74);
+                assert_eq!(role, Some(Role::SoftSupport));
+                Ok(sample_stratz(267)) // Spirit Vessel
+            },
+        )
+        .expect("STRATZ item builds must persist even when OpenDota player endpoint times out");
+    assert!(
+        msg_a.contains("itemBuilds"),
+        "sync result must mention persisted itemBuilds: {msg_a}"
+    );
+    assert!(
+        !mgr.is_target_item_heroes_uncached(),
+        "Invoker Pos 4 must now be cached in hero_item_stats.json"
+    );
+    let repo_a = mgr.build_item_repository();
+    let invoker_stats = repo_a
+        .hero_item_stats(HeroId(74), Role::SoftSupport, Bracket::Ancient)
+        .expect("Invoker Pos 4 Ancient STRATZ stats must be readable from cache");
+    assert!(
+        invoker_stats.iter().any(|s| s.item_id == ItemId(267)),
+        "Spirit Vessel (267) from STRATZ must be persisted: {invoker_stats:?}"
+    );
+
+    // Case B: Meta is stale (>24h) and OpenDota /heroStats times out, while STRATZ itemBuilds for
+    // Juggernaut (8, Carry) succeeds -> item builds persist and existing meta cache remains intact.
+    std::fs::write(
+        tmp_dir.join("cache_metadata.txt"),
+        format!("meta_sync_unix={}\n", now - 100_000),
+    )
+    .unwrap();
+    mgr.set_target_item_hero_roles(vec![(HeroId(8), Role::Carry)]);
+    mgr.sync_from_sources_with_role_items(
+        false,
+        now,
+        |url| Err(PortError(format!("OpenDota timeout on {url}"))),
+        |_token| Ok(r#"{"data":{"heroStats":{"matchUp":[]}}}"#.to_string()),
+        |_token, hero_id, role| {
+            assert_eq!(hero_id, 8);
+            assert_eq!(role, Some(Role::Carry));
+            Ok(sample_stratz(166)) // Maelstrom
+        },
+    )
+    .expect("STRATZ item builds must persist even when OpenDota heroStats times out");
+
+    let repo_b = mgr.build_item_repository();
+    let jugg_stats = repo_b
+        .hero_item_stats(HeroId(8), Role::Carry, Bracket::Ancient)
+        .expect("Juggernaut Carry STRATZ stats must be persisted");
+    assert!(jugg_stats.iter().any(|s| s.item_id == ItemId(166)));
+    assert_eq!(
+        std::fs::read_to_string(tmp_dir.join("opendota_hero_stats.json")).unwrap(),
+        r#"[{"id": 74, "5_pick": 1000, "5_win": 520}]"#,
+        "existing opendota_hero_stats.json must stay intact when /heroStats times out"
+    );
+
+    // Case C: Total outage (stale meta, no STRATZ token, every OpenDota endpoint fails) still returns Err.
+    let mut offline_mgr = LocalCacheManager::with_optional_account(tmp_dir.clone(), None);
+    offline_mgr.set_target_item_hero_roles(vec![(HeroId(2), Role::Offlane)]);
+    let err_c = offline_mgr.sync_from_sources_with_role_items(
+        false,
+        now,
+        |url| Err(PortError(format!("offline on {url}"))),
+        |_token| Err(PortError("offline".into())),
+        |_token, _hid, _role| Err(PortError("offline".into())),
+    );
+    assert!(
+        err_c.is_err(),
+        "total network outage with zero staged artifacts must still return Err: {err_c:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn sync_from_sources_with_role_items_skips_already_cached_hero_roles_when_not_forced() {
+    use crate::sync::LocalCacheManager;
+    use truesight_core::domain::{Bracket, HeroId, ItemId, Role};
+    use truesight_core::ports::{ItemMetaRepository, PortError};
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_skip_cached_hero_roles_test_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    let now = 1_795_000_000_u64;
+    let mut mgr = LocalCacheManager::with_optional_account(tmp_dir.clone(), None);
+    mgr.stratz_api_token = Some("eyJhbGciOinone.eyJleHAiOjQxMDI0NDQ4MDB9.sig".to_string());
+    let item_constants_json =
+        r#"{"dragon_lance":{"id":236,"dname":"Dragon Lance","cost":1900,"components":null}}"#;
+    mgr.publish_staged_cache_with_items(
+        Some(r#"[{"id": 46, "5_pick": 1000, "5_win": 520}, {"id": 74, "5_pick": 1000, "5_win": 510}]"#),
+        None,
+        Some(item_constants_json),
+        Some(concat!(
+            r#"[{"heroId":46,"role":"Carry","bracket":"HERALD_GUARDIAN","itemStartingPurchase":[],"itemFullPurchase":[{"itemId":236,"phase":"Core","timeSecs":960,"instance":0,"matchCount":800,"winCount":430}]},"#,
+            r#"{"heroId":46,"role":"Carry","bracket":"CRUSADER_ARCHON","itemStartingPurchase":[],"itemFullPurchase":[{"itemId":236,"phase":"Core","timeSecs":900,"instance":0,"matchCount":800,"winCount":440}]},"#,
+            r#"{"heroId":46,"role":"Carry","bracket":"LEGEND_ANCIENT","itemStartingPurchase":[],"itemFullPurchase":[{"itemId":236,"phase":"Core","timeSecs":840,"instance":0,"matchCount":800,"winCount":450}]},"#,
+            r#"{"heroId":46,"role":"Carry","bracket":"DIVINE_IMMORTAL","itemStartingPurchase":[],"itemFullPurchase":[{"itemId":236,"phase":"Core","timeSecs":780,"instance":0,"matchCount":800,"winCount":460}]}]"#
+        )),
+        None,
+        None,
+        None,
+        now - 100, // Meta fresh (<24h)
+    )
+    .unwrap();
+
+    mgr.set_target_item_hero_roles(vec![
+        (HeroId(46), Role::Carry),
+        (HeroId(74), Role::SoftSupport),
+    ]);
+
+    let make_invoker_stratz = || {
+        r#"{
+            "data": {
+                "heroStats": {
+                    "hgStart": [], "hgBoot": [], "hgFull": [{"itemId": 267, "time": 16, "matchCount": 900, "winCount": 510}],
+                    "caStart": [], "caBoot": [], "caFull": [{"itemId": 267, "time": 16, "matchCount": 900, "winCount": 510}],
+                    "laStart": [], "laBoot": [], "laFull": [{"itemId": 267, "time": 15, "matchCount": 900, "winCount": 520}],
+                    "diStart": [], "diBoot": [], "diFull": [{"itemId": 267, "time": 14, "matchCount": 900, "winCount": 530}]
+                }
+            }
+        }"#.to_string()
+    };
+
+    let mut fetched = Vec::new();
+    mgr.sync_from_sources_with_role_items(
+        false,
+        now,
+        |url| Err(PortError(format!("unexpected OpenDota URL {url}"))),
+        |_token| Err(PortError("unexpected stratz syn".into())),
+        |_token, hero_id, role| {
+            fetched.push((hero_id, role));
+            Ok(make_invoker_stratz())
+        },
+    )
+    .expect("incremental uncached item sync must succeed");
+
+    assert_eq!(
+        fetched,
+        vec![(74, Some(Role::SoftSupport))],
+        "already-cached TA (46, Carry) must be skipped when not forced"
+    );
+
+    let repo = mgr.build_item_repository();
+    assert!(
+        repo.hero_item_stats(HeroId(46), Role::Carry, Bracket::Ancient)
+            .is_ok_and(|s| s.iter().any(|x| x.item_id == ItemId(236))),
+        "previously cached TA (46, Carry) must be retained after merge"
+    );
+    assert!(
+        repo.hero_item_stats(HeroId(74), Role::SoftSupport, Bracket::Ancient)
+            .is_ok_and(|s| s.iter().any(|x| x.item_id == ItemId(267))),
+        "newly fetched Invoker (74, SoftSupport) must be added to cache"
+    );
+
+    // Forced sync (`force = true`) must still refresh all requested target hero-roles.
+    let mut forced_fetched = Vec::new();
+    mgr.sync_from_sources_with_role_items(
+        true,
+        now,
+        |_url| Ok("[]".to_string()),
+        |_token| Ok(r#"{"data":{"heroStats":{"matchUp":[]}}}"#.to_string()),
+        |_token, hero_id, role| {
+            forced_fetched.push((hero_id, role));
+            Ok(make_invoker_stratz())
+        },
+    )
+    .expect("forced refresh must succeed");
+    assert_eq!(
+        forced_fetched,
+        vec![(46, Some(Role::Carry)), (74, Some(Role::SoftSupport))],
+        "forced sync must re-fetch every target hero-role"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn sync_fetches_item_constants_independently_of_hero_stats_and_keeps_meta_retryable() {
+    use crate::sync::LocalCacheManager;
+    use truesight_core::domain::{Bracket, HeroId, ItemId, Role};
+    use truesight_core::ports::{ItemMetaRepository, PortError};
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_independent_constants_sync_test_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    let now = 1_795_000_000_u64;
+    let valid_token = "eyJhbGciOinone.eyJleHAiOjQxMDI0NDQ4MDB9.sig".to_string();
+    let item_constants_json = r#"{
+        "broadsword": {"id": 3, "dname": "Broadsword", "cost": 1000, "components": null},
+        "new_patch_blade": {"id": 9999, "dname": "New Patch Blade", "cost": 3200, "components": ["broadsword"]}
+    }"#;
+    let stratz_new_item = r#"{
+        "data": {
+            "heroStats": {
+                "hgStart": [], "hgBoot": [], "hgFull": [{"itemId": 9999, "time": 18, "matchCount": 900, "winCount": 510}],
+                "caStart": [], "caBoot": [], "caFull": [{"itemId": 9999, "time": 18, "matchCount": 900, "winCount": 510}],
+                "laStart": [], "laBoot": [], "laFull": [{"itemId": 9999, "time": 18, "matchCount": 900, "winCount": 510}],
+                "diStart": [], "diBoot": [], "diFull": [{"itemId": 9999, "time": 18, "matchCount": 900, "winCount": 510}]
+            }
+        }
+    }"#;
+
+    // 1. Empty cache: /heroStats times out, /constants/items returns an item absent from the
+    // embedded catalog (#9999), and STRATZ returns timings for #9999.
+    let mut mgr = LocalCacheManager::with_optional_account(tmp_dir.clone(), None);
+    mgr.stratz_api_token = Some(valid_token);
+    mgr.set_target_item_hero_roles(vec![(HeroId(74), Role::SoftSupport)]);
+
+    let mut constants_calls = 0_usize;
+    let msg = mgr
+        .sync_from_sources_with_role_items(
+            false,
+            now,
+            |url| match url {
+                "https://api.opendota.com/api/constants/items" => {
+                    constants_calls += 1;
+                    Ok(item_constants_json.to_string())
+                }
+                other => Err(PortError(format!("OpenDota timeout on {other}"))),
+            },
+            |_token| Err(PortError("no syn needed".into())),
+            |_token, hero_id, role| {
+                assert_eq!(hero_id, 74);
+                assert_eq!(role, Some(Role::SoftSupport));
+                Ok(stratz_new_item.to_string())
+            },
+        )
+        .expect("constants + STRATZ item builds must persist when heroStats times out");
+
+    assert_eq!(
+        constants_calls, 1,
+        "item constants must still be fetched even when heroStats times out"
+    );
+    assert!(
+        msg.contains("itemConstants") && msg.contains("itemBuilds") && msg.contains("partial:"),
+        "sync message must report itemConstants + itemBuilds + partial failure: {msg}"
+    );
+    assert!(
+        tmp_dir.join("hero_item_stats.json").exists(),
+        "hero_item_stats.json must be written when new catalog item #9999 comes from /constants/items"
+    );
+    let repo = mgr.build_item_repository();
+    let stats = repo
+        .hero_item_stats(HeroId(74), Role::SoftSupport, Bracket::Ancient)
+        .expect("cached STRATZ stats must be readable");
+    assert!(
+        stats.iter().any(|s| s.item_id == ItemId(9999)),
+        "ItemId(9999) from /constants/items must survive filtering and load from cache: {stats:?}"
+    );
+    assert!(
+        mgr.is_meta_stale(now),
+        "meta must stay stale when heroStats failed on empty cache"
+    );
+
+    // 2. Existing stale opendota_hero_stats.json (>24h): catalog-only success MUST NOT bump
+    // meta_sync_unix and mask the failed heroStats from future retries.
+    std::fs::write(
+        tmp_dir.join("opendota_hero_stats.json"),
+        r#"[{"id": 74, "5_pick": 1000, "5_win": 520}]"#,
+    )
+    .unwrap();
+    std::fs::write(
+        tmp_dir.join("cache_metadata.txt"),
+        format!("meta_sync_unix={}\n", now - 100_000),
+    )
+    .unwrap();
+
+    mgr.sync_from_sources_with_role_items(
+        false,
+        now,
+        |url| match url {
+            "https://api.opendota.com/api/constants/items" => Ok(item_constants_json.to_string()),
+            other => Err(PortError(format!("OpenDota timeout on {other}"))),
+        },
+        |_token| Err(PortError("no syn needed".into())),
+        |_token, _hid, _role| Ok(stratz_new_item.to_string()),
+    )
+    .expect("catalog-only refresh with failed heroStats should succeed");
+    assert!(
+        mgr.is_meta_stale(now),
+        "catalog-only success must keep stale heroStats eligible for retry instead of bumping meta_sync_unix"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn sync_validates_player_comfort_before_staging_so_malformed_player_does_not_discard_stratz_items()
+{
+    use crate::sync::LocalCacheManager;
+    use truesight_core::domain::{Bracket, HeroId, ItemId, Role};
+    use truesight_core::ports::ItemMetaRepository;
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_malformed_player_item_preserve_test_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    let now = 1_795_000_000_u64;
+    let valid_token = "eyJhbGciOinone.eyJleHAiOjQxMDI0NDQ4MDB9.sig".to_string();
+    let item_constants_json =
+        r#"{"blink":{"id":1,"dname":"Blink Dagger","cost":2250,"components":null}}"#;
+    let mut mgr = LocalCacheManager::with_optional_account(tmp_dir.clone(), Some(127_255_741));
+    mgr.stratz_api_token = Some(valid_token);
+    mgr.publish_staged_cache_with_items(
+        Some(r#"[{"id": 74, "5_pick": 1000, "5_win": 520}]"#),
+        None,
+        Some(item_constants_json),
+        None,
+        Some("[]"),
+        None,
+        None,
+        now - 7_200, // Meta fresh (<24h), player comfort stale (>1h)
+    )
+    .unwrap();
+    mgr.set_target_item_hero_roles(vec![(HeroId(74), Role::SoftSupport)]);
+
+    let stratz_invoker = r#"{
+        "data": {
+            "heroStats": {
+                "hgStart": [], "hgBoot": [], "hgFull": [{"itemId": 267, "time": 16, "matchCount": 900, "winCount": 510}],
+                "caStart": [], "caBoot": [], "caFull": [{"itemId": 267, "time": 16, "matchCount": 900, "winCount": 520}],
+                "laStart": [], "laBoot": [], "laFull": [{"itemId": 267, "time": 15, "matchCount": 900, "winCount": 530}],
+                "diStart": [], "diBoot": [], "diFull": [{"itemId": 267, "time": 14, "matchCount": 900, "winCount": 540}]
+            }
+        }
+    }"#;
+
+    // 1. OpenDota /players/{id}/heroes returns malformed `[{}]` while STRATZ returns valid item builds.
+    let msg = mgr
+        .sync_from_sources_with_role_items(
+            false,
+            now,
+            |url| match url {
+                "https://api.opendota.com/api/players/127255741/heroes" => Ok("[{}]".to_string()),
+                other => Err(truesight_core::ports::PortError(format!(
+                    "unexpected OpenDota URL {other}"
+                ))),
+            },
+            |_token| Err(truesight_core::ports::PortError("no syn".into())),
+            |_token, hero_id, role| {
+                assert_eq!(hero_id, 74);
+                assert_eq!(role, Some(Role::SoftSupport));
+                Ok(stratz_invoker.to_string())
+            },
+        )
+        .expect(
+            "malformed OpenDota player comfort `[{}]` must not discard valid STRATZ itemBuilds",
+        );
+
+    assert!(
+        msg.contains("itemBuilds") && msg.contains("partial:") && msg.contains("player"),
+        "sync message must note persisted itemBuilds and partial player failure: {msg}"
+    );
+    assert!(
+        tmp_dir.join("hero_item_stats.json").exists(),
+        "hero_item_stats.json must still be written despite malformed player comfort `[{{}}]`"
+    );
+    let repo = mgr.build_item_repository();
+    let invoker_stats = repo
+        .hero_item_stats(HeroId(74), Role::SoftSupport, Bracket::Ancient)
+        .expect("Invoker Pos 4 STRATZ stats must be present");
+    assert!(invoker_stats.iter().any(|s| s.item_id == ItemId(267)));
+    assert!(!mgr.is_target_item_heroes_uncached());
+    assert!(
+        mgr.is_player_stale(now),
+        "malformed player comfort must not be written or mark player cache fresh"
+    );
+
+    // 2. Subsequent player-only sync (now all items are cached) with `[{}]` still returns Err.
+    let err = mgr.sync_from_sources_with_role_items(
+        false,
+        now,
+        |url| match url {
+            "https://api.opendota.com/api/players/127255741/heroes" => Ok("[{}]".to_string()),
+            other => Err(truesight_core::ports::PortError(format!(
+                "unexpected OpenDota URL {other}"
+            ))),
+        },
+        |_token| Err(truesight_core::ports::PortError("no syn".into())),
+        |_token, _hid, _role| Ok(stratz_invoker.to_string()),
+    );
+    assert!(
+        err.is_err(),
+        "player-only sync with malformed `[{{}}]` and zero staged artifacts must return Err: {err:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
 }

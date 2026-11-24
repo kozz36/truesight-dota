@@ -523,6 +523,7 @@ pub const fn is_counter_item_eligible_for_role(item_id: ItemId, role: Role) -> b
         90 | 242 => matches!(role, Role::Offlane),
         210 => matches!(role, Role::Offlane | Role::SoftSupport),
         // Support & utility aura/dispel/heal-reduction items
+        37 => matches!(role, Role::SoftSupport | Role::HardSupport),
         226 => matches!(role, Role::Offlane | Role::SoftSupport | Role::HardSupport),
         267 => matches!(
             role,

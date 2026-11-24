@@ -1663,3 +1663,699 @@ fn recommend_item_build_groups_mutually_exclusive_early_boots_as_variants() {
     assert_eq!(owned_build.next_unowned_index, Some(1));
     assert_eq!(owned_build.steps[1].item_id, ItemId(168));
 }
+
+#[test]
+fn recommend_item_build_allocates_four_late_primary_steps() {
+    use crate::domain::{Bracket, ItemId, ItemPhase};
+    use crate::math::recommend_item_build;
+
+    let repo = MockItemRepo {
+        catalog: vec![
+            catalog_entry(75, "Wraith Band", 505, &[], false, false),
+            catalog_entry(63, "Power Treads", 1400, &[], false, false),
+            catalog_entry(166, "Maelstrom", 2950, &[], false, false),
+            catalog_entry(147, "Manta Style", 4550, &[], false, false),
+            catalog_entry(158, "Mjollnir", 5500, &[166], false, false),
+            catalog_entry(139, "Butterfly", 4975, &[], false, false),
+            catalog_entry(160, "Eye of Skadi", 5300, &[], false, false),
+            catalog_entry(141, "Daedalus", 5150, &[], false, false),
+            catalog_entry(156, "Satanic", 5050, &[], false, false),
+        ],
+        stats: vec![
+            item_stat(75, ItemPhase::Early, 6.0, 620, 320),
+            item_stat(63, ItemPhase::Early, 9.0, 980, 520),
+            item_stat(166, ItemPhase::Core, 15.0, 880, 480),
+            item_stat(147, ItemPhase::Core, 21.0, 840, 470),
+            item_stat(158, ItemPhase::Late, 26.0, 760, 440),
+            item_stat(139, ItemPhase::Late, 28.5, 690, 405),
+            item_stat(160, ItemPhase::Late, 31.0, 620, 370),
+            item_stat(141, ItemPhase::Late, 33.5, 580, 350),
+            item_stat(156, ItemPhase::Late, 36.0, 510, 310),
+        ],
+    };
+
+    let enemies = [None; 5];
+    let build = recommend_item_build(
+        &repo,
+        HeroId(41),
+        Role::Carry,
+        Bracket::Ancient,
+        &enemies,
+        &[],
+        600,
+    )
+    .expect("build should succeed");
+
+    let early_count = build
+        .steps
+        .iter()
+        .filter(|s| s.phase == ItemPhase::Early)
+        .count();
+    let core_count = build
+        .steps
+        .iter()
+        .filter(|s| s.phase == ItemPhase::Core)
+        .count();
+    let late_count = build
+        .steps
+        .iter()
+        .filter(|s| s.phase == ItemPhase::Late)
+        .count();
+
+    assert_eq!(early_count, 2, "expected 2 Early steps: {:?}", build.steps);
+    assert_eq!(core_count, 2, "expected 2 Core steps: {:?}", build.steps);
+    assert_eq!(late_count, 4, "expected 4 Late steps: {:?}", build.steps);
+    assert_eq!(build.steps.len(), 8);
+    assert!(
+        build
+            .steps
+            .iter()
+            .filter(|s| s.phase == ItemPhase::Late)
+            .any(|s| s.variants.iter().any(|v| v.item_id == ItemId(156))),
+        "5th Late candidate should attach as variant when 4 Late primaries are filled: {:?}",
+        build.steps
+    );
+}
+
+#[test]
+fn recommend_item_build_distinguishes_valuable_stepping_stones_from_basic_stats() {
+    use crate::domain::{Bracket, ItemId, ItemPhase};
+    use crate::math::recommend_item_build;
+
+    let repo = MockItemRepo {
+        catalog: vec![
+            catalog_entry(63, "Power Treads", 1400, &[], false, false),
+            catalog_entry(21, "Ogre Axe", 1000, &[], false, false),
+            catalog_entry(22, "Blade of Alacrity", 1000, &[], false, false),
+            catalog_entry(67, "Oblivion Staff", 1625, &[], false, false),
+            catalog_entry(69, "Perseverance", 1400, &[], false, false),
+            catalog_entry(170, "Yasha", 2000, &[], false, false),
+            catalog_entry(24, "Ultimate Orb", 2800, &[], false, false),
+            catalog_entry(147, "Manta Style", 4550, &[170, 20], false, false),
+            catalog_entry(160, "Eye of Skadi", 5300, &[24, 60], false, false),
+        ],
+        stats: vec![
+            item_stat(63, ItemPhase::Early, 9.0, 900, 470),
+            item_stat(21, ItemPhase::Early, 10.0, 650, 350),
+            item_stat(22, ItemPhase::Core, 15.0, 640, 345),
+            item_stat(67, ItemPhase::Core, 14.0, 620, 330),
+            item_stat(69, ItemPhase::Early, 11.0, 610, 325),
+            // Upgradable composite (Yasha 2000g) & high-value Ultimate Orb (2800g) bought >= 4m before Late parents.
+            item_stat(170, ItemPhase::Core, 19.0, 720, 405),
+            item_stat(24, ItemPhase::Core, 17.0, 560, 315),
+            item_stat(147, ItemPhase::Late, 25.5, 680, 400),
+            item_stat(160, ItemPhase::Late, 28.0, 540, 330),
+        ],
+    };
+
+    let enemies = [None; 5];
+    let build = recommend_item_build(
+        &repo,
+        HeroId(94),
+        Role::Carry,
+        Bracket::Ancient,
+        &enemies,
+        &[],
+        600,
+    )
+    .expect("build should succeed");
+
+    for forbidden in [21_u16, 22, 67, 69] {
+        assert!(
+            build.steps.iter().all(|s| {
+                s.item_id != ItemId(forbidden)
+                    && s.variants.iter().all(|v| v.item_id != ItemId(forbidden))
+            }),
+            "basic stat/ingredient item #{forbidden} must never appear in steps or variants: {:?}",
+            build.steps
+        );
+    }
+
+    assert!(
+        build
+            .steps
+            .iter()
+            .any(|s| s.item_id == ItemId(170) && s.phase == ItemPhase::Core),
+        "upgradable Yasha (170) @19m Core must coexist with Late Manta (147) @25.5m: {:?}",
+        build.steps
+    );
+    assert!(
+        build
+            .steps
+            .iter()
+            .any(|s| s.item_id == ItemId(24) && s.phase == ItemPhase::Core),
+        "high-value Ultimate Orb (24) @17m Core must coexist with Late Skadi (160) @28m: {:?}",
+        build.steps
+    );
+    assert!(
+        build.steps.iter().any(|s| s.item_id == ItemId(147))
+            && build.steps.iter().any(|s| s.item_id == ItemId(160)),
+        "Late parent upgrades must still be present: {:?}",
+        build.steps
+    );
+}
+
+#[test]
+fn recommend_item_build_protects_late_upgrade_chains_and_blocks_low_share_phase_filler() {
+    use crate::domain::{Bracket, ItemId, ItemPhase};
+    use crate::math::recommend_item_build;
+
+    let repo = MockItemRepo {
+        catalog: vec![
+            catalog_entry(75, "Wraith Band", 505, &[], false, false),
+            catalog_entry(63, "Power Treads", 1400, &[], false, false),
+            catalog_entry(174, "Diffusal Blade", 2500, &[], false, false),
+            catalog_entry(1107, "Phylactery", 2600, &[], false, false),
+            catalog_entry(147, "Manta Style", 4550, &[170], false, false),
+            catalog_entry(609, "Aghanim's Shard", 1400, &[], false, false),
+            catalog_entry(1097, "Disperser", 6100, &[174], false, false),
+            catalog_entry(143, "Skull Basher", 2875, &[], false, false),
+            catalog_entry(116, "Black King Bar", 4050, &[21], false, false),
+            catalog_entry(108, "Aghanim's Scepter", 4200, &[], false, false),
+            catalog_entry(139, "Butterfly", 4975, &[], false, false),
+            catalog_entry(208, "Abyssal Blade", 6250, &[143], false, false),
+        ],
+        stats: vec![
+            item_stat(75, ItemPhase::Early, 7.5, 180, 96),
+            item_stat(63, ItemPhase::Early, 10.2, 635, 333),
+            item_stat(174, ItemPhase::Core, 16.7, 642, 342),
+            // Low-share Core filler (~5.1% of Diffusal leader 642) must not steal Core slot 2.
+            item_stat(1107, ItemPhase::Core, 16.9, 33, 18),
+            item_stat(147, ItemPhase::Late, 25.7, 349, 201),
+            item_stat(609, ItemPhase::Late, 25.2, 258, 155),
+            item_stat(1097, ItemPhase::Late, 26.7, 126, 85),
+            item_stat(143, ItemPhase::Late, 25.1, 68, 44),
+            item_stat(116, ItemPhase::Late, 27.0, 33, 22),
+            item_stat(108, ItemPhase::Late, 26.6, 28, 19),
+            item_stat(139, ItemPhase::Late, 25.3, 19, 11),
+            // Protected Late upgrade of Skull Basher (143): mc=18, 72.2% WR.
+            item_stat(208, ItemPhase::Late, 26.9, 18, 13),
+        ],
+    };
+
+    let enemies = [None; 5];
+    let build = recommend_item_build(
+        &repo,
+        HeroId(32),
+        Role::Mid,
+        Bracket::Ancient,
+        &enemies,
+        &[],
+        300,
+    )
+    .expect("build should succeed");
+
+    assert!(
+        build.steps.iter().all(|s| s.item_id != ItemId(1107)),
+        "low-share Core filler Phylactery (33 vs 642) must not be promoted as primary step: {:?}",
+        build.steps
+    );
+    assert_eq!(
+        build
+            .steps
+            .iter()
+            .filter(|s| s.phase == ItemPhase::Late)
+            .count(),
+        4,
+        "Riki should populate 4 Late primary steps: {:?}",
+        build.steps
+    );
+    let abyssal_present = build
+        .steps
+        .iter()
+        .any(|s| s.item_id == ItemId(208) || s.variants.iter().any(|v| v.item_id == ItemId(208)));
+    assert!(
+        abyssal_present,
+        "Abyssal Blade (208, upgrade of Skull Basher 143) must be recommended in Late steps or variants: {:?}",
+        build.steps
+    );
+}
+
+#[test]
+fn recommend_item_build_keeps_core_capped_at_two_on_sparse_build() {
+    use crate::domain::{Bracket, ItemId, ItemPhase};
+    use crate::math::recommend_item_build;
+
+    let repo = MockItemRepo {
+        catalog: vec![
+            catalog_entry(63, "Power Treads", 1400, &[], false, false),
+            catalog_entry(145, "Battle Fury", 3900, &[], false, false),
+            catalog_entry(147, "Manta Style", 4550, &[], false, false),
+            catalog_entry(116, "Black King Bar", 4050, &[], false, false),
+        ],
+        stats: vec![
+            item_stat(63, ItemPhase::Early, 8.0, 1200, 620),
+            item_stat(145, ItemPhase::Core, 12.0, 1100, 610),
+            item_stat(147, ItemPhase::Core, 18.2, 950, 520),
+            item_stat(116, ItemPhase::Core, 24.5, 820, 445),
+        ],
+    };
+
+    let enemies = [None; 5];
+    let build = recommend_item_build(
+        &repo,
+        HeroId(1),
+        Role::Carry,
+        Bracket::Ancient,
+        &enemies,
+        &[],
+        600,
+    )
+    .expect("build should succeed");
+
+    let core_steps: Vec<_> = build
+        .steps
+        .iter()
+        .filter(|s| s.phase == ItemPhase::Core)
+        .collect();
+    assert_eq!(
+        core_steps.len(),
+        2,
+        "Core primary steps must stay capped at 2 even when Early/Late are sparse: {:?}",
+        build.steps
+    );
+    assert!(
+        core_steps.iter().any(
+            |s| s.item_id == ItemId(116) || s.variants.iter().any(|v| v.item_id == ItemId(116))
+        ) || build.steps.iter().all(|s| s.item_id != ItemId(116)),
+        "3rd Core candidate must never take a 3rd Core primary slot: {:?}",
+        build.steps
+    );
+}
+
+#[test]
+fn recommend_item_build_collapses_late_boots_and_surfaces_support_late_utility_and_ghost_scepter() {
+    use crate::domain::{
+        Bracket, CounterTrait, ItemId, ItemPhase, is_counter_item_eligible_for_role,
+    };
+    use crate::math::recommend_item_build;
+
+    assert!(
+        is_counter_item_eligible_for_role(ItemId(37), Role::SoftSupport)
+            && is_counter_item_eligible_for_role(ItemId(37), Role::HardSupport)
+            && !is_counter_item_eligible_for_role(ItemId(37), Role::Carry),
+        "Ghost Scepter (37) counter eligibility must target supports only"
+    );
+
+    let support_catalog = vec![
+        catalog_entry(36, "Magic Wand", 460, &[], false, false),
+        catalog_entry(180, "Arcane Boots", 1500, &[], false, false),
+        catalog_entry(214, "Tranquil Boots", 900, &[], false, false),
+        catalog_entry(1, "Blink Dagger", 2250, &[], false, false),
+        catalog_entry(254, "Glimmer Cape", 2150, &[], false, false),
+        catalog_entry(94, "Headdress", 425, &[], false, false),
+        catalog_entry(79, "Mekansm", 1775, &[94], false, false),
+        catalog_entry(931, "Boots of Bearing", 4225, &[214], false, false),
+        catalog_entry(231, "Guardian Greaves", 4350, &[180, 79], false, false),
+        catalog_entry(48, "Boots of Travel", 2500, &[], false, false),
+        catalog_entry(108, "Aghanim's Scepter", 4200, &[], false, false),
+        catalog_entry(271, "Aghanim's Blessing", 5800, &[108], false, false),
+        catalog_entry(100, "Eul's Scepter of Divinity", 2600, &[], false, false),
+        catalog_entry(610, "Wind Waker", 6800, &[100, 58], false, false),
+        catalog_entry(37, "Ghost Scepter", 1500, &[], false, false),
+        catalog_entry(256, "Aeon Disk", 3000, &[], false, false),
+        catalog_entry(96, "Scythe of Vyse", 5200, &[], false, false),
+        catalog_entry(223, "Meteor Hammer", 2850, &[], false, false),
+    ];
+
+    let repo = MockItemRepo {
+        catalog: support_catalog.clone(),
+        stats: vec![
+            item_stat(36, ItemPhase::Early, 6.0, 22000, 11400),
+            item_stat(214, ItemPhase::Early, 8.2, 28000, 14500),
+            item_stat(180, ItemPhase::Early, 11.4, 9500, 4800),
+            item_stat(1, ItemPhase::Core, 23.0, 26000, 14500),
+            item_stat(254, ItemPhase::Core, 24.5, 22000, 11800),
+            // Late candidates: 3 Late boots, cheap aura Headdress (94), same-phase subcomponent Mekansm (79),
+            // Aghs + Blessing upgrade, low-share Meteor Hammer filler, Aeon Disk, Eul's + Wind Waker, Ghost Scepter, Vyse
+            item_stat(108, ItemPhase::Late, 37.5, 16000, 10800),
+            item_stat(271, ItemPhase::Late, 54.0, 900, 580),
+            item_stat(931, ItemPhase::Late, 40.5, 3200, 2200),
+            item_stat(231, ItemPhase::Late, 39.5, 2100, 1380),
+            item_stat(48, ItemPhase::Late, 49.0, 1000, 670),
+            item_stat(94, ItemPhase::Late, 30.0, 5700, 3600),
+            item_stat(79, ItemPhase::Late, 34.0, 1200, 780),
+            item_stat(256, ItemPhase::Late, 41.5, 3100, 1950),
+            item_stat(100, ItemPhase::Late, 31.0, 2600, 1550),
+            item_stat(610, ItemPhase::Late, 49.5, 380, 265),
+            item_stat(37, ItemPhase::Late, 33.5, 2400, 1350),
+            item_stat(96, ItemPhase::Late, 45.0, 950, 620),
+            item_stat(223, ItemPhase::Late, 32.0, 500, 380),
+        ],
+    };
+
+    let pa_enemies = [Some(HeroId(44)), None, None, None, None];
+    for role in [Role::SoftSupport, Role::HardSupport] {
+        let build = recommend_item_build(
+            &repo,
+            HeroId(5),
+            role,
+            Bracket::Ancient,
+            &pa_enemies,
+            &[],
+            1800,
+        )
+        .expect("support build should succeed");
+
+        let late_steps: Vec<_> = build
+            .steps
+            .iter()
+            .filter(|s| s.phase == ItemPhase::Late)
+            .collect();
+        assert_eq!(
+            late_steps.len(),
+            4,
+            "{role:?} must fill 4 Late primaries: {late_steps:?}"
+        );
+
+        let late_boot_primaries: Vec<_> = late_steps
+            .iter()
+            .filter(|s| matches!(s.item_id.0, 48 | 220 | 231 | 931))
+            .collect();
+        assert_eq!(
+            late_boot_primaries.len(),
+            1,
+            "{role:?} must have at most 1 Late boot primary, got: {late_boot_primaries:?}"
+        );
+        assert!(
+            late_boot_primaries[0]
+                .variants
+                .iter()
+                .any(|v| matches!(v.item_id.0, 48 | 231)),
+            "{role:?} competing Late boots must attach as variants of {}: {:?}",
+            late_boot_primaries[0].item_id.0,
+            late_boot_primaries[0].variants
+        );
+
+        assert!(
+            build.steps.iter().all(|s| {
+                s.item_id != ItemId(94) && s.variants.iter().all(|v| v.item_id != ItemId(94))
+            }),
+            "{role:?} cheap Headdress (94) must be excluded in Late: {:?}",
+            build.steps
+        );
+        assert!(
+            build.steps.iter().all(|s| {
+                s.item_id != ItemId(79) && s.variants.iter().all(|v| v.item_id != ItemId(79))
+            }),
+            "{role:?} same-phase Mekansm (79) under Greaves (231) must be suppressed: {:?}",
+            build.steps
+        );
+        assert!(
+            late_steps.iter().all(|s| s.item_id != ItemId(271)),
+            "{role:?} Aghanim's Blessing (271) must collapse under Aghanim's Scepter (108), not steal a primary Late slot: {late_steps:?}"
+        );
+        assert!(
+            late_steps
+                .iter()
+                .any(|s| s.item_id == ItemId(108)
+                    && s.variants.iter().any(|v| v.item_id == ItemId(271))),
+            "{role:?} Aghanim's Blessing (271) should attach as variant of Aghs (108): {late_steps:?}"
+        );
+        assert!(
+            late_steps.iter().all(|s| s.item_id != ItemId(223)),
+            "{role:?} low-share Meteor Hammer (223) must not block high-volume support Late items: {late_steps:?}"
+        );
+
+        let ghost_step = late_steps
+            .iter()
+            .find(|s| s.item_id == ItemId(37))
+            .expect("Ghost Scepter (37) must surface in support Late against PA");
+        assert_eq!(
+            ghost_step.counter_trait,
+            Some(CounterTrait::HighPhysicalBurst)
+        );
+        assert!(
+            build
+                .steps
+                .iter()
+                .any(|s| s.item_id == ItemId(610)
+                    || s.variants.iter().any(|v| v.item_id == ItemId(610))),
+            "{role:?} Wind Waker (610) upgrade of Eul's (100) must be preserved: {:?}",
+            build.steps
+        );
+    }
+
+    // When Ghost Scepter (37) is only a Situational candidate against PA, it appears in Optional on Pos 5, never Carry.
+    let sparse_support_repo = MockItemRepo {
+        catalog: support_catalog,
+        stats: vec![
+            item_stat(214, ItemPhase::Early, 8.2, 28000, 14500),
+            item_stat(254, ItemPhase::Core, 24.5, 22000, 11800),
+            item_stat(108, ItemPhase::Late, 37.5, 16000, 10800),
+            item_stat(37, ItemPhase::Situational, 32.0, 220, 114),
+        ],
+    };
+    let pos5_opt = recommend_item_build(
+        &sparse_support_repo,
+        HeroId(5),
+        Role::HardSupport,
+        Bracket::Ancient,
+        &pa_enemies,
+        &[],
+        1500,
+    )
+    .unwrap();
+    assert!(
+        pos5_opt
+            .optional_items
+            .iter()
+            .any(|o| o.item_id == ItemId(37)
+                && o.counter_trait == Some(CounterTrait::HighPhysicalBurst)),
+        "Ghost Scepter (37) should promote into Optional against PA on HardSupport: {:?}",
+        pos5_opt.optional_items
+    );
+    let carry_opt = recommend_item_build(
+        &sparse_support_repo,
+        HeroId(41),
+        Role::Carry,
+        Bracket::Ancient,
+        &pa_enemies,
+        &[],
+        1500,
+    )
+    .unwrap();
+    assert!(
+        carry_opt
+            .optional_items
+            .iter()
+            .all(|o| o.item_id != ItemId(37)),
+        "Ghost Scepter (37) must stay excluded from Optional on Carry: {:?}",
+        carry_opt.optional_items
+    );
+}
+
+#[test]
+fn recommend_item_build_pairs_higher_scoring_blessing_under_scepter_across_inventory_states() {
+    use crate::domain::{Bracket, ItemId, ItemPhase};
+    use crate::math::recommend_item_build;
+
+    let repo = MockItemRepo {
+        catalog: vec![
+            catalog_entry(214, "Tranquil Boots", 900, &[], false, false),
+            catalog_entry(
+                108,
+                "Aghanim's Scepter",
+                4200,
+                &[60, 23, 21, 22],
+                false,
+                false,
+            ),
+            catalog_entry(271, "Aghanim's Blessing", 5800, &[108], false, false),
+            catalog_entry(256, "Aeon Disk", 3000, &[], false, false),
+        ],
+        stats: vec![
+            item_stat(214, ItemPhase::Early, 8.0, 1800, 940),
+            // Exact PR #86 review reproduction: Blessing (222/300 -> ~1.042) outscores Scepter (520/1000 -> ~0.933)
+            item_stat(108, ItemPhase::Late, 32.0, 1000, 520),
+            item_stat(271, ItemPhase::Late, 48.0, 300, 222),
+            item_stat(256, ItemPhase::Late, 36.0, 900, 500),
+        ],
+    };
+
+    let enemies = [None; 5];
+
+    // 1. Before purchase (`owned_items = &[]`): higher-scoring Blessing MUST still attach under Scepter,
+    // using a single Late slot and keeping purchase order (Scepter primary -> Blessing variant).
+    let unowned_build = recommend_item_build(
+        &repo,
+        HeroId(5),
+        Role::HardSupport,
+        Bracket::Ancient,
+        &enemies,
+        &[],
+        1200,
+    )
+    .expect("unowned build should succeed");
+
+    let unowned_late: Vec<_> = unowned_build
+        .steps
+        .iter()
+        .filter(|s| s.phase == ItemPhase::Late)
+        .collect();
+    assert!(
+        unowned_late.iter().all(|s| s.item_id != ItemId(271)),
+        "Aghanim's Blessing (271) must never become a separate Late primary even when outscoring Scepter: {unowned_late:?}"
+    );
+    let scepter_unowned = unowned_late
+        .iter()
+        .find(|s| s.item_id == ItemId(108))
+        .expect("Aghanim's Scepter (108) must remain primary Late step");
+    assert!(!scepter_unowned.owned);
+    assert_eq!(
+        scepter_unowned.variants.first().map(|v| v.item_id),
+        Some(ItemId(271)),
+        "Blessing (271) must sit immediately beneath Scepter (108) at variants[0]: {:?}",
+        scepter_unowned.variants
+    );
+    assert_eq!(
+        unowned_late.len(),
+        2,
+        "Scepter+Blessing pair plus Aeon Disk must occupy only 2 Late slots: {unowned_late:?}"
+    );
+
+    // 2. Live inventory reports Tranquil Boots + Aghanim's Scepter owned:
+    // Scepter remains primary & OWNED, Blessing stays grouped beneath it at variants[0],
+    // and `next_unowned_index` advances past owned Scepter to Aeon Disk (256).
+    let owned_build = recommend_item_build(
+        &repo,
+        HeroId(5),
+        Role::HardSupport,
+        Bracket::Ancient,
+        &enemies,
+        &[ItemId(214), ItemId(108)],
+        2100,
+    )
+    .expect("owned Scepter build should succeed");
+
+    let owned_late: Vec<_> = owned_build
+        .steps
+        .iter()
+        .filter(|s| s.phase == ItemPhase::Late)
+        .collect();
+    assert!(
+        owned_late.iter().all(|s| s.item_id != ItemId(271)),
+        "Blessing (271) must stay under Scepter (108) when Scepter is owned: {owned_late:?}"
+    );
+    let scepter_owned = owned_late
+        .iter()
+        .find(|s| s.item_id == ItemId(108))
+        .expect("Owned Scepter (108) must stay primary Late step");
+    assert!(scepter_owned.owned);
+    assert_eq!(
+        scepter_owned.variants.first().map(|v| v.item_id),
+        Some(ItemId(271)),
+        "Blessing (271) upgrade must remain at variants[0] when Scepter is owned: {:?}",
+        scepter_owned.variants
+    );
+    assert_eq!(
+        owned_build
+            .next_unowned_index
+            .map(|idx| owned_build.steps[idx].item_id),
+        Some(ItemId(256)),
+        "next_unowned_index must advance to next unowned primary step (Aeon Disk): {:?}",
+        owned_build.steps
+    );
+}
+
+#[test]
+fn recommend_item_build_defers_blessing_when_tight_window_competitor_absorbs_scepter() {
+    use crate::domain::{Bracket, ItemId, ItemPhase};
+    use crate::math::recommend_item_build;
+
+    let repo = MockItemRepo {
+        catalog: vec![
+            catalog_entry(214, "Tranquil Boots", 900, &[], false, false),
+            catalog_entry(
+                108,
+                "Aghanim's Scepter",
+                4200,
+                &[60, 23, 21, 22],
+                false,
+                false,
+            ),
+            catalog_entry(271, "Aghanim's Blessing", 5800, &[108], false, false),
+            catalog_entry(256, "Aeon Disk", 3000, &[], false, false),
+        ],
+        stats: vec![
+            item_stat(214, ItemPhase::Early, 8.0, 1800, 940),
+            // Slightly higher-scoring Aeon Disk at 32.5m clusters tight-window Scepter at 32.0m as a variant.
+            item_stat(256, ItemPhase::Late, 32.5, 1000, 550),
+            item_stat(108, ItemPhase::Late, 32.0, 1000, 520),
+            item_stat(271, ItemPhase::Late, 48.0, 300, 222),
+        ],
+    };
+
+    let enemies = [None; 5];
+
+    // 1. No owned items: Scepter is absorbed into Aeon Disk's competing slot as a variant,
+    // so Blessing must NOT become a separate Late primary step.
+    let unowned_build = recommend_item_build(
+        &repo,
+        HeroId(5),
+        Role::HardSupport,
+        Bracket::Ancient,
+        &enemies,
+        &[],
+        1200,
+    )
+    .expect("unowned build with tight-window competitor should succeed");
+
+    let unowned_late: Vec<_> = unowned_build
+        .steps
+        .iter()
+        .filter(|s| s.phase == ItemPhase::Late)
+        .collect();
+    assert_eq!(
+        unowned_late.len(),
+        1,
+        "absorbed Scepter + deferred Blessing must not spawn a standalone Blessing primary: {unowned_late:?}"
+    );
+    assert_eq!(unowned_late[0].item_id, ItemId(256));
+    assert!(
+        unowned_late[0]
+            .variants
+            .iter()
+            .any(|v| v.item_id == ItemId(108)),
+        "tight-window Scepter should sit under Aeon Disk variants: {:?}",
+        unowned_late[0].variants
+    );
+    assert!(
+        unowned_build.steps.iter().all(|s| s.item_id != ItemId(271)),
+        "Blessing (271) must not appear as a primary step when Scepter is absorbed: {:?}",
+        unowned_build.steps
+    );
+
+    // 2. Owned Scepter promotes Scepter into its own owned Late primary and keeps Blessing grouped under it.
+    let owned_build = recommend_item_build(
+        &repo,
+        HeroId(5),
+        Role::HardSupport,
+        Bracket::Ancient,
+        &enemies,
+        &[ItemId(214), ItemId(108)],
+        2100,
+    )
+    .expect("owned Scepter build should succeed");
+
+    let owned_late: Vec<_> = owned_build
+        .steps
+        .iter()
+        .filter(|s| s.phase == ItemPhase::Late)
+        .collect();
+    assert!(
+        owned_late.iter().all(|s| s.item_id != ItemId(271)),
+        "Blessing (271) must stay under owned Scepter rather than a standalone primary: {owned_late:?}"
+    );
+    let owned_scepter = owned_late
+        .iter()
+        .find(|s| s.item_id == ItemId(108))
+        .expect("owned Scepter (108) must be retained as primary");
+    assert!(owned_scepter.owned);
+    assert_eq!(
+        owned_scepter.variants.first().map(|v| v.item_id),
+        Some(ItemId(271)),
+        "Blessing (271) must attach at variants[0] when owned Scepter is primary: {:?}",
+        owned_scepter.variants
+    );
+}
