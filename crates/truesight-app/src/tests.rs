@@ -5311,3 +5311,114 @@ fn select_build_variant_for_direct_upgrade_preserves_owned_scepter_and_next_poin
         "switching back to Tranquil Boots (214) must restore original primary"
     );
 }
+
+#[test]
+fn set_ally_faction_clears_stale_build_view_hero_and_refreshes_uncached_team_items() {
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use truesight_adapters::sync::LocalCacheManager;
+    use truesight_core::domain::{Faction, HeroId, Role};
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_faction_flip_refresh_test_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    // Cache TA (46, Carry) and Hoodwink (123, SoftSupport) across all 4 STRATZ buckets;
+    // leave Dire heroes Juggernaut (8, Carry) and Invoker (74, SoftSupport) uncached.
+    let make_hero_entries = |hero_id: u16, role: &str, item_id: u16| {
+        [
+            "HERALD_GUARDIAN",
+            "CRUSADER_ARCHON",
+            "LEGEND_ANCIENT",
+            "DIVINE_IMMORTAL",
+        ]
+        .into_iter()
+        .map(|b| {
+            format!(
+                r#"{{"heroId":{hero_id},"role":"{role}","bracket":"{b}","itemStartingPurchase":[],"itemFullPurchase":[{{"itemId":{item_id},"phase":"Core","timeSecs":960,"instance":0,"matchCount":1000,"winCount":540}}]}}"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+    };
+    let cached_json = format!(
+        "[{},{}]",
+        make_hero_entries(46, "Carry", 236),
+        make_hero_entries(123, "SoftSupport", 232)
+    );
+    std::fs::write(tmp_dir.join("hero_item_stats.json"), cached_json).unwrap();
+
+    let token = "eyJhbGciOinone.eyJleHAiOjQxMDI0NDQ4MDB9.sig".to_string();
+    let mut mgr = LocalCacheManager::with_optional_account(tmp_dir.clone(), None);
+    mgr.stratz_api_token = Some(token.clone());
+    let mut session =
+        AppSession::with_cache_and_config(mgr, Some(tmp_dir.join("config.toml"))).unwrap();
+    session.cache_mgr.stratz_api_token = Some(token);
+
+    assert!(execute_command(&mut session, "ally 1 templar assassin").unwrap());
+    assert!(execute_command(&mut session, "ally 4 hoodwink").unwrap());
+    assert!(execute_command(&mut session, "enemy 1 juggernaut").unwrap());
+    assert!(execute_command(&mut session, "enemy 4 invoker").unwrap());
+
+    session.select_build_view_hero(HeroId(123)); // Explicitly inspect ally Hoodwink on Radiant.
+    session.toggle_post_draft_build_view();
+    assert!(session.is_post_draft_build_view());
+    wait_for_sync_idle(&mut session);
+
+    type RecordedRolesLog = Arc<Mutex<Vec<Vec<(HeroId, Role)>>>>;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let recorded_roles: RecordedRolesLog = Arc::new(Mutex::new(Vec::new()));
+    let calls_bg = Arc::clone(&calls);
+    let recorded_bg = Arc::clone(&recorded_roles);
+    session.set_background_sync_runner(move |mgr, _force| {
+        calls_bg.fetch_add(1, Ordering::SeqCst);
+        recorded_bg
+            .lock()
+            .unwrap()
+            .push(mgr.target_item_hero_roles.clone());
+        Ok("ok".into())
+    });
+
+    // Flipping faction Radiant -> Dire swaps allies/enemies:
+    // Hoodwink moved to enemies so `build_view_hero` must clear, target_item_hero_roles
+    // must switch to Dire allies (Juggernaut + Invoker), and an item refresh must launch.
+    session.set_ally_faction(Faction::Dire);
+
+    assert_eq!(
+        session.build_view_hero, None,
+        "stale build_view_hero moved to Enemies must clear on faction flip"
+    );
+    assert!(
+        session
+            .cache_mgr
+            .target_item_hero_roles
+            .contains(&(HeroId(8), Role::Carry))
+            && session
+                .cache_mgr
+                .target_item_hero_roles
+                .contains(&(HeroId(74), Role::SoftSupport))
+            && !session
+                .cache_mgr
+                .target_item_hero_roles
+                .iter()
+                .any(|&(h, _)| h == HeroId(123)),
+        "target_item_hero_roles must update to Dire allies after faction flip: {:?}",
+        session.cache_mgr.target_item_hero_roles
+    );
+
+    wait_for_sync_until(&mut session, || calls.load(Ordering::SeqCst) >= 1);
+    let batches = recorded_roles.lock().unwrap();
+    assert!(
+        batches
+            .iter()
+            .any(|b| b.contains(&(HeroId(74), Role::SoftSupport))),
+        "faction flip into Build view must trigger sync for uncached Dire heroes: {batches:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}

@@ -1227,6 +1227,7 @@ impl AppSession {
         if self.draft.ally_faction == faction {
             return;
         }
+        let prev_active = self.active_build_hero();
         self.draft.ally_faction = faction;
         std::mem::swap(&mut self.draft.allies, &mut self.draft.enemies);
         std::mem::swap(&mut self.ally_locked_slots, &mut self.enemy_locked_slots);
@@ -1238,7 +1239,19 @@ impl AppSession {
                 Side::Allies
             };
         }
+        if let Some(browse_id) = self.build_view_hero
+            && !self
+                .draft
+                .allies
+                .iter()
+                .flatten()
+                .any(|p| p.hero_id == browse_id)
+        {
+            self.build_view_hero = None;
+        }
         self.sync_local_player_target_role();
+        self.sync_target_item_heroes_to_cache();
+        self.refresh_item_build_if_hero_changed(prev_active);
     }
 
     /// Evaluates top enemy draft candidates for `enemy_role` using neutral comfort (`0.0`).

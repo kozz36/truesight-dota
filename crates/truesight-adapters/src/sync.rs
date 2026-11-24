@@ -559,30 +559,18 @@ impl LocalCacheManager {
                 parse_cached_hero_item_stats_entries(&existing, &SeededItemMetaRepository::new());
             let has_token = self.effective_stratz_token().is_some();
             return self.target_item_hero_roles.iter().any(|&(hid, role)| {
-                if has_token {
-                    let has_all_buckets = StratzBracketBucket::ALL.iter().all(|&bucket| {
-                        parsed.iter().any(|(c_hid, c_role, c_bucket, _)| {
-                            *c_hid == hid && *c_role == Some(role) && *c_bucket == Some(bucket)
-                        })
-                    });
-                    let has_role_unbracketed = parsed.iter().any(|(c_hid, c_role, c_bucket, _)| {
-                        *c_hid == hid && *c_role == Some(role) && c_bucket.is_none()
-                    });
-                    let has_any_role_bucket = parsed.iter().any(|(c_hid, c_role, c_bucket, _)| {
-                        *c_hid == hid && *c_role == Some(role) && c_bucket.is_some()
-                    });
-                    let has_hero_unbracketed_fallback =
-                        parsed.iter().any(|(c_hid, c_role, c_bucket, _)| {
-                            *c_hid == hid && c_role.is_none() && c_bucket.is_none()
-                        });
-                    !(has_all_buckets
-                        || has_role_unbracketed
-                        || (has_any_role_bucket && has_hero_unbracketed_fallback))
-                } else {
-                    !parsed.iter().any(|(c_hid, c_role, _, _)| {
-                        *c_hid == hid && (*c_role == Some(role) || c_role.is_none())
-                    })
-                }
+                !is_hero_role_covered_in_keys(
+                    parsed.iter().map(|(c_hid, c_role, c_bucket, _)| {
+                        (
+                            c_hid.0,
+                            c_role.map(role_to_cache_idx),
+                            c_bucket.map(StratzBracketBucket::index),
+                        )
+                    }),
+                    hid,
+                    Some(role),
+                    has_token,
+                )
             });
         }
 
@@ -595,9 +583,20 @@ impl LocalCacheManager {
         };
         let grouped =
             parse_cached_hero_item_stats_entries(&existing, &SeededItemMetaRepository::new());
-        configured
-            .iter()
-            .any(|hid| !grouped.iter().any(|(cached_id, _, _, _)| cached_id == hid))
+        configured.iter().any(|&hid| {
+            !is_hero_role_covered_in_keys(
+                grouped.iter().map(|(c_hid, c_role, c_bucket, _)| {
+                    (
+                        c_hid.0,
+                        c_role.map(role_to_cache_idx),
+                        c_bucket.map(StratzBracketBucket::index),
+                    )
+                }),
+                hid,
+                None,
+                false,
+            )
+        })
     }
 
     pub fn now_unix() -> u64 {
@@ -1003,22 +1002,29 @@ impl LocalCacheManager {
             mut fetched_profile,
         ) = (None, None, None, None, None, None, None);
         let mut updated_parts = Vec::new();
+        let mut deferred_errors = Vec::new();
         let stratz_token = self.effective_stratz_token_at(now_unix);
 
         if need_meta {
-            let body = fetch_opendota_url("https://api.opendota.com/api/heroStats")?;
-            if is_arr(&body) && !parse_hero_stats_json(&body).is_empty() {
-                fetched_meta = Some(body);
-                updated_parts.push("heroStats (24h TTL)");
-            }
-            if !self.is_cancelled() {
-                if let Some(ic_body) =
-                    fetch_opendota_url("https://api.opendota.com/api/constants/items")
-                        .ok()
-                        .filter(|b| !parse_opendota_item_constants_json(b).is_empty())
-                {
-                    fetched_item_constants = Some(ic_body);
-                    updated_parts.push("itemConstants (24h TTL)");
+            match fetch_opendota_url("https://api.opendota.com/api/heroStats") {
+                Ok(body) => {
+                    if is_arr(&body) && !parse_hero_stats_json(&body).is_empty() {
+                        fetched_meta = Some(body);
+                        updated_parts.push("heroStats (24h TTL)");
+                    }
+                    if !self.is_cancelled() {
+                        if let Some(ic_body) =
+                            fetch_opendota_url("https://api.opendota.com/api/constants/items")
+                                .ok()
+                                .filter(|b| !parse_opendota_item_constants_json(b).is_empty())
+                        {
+                            fetched_item_constants = Some(ic_body);
+                            updated_parts.push("itemConstants (24h TTL)");
+                        }
+                    }
+                }
+                Err(e) => {
+                    deferred_errors.push(format!("meta: {e}"));
                 }
             }
             if !self.is_cancelled() {
@@ -1070,6 +1076,17 @@ impl LocalCacheManager {
             for (hero_id, role_opt) in self.effective_target_item_hero_roles() {
                 if self.is_cancelled() {
                     break;
+                }
+                if !force
+                    && !need_meta
+                    && is_hero_role_covered_in_keys(
+                        merged_entries.keys().copied(),
+                        hero_id,
+                        role_opt,
+                        stratz_token.is_some(),
+                    )
+                {
+                    continue;
                 }
                 let mut covered_buckets_mask: u8 = 0;
                 let mut covered_unbracketed = false;
@@ -1157,34 +1174,51 @@ impl LocalCacheManager {
         }
         if need_player && !self.is_cancelled() {
             if let Some(account_id) = self.player_account_id {
-                let body = fetch_opendota_url(&format!(
+                match fetch_opendota_url(&format!(
                     "https://api.opendota.com/api/players/{account_id}/heroes"
-                ))?;
-                if is_arr(&body) {
-                    fetched_player = Some(body);
-                    updated_parts.push("player comfort (1h TTL)");
-                }
-                if !self.is_cancelled() {
-                    if let Some(mb) = fetch_opendota_url(&format!(
-                        "https://api.opendota.com/api/players/{account_id}/matches?limit=500"
-                    ))
-                    .ok()
-                    .filter(|m| is_arr(m))
-                    {
-                        fetched_matches = Some(mb);
+                )) {
+                    Ok(body) => {
+                        if is_arr(&body) {
+                            fetched_player = Some(body);
+                            updated_parts.push("player comfort (1h TTL)");
+                        }
+                        if !self.is_cancelled() {
+                            if let Some(mb) = fetch_opendota_url(&format!(
+                                "https://api.opendota.com/api/players/{account_id}/matches?limit=500"
+                            ))
+                            .ok()
+                            .filter(|m| is_arr(m))
+                            {
+                                fetched_matches = Some(mb);
+                            }
+                        }
+                        if !self.is_cancelled() {
+                            if let Some(pb) = fetch_opendota_url(&format!(
+                                "https://api.opendota.com/api/players/{account_id}"
+                            ))
+                            .ok()
+                            .filter(|p| is_obj(p))
+                            {
+                                fetched_profile = Some(pb);
+                            }
+                        }
                     }
-                }
-                if !self.is_cancelled() {
-                    if let Some(pb) = fetch_opendota_url(&format!(
-                        "https://api.opendota.com/api/players/{account_id}"
-                    ))
-                    .ok()
-                    .filter(|p| is_obj(p))
-                    {
-                        fetched_profile = Some(pb);
+                    Err(e) => {
+                        deferred_errors.push(format!("player: {e}"));
                     }
                 }
             }
+        }
+
+        let any_staged = fetched_meta.is_some()
+            || fetched_stratz.is_some()
+            || fetched_item_constants.is_some()
+            || fetched_hero_items.is_some()
+            || fetched_player.is_some()
+            || fetched_matches.is_some()
+            || fetched_profile.is_some();
+        if !any_staged && !deferred_errors.is_empty() {
+            return Err(PortError(deferred_errors.join("; ")));
         }
 
         self.publish_staged_cache_with_items(
@@ -1199,8 +1233,14 @@ impl LocalCacheManager {
         )?;
         if updated_parts.is_empty() {
             Ok("Synced OpenDota cache.".into())
-        } else {
+        } else if deferred_errors.is_empty() {
             Ok(format!("Synced OpenDota: {}.", updated_parts.join(" + ")))
+        } else {
+            Ok(format!(
+                "Synced: {} (partial: {}).",
+                updated_parts.join(" + "),
+                deferred_errors.join("; ")
+            ))
         }
     }
 
@@ -2806,6 +2846,48 @@ fn deduplicate_hero_ids(heroes: Vec<HeroId>) -> Vec<HeroId> {
         }
     }
     out
+}
+
+fn is_hero_role_covered_in_keys<I>(
+    keys: I,
+    hero_id: HeroId,
+    role_opt: Option<Role>,
+    has_stratz_token: bool,
+) -> bool
+where
+    I: Clone + Iterator<Item = (u16, Option<u8>, Option<u8>)>,
+{
+    match role_opt {
+        Some(role) => {
+            let target_role_idx = role_to_cache_idx(role);
+            if has_stratz_token {
+                let has_all_buckets = (0..StratzBracketBucket::ALL.len() as u8).all(|bucket_idx| {
+                    keys.clone().any(|(hid, r_idx, b_idx)| {
+                        hid == hero_id.0
+                            && r_idx == Some(target_role_idx)
+                            && b_idx == Some(bucket_idx)
+                    })
+                });
+                let has_role_unbracketed = keys.clone().any(|(hid, r_idx, b_idx)| {
+                    hid == hero_id.0 && r_idx == Some(target_role_idx) && b_idx.is_none()
+                });
+                let has_any_role_bucket = keys.clone().any(|(hid, r_idx, b_idx)| {
+                    hid == hero_id.0 && r_idx == Some(target_role_idx) && b_idx.is_some()
+                });
+                let has_hero_unbracketed_fallback = keys.clone().any(|(hid, r_idx, b_idx)| {
+                    hid == hero_id.0 && r_idx.is_none() && b_idx.is_none()
+                });
+                has_all_buckets
+                    || has_role_unbracketed
+                    || (has_any_role_bucket && has_hero_unbracketed_fallback)
+            } else {
+                keys.clone().any(|(hid, r_idx, _)| {
+                    hid == hero_id.0 && (r_idx == Some(target_role_idx) || r_idx.is_none())
+                })
+            }
+        }
+        None => keys.clone().any(|(hid, _, _)| hid == hero_id.0),
+    }
 }
 
 fn serialize_cached_hero_item_stats_v2(entries_map: &CachedHeroItemStatsMap) -> String {

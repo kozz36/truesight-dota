@@ -6641,3 +6641,244 @@ fn hero_item_stats_v2_cache_preserves_early_boot_phase_and_support_core_phase_on
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+#[test]
+fn sync_from_sources_with_role_items_publishes_stratz_items_when_opendota_player_or_meta_fails() {
+    use crate::sync::LocalCacheManager;
+    use truesight_core::domain::{Bracket, HeroId, ItemId, Role};
+    use truesight_core::ports::{ItemMetaRepository, PortError};
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_partial_opendota_fail_test_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    let now = 1_795_000_000_u64;
+    let valid_token = "eyJhbGciOinone.eyJleHAiOjQxMDI0NDQ4MDB9.sig".to_string();
+    let sample_stratz = |full_item_id: u16| {
+        format!(
+            r#"{{
+                "data": {{
+                    "heroStats": {{
+                        "hgStart": [{{"itemId": 44, "instance": 0, "matchCount": 800, "winCount": 410, "wasGiven": false}}],
+                        "hgBoot": [{{"itemId": 63, "time": 540000, "matchCount": 900, "winCount": 460}}],
+                        "hgFull": [{{"itemId": {full_item_id}, "time": 16, "matchCount": 900, "winCount": 510}}],
+                        "caStart": [{{"itemId": 44, "instance": 0, "matchCount": 800, "winCount": 410, "wasGiven": false}}],
+                        "caBoot": [{{"itemId": 63, "time": 540000, "matchCount": 900, "winCount": 460}}],
+                        "caFull": [{{"itemId": {full_item_id}, "time": 16, "matchCount": 900, "winCount": 520}}],
+                        "laStart": [{{"itemId": 44, "instance": 0, "matchCount": 800, "winCount": 410, "wasGiven": false}}],
+                        "laBoot": [{{"itemId": 63, "time": 540000, "matchCount": 900, "winCount": 460}}],
+                        "laFull": [{{"itemId": {full_item_id}, "time": 15, "matchCount": 900, "winCount": 540}}],
+                        "diStart": [{{"itemId": 44, "instance": 0, "matchCount": 800, "winCount": 410, "wasGiven": false}}],
+                        "diBoot": [{{"itemId": 63, "time": 540000, "matchCount": 900, "winCount": 460}}],
+                        "diFull": [{{"itemId": {full_item_id}, "time": 14, "matchCount": 900, "winCount": 550}}]
+                    }}
+                }}
+            }}"#
+        )
+    };
+
+    // Case A: Meta is fresh (<24h), linked player comfort is stale (>1h), OpenDota player endpoint times out.
+    // STRATZ item builds for Invoker (74, SoftSupport) MUST still be published!
+    let item_constants_json =
+        r#"{"blink":{"id":1,"dname":"Blink Dagger","cost":2250,"components":null}}"#;
+    let mut mgr = LocalCacheManager::with_optional_account(tmp_dir.clone(), Some(127_255_741));
+    mgr.stratz_api_token = Some(valid_token.clone());
+    mgr.publish_staged_cache_with_items(
+        Some(r#"[{"id": 74, "5_pick": 1000, "5_win": 520}]"#),
+        None,
+        Some(item_constants_json),
+        None,
+        Some("[]"),
+        None,
+        None,
+        now - 7_200, // 2h ago: Meta fresh (<24h), Player stale (>1h)
+    )
+    .unwrap();
+    mgr.set_target_item_hero_roles(vec![(HeroId(74), Role::SoftSupport)]);
+
+    let msg_a = mgr
+        .sync_from_sources_with_role_items(
+            false,
+            now,
+            |url| Err(PortError(format!("OpenDota timeout on {url}"))),
+            |_token| Err(PortError("unexpected stratz syn".into())),
+            |_token, hero_id, role| {
+                assert_eq!(hero_id, 74);
+                assert_eq!(role, Some(Role::SoftSupport));
+                Ok(sample_stratz(267)) // Spirit Vessel
+            },
+        )
+        .expect("STRATZ item builds must persist even when OpenDota player endpoint times out");
+    assert!(
+        msg_a.contains("itemBuilds"),
+        "sync result must mention persisted itemBuilds: {msg_a}"
+    );
+    assert!(
+        !mgr.is_target_item_heroes_uncached(),
+        "Invoker Pos 4 must now be cached in hero_item_stats.json"
+    );
+    let repo_a = mgr.build_item_repository();
+    let invoker_stats = repo_a
+        .hero_item_stats(HeroId(74), Role::SoftSupport, Bracket::Ancient)
+        .expect("Invoker Pos 4 Ancient STRATZ stats must be readable from cache");
+    assert!(
+        invoker_stats.iter().any(|s| s.item_id == ItemId(267)),
+        "Spirit Vessel (267) from STRATZ must be persisted: {invoker_stats:?}"
+    );
+
+    // Case B: Meta is stale (>24h) and OpenDota /heroStats times out, while STRATZ itemBuilds for
+    // Juggernaut (8, Carry) succeeds -> item builds persist and existing meta cache remains intact.
+    std::fs::write(
+        tmp_dir.join("cache_metadata.txt"),
+        format!("meta_sync_unix={}\n", now - 100_000),
+    )
+    .unwrap();
+    mgr.set_target_item_hero_roles(vec![(HeroId(8), Role::Carry)]);
+    mgr.sync_from_sources_with_role_items(
+        false,
+        now,
+        |url| Err(PortError(format!("OpenDota timeout on {url}"))),
+        |_token| Ok(r#"{"data":{"heroStats":{"matchUp":[]}}}"#.to_string()),
+        |_token, hero_id, role| {
+            assert_eq!(hero_id, 8);
+            assert_eq!(role, Some(Role::Carry));
+            Ok(sample_stratz(166)) // Maelstrom
+        },
+    )
+    .expect("STRATZ item builds must persist even when OpenDota heroStats times out");
+
+    let repo_b = mgr.build_item_repository();
+    let jugg_stats = repo_b
+        .hero_item_stats(HeroId(8), Role::Carry, Bracket::Ancient)
+        .expect("Juggernaut Carry STRATZ stats must be persisted");
+    assert!(jugg_stats.iter().any(|s| s.item_id == ItemId(166)));
+    assert_eq!(
+        std::fs::read_to_string(tmp_dir.join("opendota_hero_stats.json")).unwrap(),
+        r#"[{"id": 74, "5_pick": 1000, "5_win": 520}]"#,
+        "existing opendota_hero_stats.json must stay intact when /heroStats times out"
+    );
+
+    // Case C: Total outage (stale meta, no STRATZ token, every OpenDota endpoint fails) still returns Err.
+    let mut offline_mgr = LocalCacheManager::with_optional_account(tmp_dir.clone(), None);
+    offline_mgr.set_target_item_hero_roles(vec![(HeroId(2), Role::Offlane)]);
+    let err_c = offline_mgr.sync_from_sources_with_role_items(
+        false,
+        now,
+        |url| Err(PortError(format!("offline on {url}"))),
+        |_token| Err(PortError("offline".into())),
+        |_token, _hid, _role| Err(PortError("offline".into())),
+    );
+    assert!(
+        err_c.is_err(),
+        "total network outage with zero staged artifacts must still return Err: {err_c:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn sync_from_sources_with_role_items_skips_already_cached_hero_roles_when_not_forced() {
+    use crate::sync::LocalCacheManager;
+    use truesight_core::domain::{Bracket, HeroId, ItemId, Role};
+    use truesight_core::ports::{ItemMetaRepository, PortError};
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_skip_cached_hero_roles_test_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    let now = 1_795_000_000_u64;
+    let mut mgr = LocalCacheManager::with_optional_account(tmp_dir.clone(), None);
+    mgr.stratz_api_token = Some("eyJhbGciOinone.eyJleHAiOjQxMDI0NDQ4MDB9.sig".to_string());
+    let item_constants_json =
+        r#"{"dragon_lance":{"id":236,"dname":"Dragon Lance","cost":1900,"components":null}}"#;
+    mgr.publish_staged_cache_with_items(
+        Some(r#"[{"id": 46, "5_pick": 1000, "5_win": 520}, {"id": 74, "5_pick": 1000, "5_win": 510}]"#),
+        None,
+        Some(item_constants_json),
+        Some(concat!(
+            r#"[{"heroId":46,"role":"Carry","bracket":"HERALD_GUARDIAN","itemStartingPurchase":[],"itemFullPurchase":[{"itemId":236,"phase":"Core","timeSecs":960,"instance":0,"matchCount":800,"winCount":430}]},"#,
+            r#"{"heroId":46,"role":"Carry","bracket":"CRUSADER_ARCHON","itemStartingPurchase":[],"itemFullPurchase":[{"itemId":236,"phase":"Core","timeSecs":900,"instance":0,"matchCount":800,"winCount":440}]},"#,
+            r#"{"heroId":46,"role":"Carry","bracket":"LEGEND_ANCIENT","itemStartingPurchase":[],"itemFullPurchase":[{"itemId":236,"phase":"Core","timeSecs":840,"instance":0,"matchCount":800,"winCount":450}]},"#,
+            r#"{"heroId":46,"role":"Carry","bracket":"DIVINE_IMMORTAL","itemStartingPurchase":[],"itemFullPurchase":[{"itemId":236,"phase":"Core","timeSecs":780,"instance":0,"matchCount":800,"winCount":460}]}]"#
+        )),
+        None,
+        None,
+        None,
+        now - 100, // Meta fresh (<24h)
+    )
+    .unwrap();
+
+    mgr.set_target_item_hero_roles(vec![
+        (HeroId(46), Role::Carry),
+        (HeroId(74), Role::SoftSupport),
+    ]);
+
+    let make_invoker_stratz = || {
+        r#"{
+            "data": {
+                "heroStats": {
+                    "hgStart": [], "hgBoot": [], "hgFull": [{"itemId": 267, "time": 16, "matchCount": 900, "winCount": 510}],
+                    "caStart": [], "caBoot": [], "caFull": [{"itemId": 267, "time": 16, "matchCount": 900, "winCount": 510}],
+                    "laStart": [], "laBoot": [], "laFull": [{"itemId": 267, "time": 15, "matchCount": 900, "winCount": 520}],
+                    "diStart": [], "diBoot": [], "diFull": [{"itemId": 267, "time": 14, "matchCount": 900, "winCount": 530}]
+                }
+            }
+        }"#.to_string()
+    };
+
+    let mut fetched = Vec::new();
+    mgr.sync_from_sources_with_role_items(
+        false,
+        now,
+        |url| Err(PortError(format!("unexpected OpenDota URL {url}"))),
+        |_token| Err(PortError("unexpected stratz syn".into())),
+        |_token, hero_id, role| {
+            fetched.push((hero_id, role));
+            Ok(make_invoker_stratz())
+        },
+    )
+    .expect("incremental uncached item sync must succeed");
+
+    assert_eq!(
+        fetched,
+        vec![(74, Some(Role::SoftSupport))],
+        "already-cached TA (46, Carry) must be skipped when not forced"
+    );
+
+    let repo = mgr.build_item_repository();
+    assert!(
+        repo.hero_item_stats(HeroId(46), Role::Carry, Bracket::Ancient)
+            .is_ok_and(|s| s.iter().any(|x| x.item_id == ItemId(236))),
+        "previously cached TA (46, Carry) must be retained after merge"
+    );
+    assert!(
+        repo.hero_item_stats(HeroId(74), Role::SoftSupport, Bracket::Ancient)
+            .is_ok_and(|s| s.iter().any(|x| x.item_id == ItemId(267))),
+        "newly fetched Invoker (74, SoftSupport) must be added to cache"
+    );
+
+    // Forced sync (`force = true`) must still refresh all requested target hero-roles.
+    let mut forced_fetched = Vec::new();
+    mgr.sync_from_sources_with_role_items(
+        true,
+        now,
+        |_url| Ok("[]".to_string()),
+        |_token| Ok(r#"{"data":{"heroStats":{"matchUp":[]}}}"#.to_string()),
+        |_token, hero_id, role| {
+            forced_fetched.push((hero_id, role));
+            Ok(make_invoker_stratz())
+        },
+    )
+    .expect("forced refresh must succeed");
+    assert_eq!(
+        forced_fetched,
+        vec![(46, Some(Role::Carry)), (74, Some(Role::SoftSupport))],
+        "forced sync must re-fetch every target hero-role"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
