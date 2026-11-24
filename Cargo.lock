@@ -3592,7 +3592,7 @@ dependencies = [
 
 [[package]]
 name = "truesight-adapters"
-version = "0.4.0-rc.1"
+version = "0.4.0-rc.2"
 dependencies = [
  "truesight-core",
  "xcap",
@@ -3600,7 +3600,7 @@ dependencies = [
 
 [[package]]
 name = "truesight-app"
-version = "0.4.0-rc.1"
+version = "0.4.0-rc.2"
 dependencies = [
  "eframe",
  "global-hotkey",
@@ -3611,7 +3611,7 @@ dependencies = [
 
 [[package]]
 name = "truesight-core"
-version = "0.4.0-rc.1"
+version = "0.4.0-rc.2"
 
 [[package]]
 name = "ttf-parser"
