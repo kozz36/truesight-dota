@@ -443,38 +443,73 @@ impl TrueSightGuiApp {
                     });
 
                 if var_rows > 0 && !step.variants.is_empty() {
+                    let owned_items = self.session.active_build_owned_items();
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 2.0;
                         for var_chunk in step.variants.chunks(2).take(var_rows) {
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 2.0;
                                 for var in var_chunk {
-                                    let (vname, vcost) = self
-                                        .session
-                                        .item_repo
-                                        .item_catalog(var.item_id)
+                                    let var_entry =
+                                        self.session.item_repo.item_catalog(var.item_id);
+                                    let is_direct_upgrade = var_entry
+                                        .as_ref()
+                                        .is_some_and(|e| e.components.contains(&step.item_id));
+                                    let (vname, vcost) = var_entry
                                         .map(|e| (e.display_name, e.cost))
                                         .unwrap_or_else(|| (format!("#{}", var.item_id.0), 0));
+                                    let var_owned = owned_items.contains(&var.item_id);
+                                    let upgrade_ready =
+                                        is_direct_upgrade && step.owned && !var_owned;
                                     let (vr, vresp) = ui.allocate_exact_size(
                                         vec2(variant_w, variant_h),
                                         Sense::click(),
                                     );
-                                    let vborder = if vresp.hovered() { P_GEM } else { P_LINE };
+                                    let vborder = if vresp.hovered() {
+                                        P_GEM
+                                    } else if upgrade_ready {
+                                        P_CYAN
+                                    } else {
+                                        P_LINE
+                                    };
                                     paint_item_icon_with_fallback(
                                         ui.painter(),
                                         vr,
                                         self.textures.items.get(&var.item_id),
                                         Some(vname.as_str()),
                                         vborder,
-                                        false,
+                                        var_owned,
                                     );
+                                    if is_direct_upgrade && variant_w >= 18.0 {
+                                        let (fg, bg) = if upgrade_ready {
+                                            (P_VOID, P_CYAN)
+                                        } else {
+                                            (P_GLINT, P_VOID.gamma_multiply(0.84))
+                                        };
+                                        paint_corner_pill(
+                                            ui.painter(),
+                                            vr.min + vec2(1.0, 1.0),
+                                            Align2::LEFT_TOP,
+                                            "UPG",
+                                            fg,
+                                            bg,
+                                            5.5,
+                                        );
+                                    }
                                     let trait_note = var
                                         .counter_trait
                                         .map(|t| format!(" · CNT: {}", t.label()))
                                         .unwrap_or_default();
+                                    let upg_note = if upgrade_ready {
+                                        " · UPGRADE AVAILABLE"
+                                    } else if is_direct_upgrade {
+                                        " · UPGRADE"
+                                    } else {
+                                        ""
+                                    };
                                     if vresp
                                         .on_hover_text(format!(
-                                            "{vname} ({vcost}g) · ~{:.0}m{trait_note}",
+                                            "{vname} ({vcost}g) · ~{:.0}m{trait_note}{upg_note}",
                                             var.avg_time_mins
                                         ))
                                         .clicked()

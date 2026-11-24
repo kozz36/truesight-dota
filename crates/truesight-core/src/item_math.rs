@@ -289,6 +289,7 @@ pub fn recommend_item_build(
             .then_with(|| a.step.item_id.cmp(&b.step.item_id))
     });
 
+    let has_aghs_scepter = scored.iter().any(|c| c.step.item_id.0 == 108);
     let mut phase_max_mc = [0_u32; 5];
     let mut late_nonfiller_total = 0_usize;
     for cand in &scored {
@@ -296,6 +297,9 @@ pub fn recommend_item_build(
         phase_max_mc[slot] = phase_max_mc[slot].max(cand.match_count);
     }
     for cand in &scored {
+        if !cand.step.owned && has_aghs_scepter && cand.step.item_id.0 == 271 {
+            continue;
+        }
         if cand.step.phase == ItemPhase::Late
             && (cand.step.owned
                 || cand.is_protected_upgrade
@@ -314,9 +318,12 @@ pub fn recommend_item_build(
     // sequential phase progression items and protected Late builds.
     let mut clustered: Vec<ScoredCandidate> = Vec::with_capacity(scored.len());
     let mut unowned_candidates: Vec<ScoredCandidate> = Vec::with_capacity(scored.len());
+    let mut deferred_aghs_blessing: Option<ScoredCandidate> = None;
     for cand in scored {
         if cand.step.owned {
             clustered.push(cand);
+        } else if has_aghs_scepter && cand.step.item_id.0 == 271 {
+            deferred_aghs_blessing = Some(cand);
         } else {
             unowned_candidates.push(cand);
         }
@@ -360,8 +367,6 @@ pub fn recommend_item_build(
             clustered
                 .iter_mut()
                 .find(|c| c.step.phase == ItemPhase::Late && is_late_boots(c.step.item_id))
-        } else if cand.step.item_id.0 == 271 && clustered.iter().any(|c| c.step.item_id.0 == 108) {
-            clustered.iter_mut().find(|c| c.step.item_id.0 == 108)
         } else if cand_is_filler
             || (cand.step.phase == ItemPhase::Late
                 && late_nonfiller_total >= 3
@@ -393,6 +398,19 @@ pub fn recommend_item_build(
             });
         } else {
             clustered.push(cand);
+        }
+    }
+
+    if let Some(blessing) = deferred_aghs_blessing {
+        if let Some(scepter) = clustered.iter_mut().find(|c| c.step.item_id.0 == 108) {
+            scepter.step.variants.push(BuildVariant {
+                item_id: blessing.step.item_id,
+                score: blessing.step.score,
+                avg_time_mins: blessing.step.avg_time_mins,
+                counter_trait: blessing.step.counter_trait,
+            });
+        } else {
+            clustered.push(blessing);
         }
     }
 
@@ -502,8 +520,15 @@ pub fn recommend_item_build(
 
     for step in &mut steps {
         step.variants.sort_by(|a, b| {
-            b.score
-                .total_cmp(&a.score)
+            let a_upgrade = repo
+                .item_catalog(a.item_id)
+                .is_some_and(|e| e.components.contains(&step.item_id));
+            let b_upgrade = repo
+                .item_catalog(b.item_id)
+                .is_some_and(|e| e.components.contains(&step.item_id));
+            b_upgrade
+                .cmp(&a_upgrade)
+                .then_with(|| b.score.total_cmp(&a.score))
                 .then_with(|| a.item_id.cmp(&b.item_id))
         });
         step.variants.truncate(MAX_VARIANTS_PER_STEP);

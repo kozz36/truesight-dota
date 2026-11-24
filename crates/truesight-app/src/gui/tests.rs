@@ -3822,3 +3822,181 @@ fn overlay_build_switches_late_between_4x1_wide_and_2x2_tall_and_wraps_three_var
         "expanded tall overlay must render all 8 primaries + >=3 multi-row variants (+starting), got {tex_count} textures"
     );
 }
+
+#[test]
+fn build_bar_and_overlay_label_blessing_upgrade_and_highlight_child_when_scepter_owned() {
+    use super::build_bar::variant_chip_label_and_highlight;
+    use truesight_adapters::item_repo::SeededItemMetaRepository;
+    use truesight_core::domain::{HeroItemStat, ItemCatalogEntry, ItemId, ItemPhase};
+
+    assert_eq!(
+        variant_chip_label_and_highlight("Eye of Skadi", false, true, false),
+        ("Eye of Skadi".to_string(), false)
+    );
+    assert_eq!(
+        variant_chip_label_and_highlight("Aghanim's Blessing", true, false, false),
+        ("UPG · Aghanim's Blessing".to_string(), false)
+    );
+    assert_eq!(
+        variant_chip_label_and_highlight("Aghanim's Blessing", true, true, false),
+        ("UPG READY · Aghanim's Blessing".to_string(), true)
+    );
+
+    let make_repo = || SeededItemMetaRepository {
+        custom_catalog: vec![
+            ItemCatalogEntry {
+                id: ItemId(214),
+                slug: "tranquil_boots".into(),
+                display_name: "Tranquil Boots".into(),
+                cost: 900,
+                components: vec![],
+                is_recipe: false,
+                is_consumable_drop: false,
+            },
+            ItemCatalogEntry {
+                id: ItemId(108),
+                slug: "ultimate_scepter".into(),
+                display_name: "Aghanim's Scepter".into(),
+                cost: 4200,
+                components: vec![ItemId(60), ItemId(23), ItemId(21), ItemId(22)],
+                is_recipe: false,
+                is_consumable_drop: false,
+            },
+            ItemCatalogEntry {
+                id: ItemId(271),
+                slug: "ultimate_scepter_2".into(),
+                display_name: "Aghanim's Blessing".into(),
+                cost: 5800,
+                components: vec![ItemId(108)],
+                is_recipe: false,
+                is_consumable_drop: false,
+            },
+            ItemCatalogEntry {
+                id: ItemId(256),
+                slug: "aeon_disk".into(),
+                display_name: "Aeon Disk".into(),
+                cost: 3000,
+                components: vec![],
+                is_recipe: false,
+                is_consumable_drop: false,
+            },
+        ],
+        custom_hero_stats: vec![(
+            HeroId(5),
+            None,
+            None,
+            vec![
+                HeroItemStat {
+                    item_id: ItemId(214),
+                    phase: ItemPhase::Early,
+                    avg_time_mins: 8.0,
+                    match_count: 1800,
+                    win_count: 940,
+                },
+                HeroItemStat {
+                    item_id: ItemId(108),
+                    phase: ItemPhase::Late,
+                    avg_time_mins: 32.0,
+                    match_count: 1000,
+                    win_count: 520,
+                },
+                HeroItemStat {
+                    item_id: ItemId(271),
+                    phase: ItemPhase::Late,
+                    avg_time_mins: 48.0,
+                    match_count: 300,
+                    win_count: 222,
+                },
+                HeroItemStat {
+                    item_id: ItemId(256),
+                    phase: ItemPhase::Late,
+                    avg_time_mins: 36.0,
+                    match_count: 900,
+                    win_count: 500,
+                },
+            ],
+        )],
+        ..Default::default()
+    };
+
+    let render_texts = |owned_scepter: bool| {
+        let mut session = AppSession::new().unwrap();
+        assert!(execute_command(&mut session, "ally 5 crystal maiden").unwrap());
+        session.local_player_hero = Some(HeroId(5));
+        session.owned_items_owner = Some(HeroId(5));
+        session.item_repo = make_repo();
+        session.owned_items = if owned_scepter {
+            vec![ItemId(214), ItemId(108)]
+        } else {
+            vec![ItemId(214)]
+        };
+        session.toggle_post_draft_build_view();
+
+        let mut app = TrueSightGuiApp::new(session, None, None);
+        app.onboarding_open = false;
+        let ctx = egui::Context::default();
+        let desk_out = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(920.0, 420.0))),
+                ..Default::default()
+            },
+            |vctx| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(vctx, |ui| {
+                        let _ = app.render_item_build_card(ui);
+                    });
+            },
+        );
+        let mut desk_texts = Vec::new();
+        for c in &desk_out.shapes {
+            collect_painted_texts(&c.shape, &mut desk_texts);
+        }
+
+        app.session.overlay_mode = true;
+        let ovl_out = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(520.0, 240.0))),
+                ..Default::default()
+            },
+            |vctx| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(vctx, |ui| {
+                        let _ = app.render_overlay_panel(ui);
+                    });
+            },
+        );
+        let mut ovl_texts = Vec::new();
+        for c in &ovl_out.shapes {
+            collect_painted_texts(&c.shape, &mut ovl_texts);
+        }
+        (desk_texts, ovl_texts)
+    };
+
+    let (desk_unowned, ovl_unowned) = render_texts(false);
+    assert!(
+        desk_unowned.iter().any(|t| t == "UPG · Aghanim's Blessing"),
+        "desktop build bar must label Blessing as an upgrade before Scepter is owned: {desk_unowned:?}"
+    );
+    assert!(
+        ovl_unowned.iter().any(|t| t == "UPG"),
+        "overlay child upgrade must display micro UPG badge: {ovl_unowned:?}"
+    );
+
+    let (desk_owned, ovl_owned) = render_texts(true);
+    assert!(
+        desk_owned
+            .iter()
+            .any(|t| t == "UPG READY · Aghanim's Blessing"),
+        "desktop build bar must highlight Blessing upgrade availability below owned Scepter: {desk_owned:?}"
+    );
+    assert!(
+        desk_owned.iter().filter(|t| t.as_str() == "OK").count() >= 2,
+        "owned Tranquil Boots + owned Scepter cards must remain marked OK: {desk_owned:?}"
+    );
+    assert!(
+        ovl_owned.iter().any(|t| t == "UPG"),
+        "overlay must continue labeling Blessing child tile when Scepter is owned: {ovl_owned:?}"
+    );
+}

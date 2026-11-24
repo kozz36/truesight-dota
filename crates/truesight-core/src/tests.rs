@@ -2144,3 +2144,116 @@ fn recommend_item_build_collapses_late_boots_and_surfaces_support_late_utility_a
         carry_opt.optional_items
     );
 }
+
+#[test]
+fn recommend_item_build_pairs_higher_scoring_blessing_under_scepter_across_inventory_states() {
+    use crate::domain::{Bracket, ItemId, ItemPhase};
+    use crate::math::recommend_item_build;
+
+    let repo = MockItemRepo {
+        catalog: vec![
+            catalog_entry(214, "Tranquil Boots", 900, &[], false, false),
+            catalog_entry(
+                108,
+                "Aghanim's Scepter",
+                4200,
+                &[60, 23, 21, 22],
+                false,
+                false,
+            ),
+            catalog_entry(271, "Aghanim's Blessing", 5800, &[108], false, false),
+            catalog_entry(256, "Aeon Disk", 3000, &[], false, false),
+        ],
+        stats: vec![
+            item_stat(214, ItemPhase::Early, 8.0, 1800, 940),
+            // Exact PR #86 review reproduction: Blessing (222/300 -> ~1.042) outscores Scepter (520/1000 -> ~0.933)
+            item_stat(108, ItemPhase::Late, 32.0, 1000, 520),
+            item_stat(271, ItemPhase::Late, 48.0, 300, 222),
+            item_stat(256, ItemPhase::Late, 36.0, 900, 500),
+        ],
+    };
+
+    let enemies = [None; 5];
+
+    // 1. Before purchase (`owned_items = &[]`): higher-scoring Blessing MUST still attach under Scepter,
+    // using a single Late slot and keeping purchase order (Scepter primary -> Blessing variant).
+    let unowned_build = recommend_item_build(
+        &repo,
+        HeroId(5),
+        Role::HardSupport,
+        Bracket::Ancient,
+        &enemies,
+        &[],
+        1200,
+    )
+    .expect("unowned build should succeed");
+
+    let unowned_late: Vec<_> = unowned_build
+        .steps
+        .iter()
+        .filter(|s| s.phase == ItemPhase::Late)
+        .collect();
+    assert!(
+        unowned_late.iter().all(|s| s.item_id != ItemId(271)),
+        "Aghanim's Blessing (271) must never become a separate Late primary even when outscoring Scepter: {unowned_late:?}"
+    );
+    let scepter_unowned = unowned_late
+        .iter()
+        .find(|s| s.item_id == ItemId(108))
+        .expect("Aghanim's Scepter (108) must remain primary Late step");
+    assert!(!scepter_unowned.owned);
+    assert_eq!(
+        scepter_unowned.variants.first().map(|v| v.item_id),
+        Some(ItemId(271)),
+        "Blessing (271) must sit immediately beneath Scepter (108) at variants[0]: {:?}",
+        scepter_unowned.variants
+    );
+    assert_eq!(
+        unowned_late.len(),
+        2,
+        "Scepter+Blessing pair plus Aeon Disk must occupy only 2 Late slots: {unowned_late:?}"
+    );
+
+    // 2. Live inventory reports Tranquil Boots + Aghanim's Scepter owned:
+    // Scepter remains primary & OWNED, Blessing stays grouped beneath it at variants[0],
+    // and `next_unowned_index` advances past owned Scepter to Aeon Disk (256).
+    let owned_build = recommend_item_build(
+        &repo,
+        HeroId(5),
+        Role::HardSupport,
+        Bracket::Ancient,
+        &enemies,
+        &[ItemId(214), ItemId(108)],
+        2100,
+    )
+    .expect("owned Scepter build should succeed");
+
+    let owned_late: Vec<_> = owned_build
+        .steps
+        .iter()
+        .filter(|s| s.phase == ItemPhase::Late)
+        .collect();
+    assert!(
+        owned_late.iter().all(|s| s.item_id != ItemId(271)),
+        "Blessing (271) must stay under Scepter (108) when Scepter is owned: {owned_late:?}"
+    );
+    let scepter_owned = owned_late
+        .iter()
+        .find(|s| s.item_id == ItemId(108))
+        .expect("Owned Scepter (108) must stay primary Late step");
+    assert!(scepter_owned.owned);
+    assert_eq!(
+        scepter_owned.variants.first().map(|v| v.item_id),
+        Some(ItemId(271)),
+        "Blessing (271) upgrade must remain at variants[0] when Scepter is owned: {:?}",
+        scepter_owned.variants
+    );
+    assert_eq!(
+        owned_build
+            .next_unowned_index
+            .map(|idx| owned_build.steps[idx].item_id),
+        Some(ItemId(256)),
+        "next_unowned_index must advance to next unowned primary step (Aeon Disk): {:?}",
+        owned_build.steps
+    );
+}

@@ -11,6 +11,21 @@ pub(super) struct BuildBarRenderOutput {
     pub(super) card: Rect,
 }
 
+pub(super) fn variant_chip_label_and_highlight(
+    var_name: &str,
+    is_direct_upgrade: bool,
+    parent_owned: bool,
+    var_owned: bool,
+) -> (String, bool) {
+    if !is_direct_upgrade {
+        (var_name.to_string(), false)
+    } else if parent_owned && !var_owned {
+        (format!("UPG READY · {var_name}"), true)
+    } else {
+        (format!("UPG · {var_name}"), false)
+    }
+}
+
 fn format_game_clock(secs: i32) -> String {
     let abs = secs.unsigned_abs();
     let mins = abs / 60;
@@ -132,38 +147,67 @@ impl TrueSightGuiApp {
             });
 
         if !step.variants.is_empty() {
+            let owned_items = self.session.active_build_owned_items();
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = vec2(4.0, 3.0);
                 for var in &step.variants {
-                    let var_name = self
-                        .session
-                        .item_repo
-                        .item_catalog(var.item_id)
+                    let var_entry = self.session.item_repo.item_catalog(var.item_id);
+                    let is_direct_upgrade = var_entry
+                        .as_ref()
+                        .is_some_and(|e| e.components.contains(&step.item_id));
+                    let var_name = var_entry
                         .map(|e| e.display_name)
                         .unwrap_or_else(|| format!("Item #{}", var.item_id.0));
+                    let var_owned = owned_items.contains(&var.item_id);
+                    let (chip_label, highlight) = variant_chip_label_and_highlight(
+                        &var_name,
+                        is_direct_upgrade,
+                        step.owned,
+                        var_owned,
+                    );
                     let var_img = self
                         .textures
                         .items
                         .get(&var.item_id)
                         .map(|t| egui::Image::new((t.id(), vec2(18.0, 13.0))));
+                    let chip_stroke = if highlight {
+                        Stroke::new(1.5_f32, P_CYAN)
+                    } else {
+                        Stroke::new(1.0_f32, P_LINE)
+                    };
+                    let chip_text_col = if highlight { P_GLINT } else { P_SILVER };
                     let var_btn = egui::Button::opt_image_and_text(
                         var_img,
-                        Some(RichText::new(var_name).size(9.0).color(P_SILVER).into()),
+                        Some(
+                            RichText::new(chip_label)
+                                .size(9.0)
+                                .color(chip_text_col)
+                                .into(),
+                        ),
                     )
                     .fill(P_INDIGO_2)
-                    .stroke(Stroke::new(1.0_f32, P_LINE));
+                    .stroke(chip_stroke);
                     let trait_note = var
                         .counter_trait
                         .map(|t| format!(" | CNT: {}", t.label()))
                         .unwrap_or_default();
-                    if ui
-                        .add(var_btn)
-                        .on_hover_text(format!(
-                            "Swap into primary slot (score {:.2}, ~{:.0}m{})",
-                            var.score, var.avg_time_mins, trait_note
-                        ))
-                        .clicked()
-                    {
+                    let hover = if highlight {
+                        format!(
+                            "Upgrade available ({var_name}) · ~{:.0}m{trait_note} · Click to swap",
+                            var.avg_time_mins
+                        )
+                    } else if is_direct_upgrade {
+                        format!(
+                            "Upgrade ({var_name}, score {:.2}, ~{:.0}m{trait_note})",
+                            var.score, var.avg_time_mins
+                        )
+                    } else {
+                        format!(
+                            "Swap into primary slot (score {:.2}, ~{:.0}m{trait_note})",
+                            var.score, var.avg_time_mins
+                        )
+                    };
+                    if ui.add(var_btn).on_hover_text(hover).clicked() {
                         *clicked_variant = Some((step.item_id, var.item_id));
                     }
                 }
