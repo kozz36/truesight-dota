@@ -186,14 +186,19 @@ impl TrueSightGuiApp {
                         ),
                     )
                     .fill(P_INDIGO_2)
-                    .stroke(chip_stroke);
+                    .stroke(chip_stroke)
+                    .sense(if is_direct_upgrade {
+                        Sense::hover()
+                    } else {
+                        Sense::click()
+                    });
                     let trait_note = var
                         .counter_trait
                         .map(|t| format!(" | CNT: {}", t.label()))
                         .unwrap_or_default();
                     let hover = if highlight {
                         format!(
-                            "Upgrade available ({var_name}) · ~{:.0}m{trait_note} · Click to swap",
+                            "Upgrade available ({var_name}) · ~{:.0}m{trait_note}",
                             var.avg_time_mins
                         )
                     } else if is_direct_upgrade {
@@ -207,7 +212,8 @@ impl TrueSightGuiApp {
                             var.score, var.avg_time_mins
                         )
                     };
-                    if ui.add(var_btn).on_hover_text(hover).clicked() {
+                    let var_resp = ui.add(var_btn).on_hover_text(hover);
+                    if !is_direct_upgrade && var_resp.clicked() {
                         *clicked_variant = Some((step.item_id, var.item_id));
                     }
                 }

@@ -5132,3 +5132,182 @@ fn sync_target_item_heroes_tracks_role_pairs_and_refreshes_on_role_change() {
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+#[test]
+fn select_build_variant_for_direct_upgrade_preserves_owned_scepter_and_next_pointer() {
+    use truesight_adapters::item_repo::SeededItemMetaRepository;
+    use truesight_core::domain::{HeroId, HeroItemStat, ItemCatalogEntry, ItemId, ItemPhase};
+    use truesight_core::ports::DraftEvent;
+
+    let mut session = AppSession::new().unwrap();
+    assert!(execute_command(&mut session, "ally 5 crystal maiden").unwrap());
+    session.local_player_hero = Some(HeroId(5));
+    session.item_repo = SeededItemMetaRepository {
+        custom_catalog: vec![
+            ItemCatalogEntry {
+                id: ItemId(214),
+                slug: "tranquil_boots".into(),
+                display_name: "Tranquil Boots".into(),
+                cost: 900,
+                components: vec![],
+                is_recipe: false,
+                is_consumable_drop: false,
+            },
+            ItemCatalogEntry {
+                id: ItemId(180),
+                slug: "arcane_boots".into(),
+                display_name: "Arcane Boots".into(),
+                cost: 1400,
+                components: vec![],
+                is_recipe: false,
+                is_consumable_drop: false,
+            },
+            ItemCatalogEntry {
+                id: ItemId(108),
+                slug: "ultimate_scepter".into(),
+                display_name: "Aghanim's Scepter".into(),
+                cost: 4200,
+                components: vec![ItemId(60), ItemId(23), ItemId(21), ItemId(22)],
+                is_recipe: false,
+                is_consumable_drop: false,
+            },
+            ItemCatalogEntry {
+                id: ItemId(271),
+                slug: "ultimate_scepter_2".into(),
+                display_name: "Aghanim's Blessing".into(),
+                cost: 5800,
+                components: vec![ItemId(108)],
+                is_recipe: false,
+                is_consumable_drop: false,
+            },
+            ItemCatalogEntry {
+                id: ItemId(256),
+                slug: "aeon_disk".into(),
+                display_name: "Aeon Disk".into(),
+                cost: 3000,
+                components: vec![],
+                is_recipe: false,
+                is_consumable_drop: false,
+            },
+        ],
+        custom_hero_stats: vec![(
+            HeroId(5),
+            None,
+            None,
+            vec![
+                HeroItemStat {
+                    item_id: ItemId(214),
+                    phase: ItemPhase::Early,
+                    avg_time_mins: 8.0,
+                    match_count: 1800,
+                    win_count: 940,
+                },
+                HeroItemStat {
+                    item_id: ItemId(180),
+                    phase: ItemPhase::Early,
+                    avg_time_mins: 9.0,
+                    match_count: 1600,
+                    win_count: 830,
+                },
+                HeroItemStat {
+                    item_id: ItemId(108),
+                    phase: ItemPhase::Late,
+                    avg_time_mins: 32.0,
+                    match_count: 1000,
+                    win_count: 520,
+                },
+                HeroItemStat {
+                    item_id: ItemId(271),
+                    phase: ItemPhase::Late,
+                    avg_time_mins: 48.0,
+                    match_count: 300,
+                    win_count: 222,
+                },
+                HeroItemStat {
+                    item_id: ItemId(256),
+                    phase: ItemPhase::Late,
+                    avg_time_mins: 36.0,
+                    match_count: 900,
+                    win_count: 500,
+                },
+            ],
+        )],
+        ..Default::default()
+    };
+
+    session.apply_event(DraftEvent::InventoryUpdated {
+        hero_slug: Some("npc_dota_hero_crystal_maiden".into()),
+        item_slugs: vec!["item_tranquil_boots".into(), "item_ultimate_scepter".into()],
+    });
+
+    let initial = session.compute_recommended_build().unwrap();
+    let scepter_idx = initial
+        .steps
+        .iter()
+        .position(|s| s.item_id == ItemId(108))
+        .expect("Scepter (108) must be primary");
+    assert!(initial.steps[scepter_idx].owned);
+    assert_eq!(
+        initial.steps[scepter_idx]
+            .variants
+            .first()
+            .map(|v| v.item_id),
+        Some(ItemId(271))
+    );
+    assert_eq!(
+        initial
+            .next_unowned_index
+            .map(|idx| initial.steps[idx].item_id),
+        Some(ItemId(256)),
+        "NEXT must initially point to unowned Aeon Disk (256)"
+    );
+
+    // Invoking direct-upgrade selection by item ID or step index must be a no-op so owned Scepter
+    // stays intact and NEXT remains on Aeon Disk.
+    session.select_build_variant_for_item(ItemId(108), ItemId(271));
+    session.select_build_variant(scepter_idx, ItemId(271));
+
+    let after_upgrade_click = session.compute_recommended_build().unwrap();
+    let scepter_after = after_upgrade_click
+        .steps
+        .iter()
+        .find(|s| s.item_id == ItemId(108))
+        .expect("owned Scepter card must NOT be replaced by unowned Blessing");
+    assert!(scepter_after.owned);
+    assert_eq!(
+        scepter_after.variants.first().map(|v| v.item_id),
+        Some(ItemId(271)),
+        "Blessing (271) must stay in its child upgrade position under Scepter"
+    );
+    assert_eq!(
+        after_upgrade_click
+            .next_unowned_index
+            .map(|idx| after_upgrade_click.steps[idx].item_id),
+        Some(ItemId(256)),
+        "NEXT must remain on Aeon Disk (256), not move onto Blessing"
+    );
+
+    // Ordinary non-upgrade alternatives (e.g. Arcane Boots under Tranquil Boots) must still swap cleanly.
+    session.select_build_variant_for_item(ItemId(214), ItemId(180));
+    let swapped = session.compute_recommended_build().unwrap();
+    let arcane_step = swapped
+        .steps
+        .iter()
+        .find(|s| s.item_id == ItemId(180))
+        .expect("ordinary alternative Arcane Boots (180) must still swap into primary slot");
+    assert!(
+        arcane_step
+            .variants
+            .iter()
+            .any(|v| v.item_id == ItemId(214)),
+        "Tranquil Boots (214) should move to variants after swapping to Arcane Boots"
+    );
+
+    // Clicking the original primary item restores Tranquil Boots (214).
+    session.select_build_variant_for_item(ItemId(180), ItemId(214));
+    let restored = session.compute_recommended_build().unwrap();
+    assert!(
+        restored.steps.iter().any(|s| s.item_id == ItemId(214)),
+        "switching back to Tranquil Boots (214) must restore original primary"
+    );
+}

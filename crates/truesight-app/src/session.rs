@@ -1436,6 +1436,12 @@ impl AppSession {
         }
     }
 
+    fn is_direct_upgrade(&self, primary_item_id: ItemId, variant_item_id: ItemId) -> bool {
+        self.item_repo
+            .item_catalog(variant_item_id)
+            .is_some_and(|entry| entry.components.contains(&primary_item_id))
+    }
+
     /// Selects a variant item override keyed by the step's currently displayed primary item ID
     /// within the active `(hero_id, role)` build context.
     pub fn select_build_variant_for_item(
@@ -1454,11 +1460,20 @@ impl AppSession {
                 && entry.role == role
                 && entry.variant_item_id == primary_item_id
         }) {
-            if variant_item_id == self.selected_build_variants[pos].primary_item_id {
+            let orig_primary = self.selected_build_variants[pos].primary_item_id;
+            if variant_item_id == orig_primary {
                 self.selected_build_variants.remove(pos);
-            } else {
+            } else if !self.is_direct_upgrade(primary_item_id, variant_item_id)
+                && !self.is_direct_upgrade(orig_primary, variant_item_id)
+            {
                 self.selected_build_variants[pos].variant_item_id = variant_item_id;
             }
+            return;
+        }
+
+        // Direct upgrades (e.g. Aghanim's Scepter -> Aghanim's Blessing) keep their child position
+        // and preserve the parent step's owned state instead of swapping into the primary slot.
+        if self.is_direct_upgrade(primary_item_id, variant_item_id) {
             return;
         }
 
@@ -1515,6 +1530,9 @@ impl AppSession {
             .iter()
             .filter(|sel| sel.hero_id == hero_id && sel.role == role)
         {
+            if self.is_direct_upgrade(sel.primary_item_id, sel.variant_item_id) {
+                continue;
+            }
             let Some(step) = build
                 .steps
                 .iter_mut()

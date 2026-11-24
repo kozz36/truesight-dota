@@ -2257,3 +2257,105 @@ fn recommend_item_build_pairs_higher_scoring_blessing_under_scepter_across_inven
         owned_build.steps
     );
 }
+
+#[test]
+fn recommend_item_build_defers_blessing_when_tight_window_competitor_absorbs_scepter() {
+    use crate::domain::{Bracket, ItemId, ItemPhase};
+    use crate::math::recommend_item_build;
+
+    let repo = MockItemRepo {
+        catalog: vec![
+            catalog_entry(214, "Tranquil Boots", 900, &[], false, false),
+            catalog_entry(
+                108,
+                "Aghanim's Scepter",
+                4200,
+                &[60, 23, 21, 22],
+                false,
+                false,
+            ),
+            catalog_entry(271, "Aghanim's Blessing", 5800, &[108], false, false),
+            catalog_entry(256, "Aeon Disk", 3000, &[], false, false),
+        ],
+        stats: vec![
+            item_stat(214, ItemPhase::Early, 8.0, 1800, 940),
+            // Slightly higher-scoring Aeon Disk at 32.5m clusters tight-window Scepter at 32.0m as a variant.
+            item_stat(256, ItemPhase::Late, 32.5, 1000, 550),
+            item_stat(108, ItemPhase::Late, 32.0, 1000, 520),
+            item_stat(271, ItemPhase::Late, 48.0, 300, 222),
+        ],
+    };
+
+    let enemies = [None; 5];
+
+    // 1. No owned items: Scepter is absorbed into Aeon Disk's competing slot as a variant,
+    // so Blessing must NOT become a separate Late primary step.
+    let unowned_build = recommend_item_build(
+        &repo,
+        HeroId(5),
+        Role::HardSupport,
+        Bracket::Ancient,
+        &enemies,
+        &[],
+        1200,
+    )
+    .expect("unowned build with tight-window competitor should succeed");
+
+    let unowned_late: Vec<_> = unowned_build
+        .steps
+        .iter()
+        .filter(|s| s.phase == ItemPhase::Late)
+        .collect();
+    assert_eq!(
+        unowned_late.len(),
+        1,
+        "absorbed Scepter + deferred Blessing must not spawn a standalone Blessing primary: {unowned_late:?}"
+    );
+    assert_eq!(unowned_late[0].item_id, ItemId(256));
+    assert!(
+        unowned_late[0]
+            .variants
+            .iter()
+            .any(|v| v.item_id == ItemId(108)),
+        "tight-window Scepter should sit under Aeon Disk variants: {:?}",
+        unowned_late[0].variants
+    );
+    assert!(
+        unowned_build.steps.iter().all(|s| s.item_id != ItemId(271)),
+        "Blessing (271) must not appear as a primary step when Scepter is absorbed: {:?}",
+        unowned_build.steps
+    );
+
+    // 2. Owned Scepter promotes Scepter into its own owned Late primary and keeps Blessing grouped under it.
+    let owned_build = recommend_item_build(
+        &repo,
+        HeroId(5),
+        Role::HardSupport,
+        Bracket::Ancient,
+        &enemies,
+        &[ItemId(214), ItemId(108)],
+        2100,
+    )
+    .expect("owned Scepter build should succeed");
+
+    let owned_late: Vec<_> = owned_build
+        .steps
+        .iter()
+        .filter(|s| s.phase == ItemPhase::Late)
+        .collect();
+    assert!(
+        owned_late.iter().all(|s| s.item_id != ItemId(271)),
+        "Blessing (271) must stay under owned Scepter rather than a standalone primary: {owned_late:?}"
+    );
+    let owned_scepter = owned_late
+        .iter()
+        .find(|s| s.item_id == ItemId(108))
+        .expect("owned Scepter (108) must be retained as primary");
+    assert!(owned_scepter.owned);
+    assert_eq!(
+        owned_scepter.variants.first().map(|v| v.item_id),
+        Some(ItemId(271)),
+        "Blessing (271) must attach at variants[0] when owned Scepter is primary: {:?}",
+        owned_scepter.variants
+    );
+}

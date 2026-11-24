@@ -461,14 +461,17 @@ impl TrueSightGuiApp {
                                     let var_owned = owned_items.contains(&var.item_id);
                                     let upgrade_ready =
                                         is_direct_upgrade && step.owned && !var_owned;
-                                    let (vr, vresp) = ui.allocate_exact_size(
-                                        vec2(variant_w, variant_h),
-                                        Sense::click(),
-                                    );
-                                    let vborder = if vresp.hovered() {
-                                        P_GEM
-                                    } else if upgrade_ready {
+                                    let sense = if is_direct_upgrade {
+                                        Sense::hover()
+                                    } else {
+                                        Sense::click()
+                                    };
+                                    let (vr, vresp) =
+                                        ui.allocate_exact_size(vec2(variant_w, variant_h), sense);
+                                    let vborder = if upgrade_ready {
                                         P_CYAN
+                                    } else if !is_direct_upgrade && vresp.hovered() {
+                                        P_GEM
                                     } else {
                                         P_LINE
                                     };
@@ -507,13 +510,11 @@ impl TrueSightGuiApp {
                                     } else {
                                         ""
                                     };
-                                    if vresp
-                                        .on_hover_text(format!(
-                                            "{vname} ({vcost}g) · ~{:.0}m{trait_note}{upg_note}",
-                                            var.avg_time_mins
-                                        ))
-                                        .clicked()
-                                    {
+                                    let vresp = vresp.on_hover_text(format!(
+                                        "{vname} ({vcost}g) · ~{:.0}m{trait_note}{upg_note}",
+                                        var.avg_time_mins
+                                    ));
+                                    if !is_direct_upgrade && vresp.clicked() {
                                         *clicked_variant = Some((step.item_id, var.item_id));
                                     }
                                 }

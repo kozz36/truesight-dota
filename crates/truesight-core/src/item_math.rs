@@ -401,19 +401,6 @@ pub fn recommend_item_build(
         }
     }
 
-    if let Some(blessing) = deferred_aghs_blessing {
-        if let Some(scepter) = clustered.iter_mut().find(|c| c.step.item_id.0 == 108) {
-            scepter.step.variants.push(BuildVariant {
-                item_id: blessing.step.item_id,
-                score: blessing.step.score,
-                avg_time_mins: blessing.step.avg_time_mins,
-                counter_trait: blessing.step.counter_trait,
-            });
-        } else {
-            clustered.push(blessing);
-        }
-    }
-
     // Select primary steps (always keeping owned items, capping at MAX_PRIMARY_BUILD_STEPS
     // with per-phase budgets Early: 2, Core: 2, Late: 4 while blocking low-share filler).
     let mut is_primary = vec![false; clustered.len()];
@@ -459,6 +446,19 @@ pub fn recommend_item_build(
         } else {
             remainder.push(cand);
         }
+    }
+
+    // Only surface unowned Aghanim's Blessing when Aghanim's Scepter is a shown primary step;
+    // if Scepter was absorbed into a competing slot or demoted to remainder, keep Blessing deferred.
+    if let Some(blessing) = deferred_aghs_blessing
+        && let Some(scepter) = steps.iter_mut().find(|s| s.item_id.0 == 108)
+    {
+        scepter.variants.push(BuildVariant {
+            item_id: blessing.step.item_id,
+            score: blessing.step.score,
+            avg_time_mins: blessing.step.avg_time_mins,
+            counter_trait: blessing.step.counter_trait,
+        });
     }
 
     // Attach remaining unchosen candidates as variants, prioritizing direct upgrade-chain parents

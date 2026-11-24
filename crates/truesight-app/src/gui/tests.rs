@@ -4000,3 +4000,267 @@ fn build_bar_and_overlay_label_blessing_upgrade_and_highlight_child_when_scepter
         "overlay must continue labeling Blessing child tile when Scepter is owned: {ovl_owned:?}"
     );
 }
+
+#[test]
+fn direct_upgrade_chip_in_build_bar_and_overlay_is_informational_and_preserves_owned_scepter() {
+    use truesight_adapters::item_repo::SeededItemMetaRepository;
+    use truesight_core::domain::{HeroItemStat, ItemCatalogEntry, ItemId, ItemPhase};
+    use truesight_core::ports::DraftEvent;
+
+    let mut session = AppSession::new().unwrap();
+    assert!(execute_command(&mut session, "ally 5 crystal maiden").unwrap());
+    session.local_player_hero = Some(HeroId(5));
+    session.item_repo = SeededItemMetaRepository {
+        custom_catalog: vec![
+            ItemCatalogEntry {
+                id: ItemId(214),
+                slug: "tranquil_boots".into(),
+                display_name: "Tranquil Boots".into(),
+                cost: 900,
+                components: vec![],
+                is_recipe: false,
+                is_consumable_drop: false,
+            },
+            ItemCatalogEntry {
+                id: ItemId(180),
+                slug: "arcane_boots".into(),
+                display_name: "Arcane Boots".into(),
+                cost: 1400,
+                components: vec![],
+                is_recipe: false,
+                is_consumable_drop: false,
+            },
+            ItemCatalogEntry {
+                id: ItemId(108),
+                slug: "ultimate_scepter".into(),
+                display_name: "Aghanim's Scepter".into(),
+                cost: 4200,
+                components: vec![ItemId(60), ItemId(23), ItemId(21), ItemId(22)],
+                is_recipe: false,
+                is_consumable_drop: false,
+            },
+            ItemCatalogEntry {
+                id: ItemId(271),
+                slug: "ultimate_scepter_2".into(),
+                display_name: "Aghanim's Blessing".into(),
+                cost: 5800,
+                components: vec![ItemId(108)],
+                is_recipe: false,
+                is_consumable_drop: false,
+            },
+            ItemCatalogEntry {
+                id: ItemId(256),
+                slug: "aeon_disk".into(),
+                display_name: "Aeon Disk".into(),
+                cost: 3000,
+                components: vec![],
+                is_recipe: false,
+                is_consumable_drop: false,
+            },
+        ],
+        custom_hero_stats: vec![(
+            HeroId(5),
+            None,
+            None,
+            vec![
+                HeroItemStat {
+                    item_id: ItemId(214),
+                    phase: ItemPhase::Early,
+                    avg_time_mins: 8.0,
+                    match_count: 1800,
+                    win_count: 940,
+                },
+                HeroItemStat {
+                    item_id: ItemId(180),
+                    phase: ItemPhase::Early,
+                    avg_time_mins: 9.0,
+                    match_count: 1600,
+                    win_count: 830,
+                },
+                HeroItemStat {
+                    item_id: ItemId(108),
+                    phase: ItemPhase::Late,
+                    avg_time_mins: 32.0,
+                    match_count: 1000,
+                    win_count: 520,
+                },
+                HeroItemStat {
+                    item_id: ItemId(271),
+                    phase: ItemPhase::Late,
+                    avg_time_mins: 48.0,
+                    match_count: 300,
+                    win_count: 222,
+                },
+                HeroItemStat {
+                    item_id: ItemId(256),
+                    phase: ItemPhase::Late,
+                    avg_time_mins: 36.0,
+                    match_count: 900,
+                    win_count: 500,
+                },
+            ],
+        )],
+        ..Default::default()
+    };
+    session.apply_event(DraftEvent::InventoryUpdated {
+        hero_slug: Some("npc_dota_hero_crystal_maiden".into()),
+        item_slugs: vec!["item_tranquil_boots".into(), "item_ultimate_scepter".into()],
+    });
+    session.toggle_post_draft_build_view();
+
+    let mut app = TrueSightGuiApp::new(session, None, None);
+    app.onboarding_open = false;
+
+    let ctx = egui::Context::default();
+    let desk_vp = vec2(920.0, 420.0);
+    let run_desktop = |app: &mut TrueSightGuiApp, events: Vec<egui::Event>| {
+        ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), desk_vp)),
+                events,
+                ..Default::default()
+            },
+            |vctx| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(vctx, |ui| {
+                        let _ = app.render_item_build_card(ui);
+                    });
+            },
+        )
+    };
+
+    // Pass 1: locate the desktop `UPG READY · Aghanim's Blessing` chip and `Arcane Boots` chip.
+    let desk_init = run_desktop(&mut app, Vec::new());
+    let mut upg_rects = Vec::new();
+    let mut arcane_rects = Vec::new();
+    for c in &desk_init.shapes {
+        find_all_painted_text_rects(&c.shape, "UPG READY · Aghanim's Blessing", &mut upg_rects);
+        find_all_painted_text_rects(&c.shape, "Arcane Boots", &mut arcane_rects);
+    }
+    let upg_center = upg_rects
+        .first()
+        .expect("desktop build bar must render UPG READY · Aghanim's Blessing chip")
+        .center();
+    let arcane_center = arcane_rects
+        .first()
+        .expect("desktop build bar must render Arcane Boots alternative chip")
+        .center();
+
+    // Pass 2: click the desktop `UPG READY · Aghanim's Blessing` chip -> Scepter stays owned primary!
+    for pressed in [true, false] {
+        let _ = run_desktop(
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(upg_center),
+                egui::Event::PointerButton {
+                    pos: upg_center,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+    }
+    let after_desk_upg = app.session.compute_recommended_build().unwrap();
+    let desk_scepter = after_desk_upg
+        .steps
+        .iter()
+        .find(|s| s.item_id == ItemId(108))
+        .expect("clicking UPG READY chip in desktop build bar must preserve owned Scepter primary");
+    assert!(desk_scepter.owned);
+    assert_eq!(
+        desk_scepter.variants.first().map(|v| v.item_id),
+        Some(ItemId(271))
+    );
+    assert_eq!(
+        after_desk_upg
+            .next_unowned_index
+            .map(|idx| after_desk_upg.steps[idx].item_id),
+        Some(ItemId(256)),
+        "clicking UPG READY chip must keep NEXT on Aeon Disk"
+    );
+
+    // Pass 3: click the `UPG` micro tile in the overlay -> owned Scepter & NEXT stay unchanged!
+    app.session.overlay_mode = true;
+    let ovl_vp = vec2(520.0, 240.0);
+    let run_overlay = |app: &mut TrueSightGuiApp, events: Vec<egui::Event>| {
+        ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), ovl_vp)),
+                events,
+                ..Default::default()
+            },
+            |vctx| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(vctx, |ui| {
+                        let _ = app.render_overlay_panel(ui);
+                    });
+            },
+        )
+    };
+    let ovl_init = run_overlay(&mut app, Vec::new());
+    let mut ovl_upg_rects = Vec::new();
+    for c in &ovl_init.shapes {
+        find_all_painted_text_rects(&c.shape, "UPG", &mut ovl_upg_rects);
+    }
+    let ovl_upg_center = ovl_upg_rects
+        .first()
+        .expect("overlay must paint UPG pill over Blessing child tile")
+        .center();
+    for pressed in [true, false] {
+        let _ = run_overlay(
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(ovl_upg_center),
+                egui::Event::PointerButton {
+                    pos: ovl_upg_center,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+    }
+    let after_ovl_upg = app.session.compute_recommended_build().unwrap();
+    let ovl_scepter = after_ovl_upg
+        .steps
+        .iter()
+        .find(|s| s.item_id == ItemId(108))
+        .expect("clicking UPG tile in overlay must preserve owned Scepter primary");
+    assert!(ovl_scepter.owned);
+    assert_eq!(
+        after_ovl_upg
+            .next_unowned_index
+            .map(|idx| after_ovl_upg.steps[idx].item_id),
+        Some(ItemId(256))
+    );
+
+    // Pass 4: clicking ordinary alternative `Arcane Boots` in desktop build bar still swaps cleanly!
+    app.session.overlay_mode = false;
+    let _ = run_desktop(&mut app, Vec::new());
+    for pressed in [true, false] {
+        let _ = run_desktop(
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(arcane_center),
+                egui::Event::PointerButton {
+                    pos: arcane_center,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+    }
+    let after_alt_click = app.session.compute_recommended_build().unwrap();
+    assert!(
+        after_alt_click
+            .steps
+            .iter()
+            .any(|s| s.item_id == ItemId(180)),
+        "clicking ordinary alternative chip (Arcane Boots) must still swap into primary slot: {:?}",
+        after_alt_click.steps
+    );
+}
