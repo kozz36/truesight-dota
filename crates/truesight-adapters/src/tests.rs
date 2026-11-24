@@ -6882,3 +6882,221 @@ fn sync_from_sources_with_role_items_skips_already_cached_hero_roles_when_not_fo
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+#[test]
+fn sync_fetches_item_constants_independently_of_hero_stats_and_keeps_meta_retryable() {
+    use crate::sync::LocalCacheManager;
+    use truesight_core::domain::{Bracket, HeroId, ItemId, Role};
+    use truesight_core::ports::{ItemMetaRepository, PortError};
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_independent_constants_sync_test_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    let now = 1_795_000_000_u64;
+    let valid_token = "eyJhbGciOinone.eyJleHAiOjQxMDI0NDQ4MDB9.sig".to_string();
+    let item_constants_json = r#"{
+        "broadsword": {"id": 3, "dname": "Broadsword", "cost": 1000, "components": null},
+        "new_patch_blade": {"id": 9999, "dname": "New Patch Blade", "cost": 3200, "components": ["broadsword"]}
+    }"#;
+    let stratz_new_item = r#"{
+        "data": {
+            "heroStats": {
+                "hgStart": [], "hgBoot": [], "hgFull": [{"itemId": 9999, "time": 18, "matchCount": 900, "winCount": 510}],
+                "caStart": [], "caBoot": [], "caFull": [{"itemId": 9999, "time": 18, "matchCount": 900, "winCount": 510}],
+                "laStart": [], "laBoot": [], "laFull": [{"itemId": 9999, "time": 18, "matchCount": 900, "winCount": 510}],
+                "diStart": [], "diBoot": [], "diFull": [{"itemId": 9999, "time": 18, "matchCount": 900, "winCount": 510}]
+            }
+        }
+    }"#;
+
+    // 1. Empty cache: /heroStats times out, /constants/items returns an item absent from the
+    // embedded catalog (#9999), and STRATZ returns timings for #9999.
+    let mut mgr = LocalCacheManager::with_optional_account(tmp_dir.clone(), None);
+    mgr.stratz_api_token = Some(valid_token);
+    mgr.set_target_item_hero_roles(vec![(HeroId(74), Role::SoftSupport)]);
+
+    let mut constants_calls = 0_usize;
+    let msg = mgr
+        .sync_from_sources_with_role_items(
+            false,
+            now,
+            |url| match url {
+                "https://api.opendota.com/api/constants/items" => {
+                    constants_calls += 1;
+                    Ok(item_constants_json.to_string())
+                }
+                other => Err(PortError(format!("OpenDota timeout on {other}"))),
+            },
+            |_token| Err(PortError("no syn needed".into())),
+            |_token, hero_id, role| {
+                assert_eq!(hero_id, 74);
+                assert_eq!(role, Some(Role::SoftSupport));
+                Ok(stratz_new_item.to_string())
+            },
+        )
+        .expect("constants + STRATZ item builds must persist when heroStats times out");
+
+    assert_eq!(
+        constants_calls, 1,
+        "item constants must still be fetched even when heroStats times out"
+    );
+    assert!(
+        msg.contains("itemConstants") && msg.contains("itemBuilds") && msg.contains("partial:"),
+        "sync message must report itemConstants + itemBuilds + partial failure: {msg}"
+    );
+    assert!(
+        tmp_dir.join("hero_item_stats.json").exists(),
+        "hero_item_stats.json must be written when new catalog item #9999 comes from /constants/items"
+    );
+    let repo = mgr.build_item_repository();
+    let stats = repo
+        .hero_item_stats(HeroId(74), Role::SoftSupport, Bracket::Ancient)
+        .expect("cached STRATZ stats must be readable");
+    assert!(
+        stats.iter().any(|s| s.item_id == ItemId(9999)),
+        "ItemId(9999) from /constants/items must survive filtering and load from cache: {stats:?}"
+    );
+    assert!(
+        mgr.is_meta_stale(now),
+        "meta must stay stale when heroStats failed on empty cache"
+    );
+
+    // 2. Existing stale opendota_hero_stats.json (>24h): catalog-only success MUST NOT bump
+    // meta_sync_unix and mask the failed heroStats from future retries.
+    std::fs::write(
+        tmp_dir.join("opendota_hero_stats.json"),
+        r#"[{"id": 74, "5_pick": 1000, "5_win": 520}]"#,
+    )
+    .unwrap();
+    std::fs::write(
+        tmp_dir.join("cache_metadata.txt"),
+        format!("meta_sync_unix={}\n", now - 100_000),
+    )
+    .unwrap();
+
+    mgr.sync_from_sources_with_role_items(
+        false,
+        now,
+        |url| match url {
+            "https://api.opendota.com/api/constants/items" => Ok(item_constants_json.to_string()),
+            other => Err(PortError(format!("OpenDota timeout on {other}"))),
+        },
+        |_token| Err(PortError("no syn needed".into())),
+        |_token, _hid, _role| Ok(stratz_new_item.to_string()),
+    )
+    .expect("catalog-only refresh with failed heroStats should succeed");
+    assert!(
+        mgr.is_meta_stale(now),
+        "catalog-only success must keep stale heroStats eligible for retry instead of bumping meta_sync_unix"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn sync_validates_player_comfort_before_staging_so_malformed_player_does_not_discard_stratz_items()
+{
+    use crate::sync::LocalCacheManager;
+    use truesight_core::domain::{Bracket, HeroId, ItemId, Role};
+    use truesight_core::ports::ItemMetaRepository;
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_malformed_player_item_preserve_test_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    let now = 1_795_000_000_u64;
+    let valid_token = "eyJhbGciOinone.eyJleHAiOjQxMDI0NDQ4MDB9.sig".to_string();
+    let item_constants_json =
+        r#"{"blink":{"id":1,"dname":"Blink Dagger","cost":2250,"components":null}}"#;
+    let mut mgr = LocalCacheManager::with_optional_account(tmp_dir.clone(), Some(127_255_741));
+    mgr.stratz_api_token = Some(valid_token);
+    mgr.publish_staged_cache_with_items(
+        Some(r#"[{"id": 74, "5_pick": 1000, "5_win": 520}]"#),
+        None,
+        Some(item_constants_json),
+        None,
+        Some("[]"),
+        None,
+        None,
+        now - 7_200, // Meta fresh (<24h), player comfort stale (>1h)
+    )
+    .unwrap();
+    mgr.set_target_item_hero_roles(vec![(HeroId(74), Role::SoftSupport)]);
+
+    let stratz_invoker = r#"{
+        "data": {
+            "heroStats": {
+                "hgStart": [], "hgBoot": [], "hgFull": [{"itemId": 267, "time": 16, "matchCount": 900, "winCount": 510}],
+                "caStart": [], "caBoot": [], "caFull": [{"itemId": 267, "time": 16, "matchCount": 900, "winCount": 520}],
+                "laStart": [], "laBoot": [], "laFull": [{"itemId": 267, "time": 15, "matchCount": 900, "winCount": 530}],
+                "diStart": [], "diBoot": [], "diFull": [{"itemId": 267, "time": 14, "matchCount": 900, "winCount": 540}]
+            }
+        }
+    }"#;
+
+    // 1. OpenDota /players/{id}/heroes returns malformed `[{}]` while STRATZ returns valid item builds.
+    let msg = mgr
+        .sync_from_sources_with_role_items(
+            false,
+            now,
+            |url| match url {
+                "https://api.opendota.com/api/players/127255741/heroes" => Ok("[{}]".to_string()),
+                other => Err(truesight_core::ports::PortError(format!(
+                    "unexpected OpenDota URL {other}"
+                ))),
+            },
+            |_token| Err(truesight_core::ports::PortError("no syn".into())),
+            |_token, hero_id, role| {
+                assert_eq!(hero_id, 74);
+                assert_eq!(role, Some(Role::SoftSupport));
+                Ok(stratz_invoker.to_string())
+            },
+        )
+        .expect(
+            "malformed OpenDota player comfort `[{}]` must not discard valid STRATZ itemBuilds",
+        );
+
+    assert!(
+        msg.contains("itemBuilds") && msg.contains("partial:") && msg.contains("player"),
+        "sync message must note persisted itemBuilds and partial player failure: {msg}"
+    );
+    assert!(
+        tmp_dir.join("hero_item_stats.json").exists(),
+        "hero_item_stats.json must still be written despite malformed player comfort `[{{}}]`"
+    );
+    let repo = mgr.build_item_repository();
+    let invoker_stats = repo
+        .hero_item_stats(HeroId(74), Role::SoftSupport, Bracket::Ancient)
+        .expect("Invoker Pos 4 STRATZ stats must be present");
+    assert!(invoker_stats.iter().any(|s| s.item_id == ItemId(267)));
+    assert!(!mgr.is_target_item_heroes_uncached());
+    assert!(
+        mgr.is_player_stale(now),
+        "malformed player comfort must not be written or mark player cache fresh"
+    );
+
+    // 2. Subsequent player-only sync (now all items are cached) with `[{}]` still returns Err.
+    let err = mgr.sync_from_sources_with_role_items(
+        false,
+        now,
+        |url| match url {
+            "https://api.opendota.com/api/players/127255741/heroes" => Ok("[{}]".to_string()),
+            other => Err(truesight_core::ports::PortError(format!(
+                "unexpected OpenDota URL {other}"
+            ))),
+        },
+        |_token| Err(truesight_core::ports::PortError("no syn".into())),
+        |_token, _hid, _role| Ok(stratz_invoker.to_string()),
+    );
+    assert!(
+        err.is_err(),
+        "player-only sync with malformed `[{{}}]` and zero staged artifacts must return Err: {err:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}

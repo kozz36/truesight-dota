@@ -828,9 +828,7 @@ impl LocalCacheManager {
             }
         }
         if player_json.is_some_and(|p| {
-            self.player_account_id.is_none()
-                || !is_arr(p)
-                || (p.trim() != "[]" && parse_player_comfort_json(p).is_empty())
+            self.player_account_id.is_none() || !is_valid_player_comfort_payload(p)
         }) {
             return Err(PortError(
                 "Invalid or truncated player comfort JSON payload".into(),
@@ -878,12 +876,6 @@ impl LocalCacheManager {
         }
         if let Some(ic_body) = item_constants_json {
             atomic_write_file(&self.item_constants_json_path(), ic_body)?;
-            if meta_json.is_none() {
-                atomic_write_file(
-                    &self.metadata_path(),
-                    &format!("meta_sync_unix={now_unix}\n"),
-                )?;
-            }
             state.latest_committed_meta_gen =
                 state.latest_committed_meta_gen.max(self.sync_generation);
         }
@@ -1012,19 +1004,19 @@ impl LocalCacheManager {
                         fetched_meta = Some(body);
                         updated_parts.push("heroStats (24h TTL)");
                     }
-                    if !self.is_cancelled() {
-                        if let Some(ic_body) =
-                            fetch_opendota_url("https://api.opendota.com/api/constants/items")
-                                .ok()
-                                .filter(|b| !parse_opendota_item_constants_json(b).is_empty())
-                        {
-                            fetched_item_constants = Some(ic_body);
-                            updated_parts.push("itemConstants (24h TTL)");
-                        }
-                    }
                 }
                 Err(e) => {
                     deferred_errors.push(format!("meta: {e}"));
+                }
+            }
+            if !self.is_cancelled() {
+                if let Some(ic_body) =
+                    fetch_opendota_url("https://api.opendota.com/api/constants/items")
+                        .ok()
+                        .filter(|b| !parse_opendota_item_constants_json(b).is_empty())
+                {
+                    fetched_item_constants = Some(ic_body);
+                    updated_parts.push("itemConstants (24h TTL)");
                 }
             }
             if !self.is_cancelled() {
@@ -1178,29 +1170,33 @@ impl LocalCacheManager {
                     "https://api.opendota.com/api/players/{account_id}/heroes"
                 )) {
                     Ok(body) => {
-                        if is_arr(&body) {
+                        if is_valid_player_comfort_payload(&body) {
                             fetched_player = Some(body);
                             updated_parts.push("player comfort (1h TTL)");
-                        }
-                        if !self.is_cancelled() {
-                            if let Some(mb) = fetch_opendota_url(&format!(
-                                "https://api.opendota.com/api/players/{account_id}/matches?limit=500"
-                            ))
-                            .ok()
-                            .filter(|m| is_arr(m))
-                            {
-                                fetched_matches = Some(mb);
+                            if !self.is_cancelled() {
+                                if let Some(mb) = fetch_opendota_url(&format!(
+                                    "https://api.opendota.com/api/players/{account_id}/matches?limit=500"
+                                ))
+                                .ok()
+                                .filter(|m| is_arr(m))
+                                {
+                                    fetched_matches = Some(mb);
+                                }
                             }
-                        }
-                        if !self.is_cancelled() {
-                            if let Some(pb) = fetch_opendota_url(&format!(
-                                "https://api.opendota.com/api/players/{account_id}"
-                            ))
-                            .ok()
-                            .filter(|p| is_obj(p))
-                            {
-                                fetched_profile = Some(pb);
+                            if !self.is_cancelled() {
+                                if let Some(pb) = fetch_opendota_url(&format!(
+                                    "https://api.opendota.com/api/players/{account_id}"
+                                ))
+                                .ok()
+                                .filter(|p| is_obj(p))
+                                {
+                                    fetched_profile = Some(pb);
+                                }
                             }
+                        } else {
+                            deferred_errors.push(
+                                "player: Invalid or truncated player comfort JSON payload".into(),
+                            );
                         }
                     }
                     Err(e) => {
@@ -2846,6 +2842,13 @@ fn deduplicate_hero_ids(heroes: Vec<HeroId>) -> Vec<HeroId> {
         }
     }
     out
+}
+
+fn is_valid_player_comfort_payload(json: &str) -> bool {
+    let trimmed = json.trim();
+    trimmed.starts_with('[')
+        && trimmed.ends_with(']')
+        && (trimmed == "[]" || !parse_player_comfort_json(trimmed).is_empty())
 }
 
 fn is_hero_role_covered_in_keys<I>(
