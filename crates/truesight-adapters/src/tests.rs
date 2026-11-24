@@ -5453,17 +5453,26 @@ fn sync_fetches_and_atomically_publishes_item_constants_and_builds_from_empty_ca
         "cached item_constants.json must preserve resolved recipe components"
     );
 
-    let am_stats = repo
-        .hero_item_stats(HeroId(1), Role::Carry, Bracket::Divine)
-        .expect("Anti-Mage item stats should load");
-    let am_bfury = am_stats
+    let am_legend_stats = repo
+        .hero_item_stats(HeroId(1), Role::Carry, Bracket::Legend)
+        .expect("Anti-Mage Legend item stats should load");
+    let am_bfury_legend = am_legend_stats
         .iter()
         .find(|s| s.item_id == ItemId(145))
         .expect("Anti-Mage should have cached Battle Fury timing");
-    assert_eq!(am_bfury.phase, ItemPhase::Core);
-    assert!((am_bfury.avg_time_mins - 14.0).abs() < 0.01);
-    assert_eq!(am_bfury.match_count, 100);
-    assert_eq!(am_bfury.win_count, 60);
+    assert_eq!(am_bfury_legend.phase, ItemPhase::Core);
+    assert!((am_bfury_legend.avg_time_mins - 14.0).abs() < 0.01);
+    assert_eq!(am_bfury_legend.match_count, 100);
+    assert_eq!(am_bfury_legend.win_count, 60);
+
+    let am_divine_stats = repo
+        .hero_item_stats(HeroId(1), Role::Carry, Bracket::Divine)
+        .expect("Anti-Mage Divine item stats should load");
+    let am_bfury_divine = am_divine_stats
+        .iter()
+        .find(|s| s.item_id == ItemId(145))
+        .expect("Anti-Mage Divine should scale unbracketed fallback");
+    assert!((am_bfury_divine.avg_time_mins - (14.0 * 0.92)).abs() < 0.02);
 
     let axe_stats = repo
         .hero_item_stats(HeroId(2), Role::Offlane, Bracket::Divine)
@@ -5502,9 +5511,14 @@ fn sync_from_sources_with_stratz_token_preserves_requested_hero_id_without_row_e
 
     let payload = stratz_hero_item_purchases_graphql_payload(2);
     assert!(
-        payload.contains("itemStartingPurchase(heroId: 2)")
-            && payload.contains("itemFullPurchase(heroId: 2)"),
-        "STRATZ item query must target requested heroId: 2, got: {payload}"
+        payload.contains("heroId: 2")
+            && payload.contains("itemStartingPurchase(")
+            && payload.contains("itemBootPurchase(")
+            && payload.contains("itemFullPurchase(")
+            && payload.contains("HERALD_GUARDIAN")
+            && payload.contains("DIVINE_IMMORTAL")
+            && !payload.contains("itemStartingPurchase(heroId: 2) { itemId time"),
+        "STRATZ item query must target heroId: 2 across all brackets without starting time field, got: {payload}"
     );
 
     let hero_stats_json = r#"[{"id": 2, "4_pick": 1000, "4_win": 530}]"#;
@@ -5831,8 +5845,8 @@ fn embedded_item_atlas_decodes_all_embedded_catalog_items() {
     let ids = crate::item_repo::embedded_item_ids();
     assert!(!ids.is_empty());
     assert!(
-        ids.len() >= 150,
-        "expanded catalog should cover at least 150 items"
+        ids.len() >= 199,
+        "expanded catalog should cover all 199 active items"
     );
     assert_eq!(atlas.items.len(), ids.len());
     for id in ids {
@@ -5842,6 +5856,28 @@ fn embedded_item_atlas_decodes_all_embedded_catalog_items() {
             .unwrap_or_else(|| panic!("missing embedded icon for item {:?}", id));
         assert_eq!(rgb.len(), 44 * 32 * 3);
     }
+
+    let catalog_repo = crate::item_repo::SeededItemMetaRepository::default();
+    for patch_item_id in [635_u16, 692, 1942, 1944, 1946, 1948, 1953, 1955] {
+        let iid = truesight_core::domain::ItemId(patch_item_id);
+        assert!(
+            atlas.items.contains_key(&iid),
+            "item_atlas.bin must contain patch item #{patch_item_id}"
+        );
+        assert!(
+            truesight_core::ports::ItemMetaRepository::item_catalog(&catalog_repo, iid).is_some(),
+            "EMBEDDED_ITEM_CATALOG must contain patch item #{patch_item_id}"
+        );
+    }
+    assert_eq!(
+        truesight_core::ports::ItemMetaRepository::item_catalog(
+            &catalog_repo,
+            truesight_core::domain::ItemId(1953)
+        )
+        .unwrap()
+        .display_name,
+        "Sabatons of Mordiggian"
+    );
 }
 
 #[test]
@@ -6009,4 +6045,284 @@ fn opendota_item_timings_aggregates_weighted_times_and_item_popularity_parses_ph
             .iter()
             .all(|s| s.item_id != ItemId(30) && s.item_id != ItemId(90))
     );
+}
+
+#[test]
+fn stratz_item_query_omits_starting_time_and_aliases_all_four_brackets() {
+    use crate::sync::stratz_hero_item_purchases_graphql_payload_for_role;
+    use truesight_core::domain::Role;
+
+    let payload = stratz_hero_item_purchases_graphql_payload_for_role(32, Some(Role::Mid));
+    for expected in [
+        "heroId: 32",
+        "positionIds: [POSITION_2]",
+        "HERALD_GUARDIAN",
+        "CRUSADER_ARCHON",
+        "LEGEND_ANCIENT",
+        "DIVINE_IMMORTAL",
+        "hgStart:",
+        "hgBoot:",
+        "hgFull:",
+        "diStart:",
+        "diBoot:",
+        "diFull:",
+    ] {
+        assert!(
+            payload.contains(expected),
+            "expected {expected:?} in payload: {payload}"
+        );
+    }
+    assert!(
+        !payload.contains("wasGiven") || !payload.contains("hgStart: itemStartingPurchase(heroId: 32, positionIds: [POSITION_2], bracketBasicIds: [HERALD_GUARDIAN]) { itemId time"),
+        "starting item query must NOT request `time` on HeroItemStartingPurchaseType: {payload}"
+    );
+    // Explicitly check the field list inside hgStart has no `time`.
+    let start_idx = payload.find("hgStart:").unwrap();
+    let brace_rel = payload[start_idx..].find('{').unwrap();
+    let end_rel = payload[start_idx + brace_rel..].find('}').unwrap();
+    let start_fields = &payload[start_idx + brace_rel..=start_idx + brace_rel + end_rel];
+    assert!(
+        !start_fields.contains("time"),
+        "itemStartingPurchase must omit `time`, got: {start_fields}"
+    );
+}
+
+#[test]
+fn parse_stratz_live_bracketed_item_purchases_handles_minute_buckets_and_boot_time_sums() {
+    use crate::sync::parse_stratz_live_bracketed_item_purchases_json;
+    use truesight_core::domain::{HeroId, ItemId, ItemPhase, Role};
+
+    let live_payload = r#"{
+        "data": {
+            "heroStats": {
+                "hgStart": [
+                    {"itemId": 20, "matchCount": 1800, "winCount": 950, "wasGiven": false},
+                    {"itemId": 44, "matchCount": 900, "winCount": 460, "wasGiven": true}
+                ],
+                "hgBoot": [
+                    {"itemId": 63, "time": 2860000, "matchCount": 3700, "winCount": 1950}
+                ],
+                "hgFull": [
+                    {"itemId": 174, "time": 18, "matchCount": 2000, "winCount": 1060},
+                    {"itemId": 147, "time": 28, "matchCount": 1400, "winCount": 780},
+                    {"itemId": 108, "time": 34, "matchCount": 900, "winCount": 520}
+                ],
+                "caStart": [{"itemId": 14, "matchCount": 800, "winCount": 420, "wasGiven": false}],
+                "caBoot": [{"itemId": 63, "time": 540000, "matchCount": 900, "winCount": 490}],
+                "caFull": [{"itemId": 174, "time": 16, "matchCount": 1500, "winCount": 820}],
+                "laStart": [{"itemId": 14, "matchCount": 1200, "winCount": 650, "wasGiven": false}],
+                "laBoot": [{"itemId": 63, "time": 24011080, "matchCount": 42287, "winCount": 25455}],
+                "laFull": [
+                    {"itemId": 174, "time": 14, "matchCount": 4200, "winCount": 2500},
+                    {"itemId": 174, "time": 16, "matchCount": 1800, "winCount": 1020},
+                    {"itemId": 1097, "time": 32, "matchCount": 1900, "winCount": 1250}
+                ],
+                "diStart": [{"itemId": 14, "matchCount": 500, "winCount": 280, "wasGiven": false}],
+                "diBoot": [{"itemId": 63, "time": 7932913, "matchCount": 14398, "winCount": 8331}],
+                "diFull": [
+                    {"itemId": 174, "time": 13, "matchCount": 1600, "winCount": 940},
+                    {"itemId": 143, "time": 29, "matchCount": 1100, "winCount": 710}
+                ]
+            }
+        }
+    }"#;
+
+    let parsed = parse_stratz_live_bracketed_item_purchases_json(
+        live_payload,
+        HeroId(32),
+        Some(Role::Mid),
+    );
+    assert_eq!(parsed.len(), 4, "expected all 4 STRATZ bracket buckets: {parsed:?}");
+
+    let la = &parsed
+        .iter()
+        .find(|(_, _, b, _)| b.map(|v| v.cache_key()) == Some("LEGEND_ANCIENT"))
+        .expect("LEGEND_ANCIENT bucket present")
+        .3;
+    let la_boot = la.iter().find(|s| s.item_id == ItemId(63)).unwrap();
+    // 24011080 / 42287 / 60 = 9.463m
+    assert!((la_boot.avg_time_mins - 9.46).abs() < 0.05, "boot mins: {}", la_boot.avg_time_mins);
+    assert_eq!(la_boot.phase, ItemPhase::Early);
+
+    let la_diff = la.iter().find(|s| s.item_id == ItemId(174)).unwrap();
+    // Weighted minutes: (4200*14 + 1800*16)/6000 = 14.6m
+    assert!((la_diff.avg_time_mins - 14.6).abs() < 0.05, "diff mins: {}", la_diff.avg_time_mins);
+    assert_eq!(la_diff.match_count, 6000);
+    assert_eq!(la_diff.phase, ItemPhase::Core);
+
+    let hg = &parsed
+        .iter()
+        .find(|(_, _, b, _)| b.map(|v| v.cache_key()) == Some("HERALD_GUARDIAN"))
+        .expect("HERALD_GUARDIAN bucket present")
+        .3;
+    assert!(hg.iter().any(|s| s.item_id == ItemId(20) && s.phase == ItemPhase::Starting));
+    assert!(!hg.iter().any(|s| s.item_id == ItemId(44)));
+    assert!(hg.iter().any(|s| s.item_id == ItemId(108) && s.phase == ItemPhase::Late));
+}
+
+#[test]
+fn hero_item_stats_v2_cache_roundtrips_role_bracket_and_scales_unbracketed_fallback() {
+    use crate::sync::LocalCacheManager;
+    use truesight_core::domain::{Bracket, HeroId, ItemId, Role};
+    use truesight_core::ports::ItemMetaRepository;
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_v2_item_cache_test_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    let mut mgr = LocalCacheManager::with_optional_account(tmp_dir.clone(), None);
+    mgr.stratz_api_token = Some("eyJhbGciOinone.eyJleHAiOjQxMDI0NDQ4MDB9.sig".to_string());
+    mgr.set_target_item_hero_roles(vec![(HeroId(32), Role::Mid)]);
+    assert_eq!(mgr.target_item_hero_ids, vec![HeroId(32)]);
+    assert!(mgr.is_target_item_heroes_uncached());
+
+    let now = 1_795_000_000_u64;
+    let hero_stats_json = r#"[{"id": 32, "4_pick": 1000, "4_win": 530}]"#;
+    let item_constants_json = r#"{
+        "diffusal_blade": {"id": 174, "dname": "Diffusal Blade", "cost": 2500, "components": ["blade_of_alacrity", "robe"]},
+        "disperser": {"id": 1097, "dname": "Disperser", "cost": 6100, "components": ["diffusal_blade", "eagle"]},
+        "manta": {"id": 147, "dname": "Manta Style", "cost": 4550, "components": ["yasha", "diadem"]},
+        "phylactery": {"id": 1107, "dname": "Phylactery", "cost": 2600, "components": ["pers", "diadem"]}
+    }"#;
+    let stratz_aliased = r#"{
+        "data": {
+            "heroStats": {
+                "hgStart": [],
+                "hgBoot": [{"itemId": 63, "time": 660000, "matchCount": 1000, "winCount": 510}],
+                "hgFull": [
+                    {"itemId": 174, "time": 18, "matchCount": 1000, "winCount": 520},
+                    {"itemId": 1107, "time": 20, "matchCount": 900, "winCount": 490}
+                ],
+                "caStart": [],
+                "caBoot": [{"itemId": 63, "time": 540000, "matchCount": 1000, "winCount": 520}],
+                "caFull": [{"itemId": 174, "time": 16, "matchCount": 1000, "winCount": 530}],
+                "laStart": [],
+                "laBoot": [{"itemId": 63, "time": 510000, "matchCount": 1000, "winCount": 540}],
+                "laFull": [{"itemId": 174, "time": 15, "matchCount": 1000, "winCount": 560}],
+                "diStart": [],
+                "diBoot": [{"itemId": 63, "time": 420000, "matchCount": 1000, "winCount": 550}],
+                "diFull": [
+                    {"itemId": 174, "time": 14, "matchCount": 1000, "winCount": 570},
+                    {"itemId": 1097, "time": 26, "matchCount": 900, "winCount": 540}
+                ]
+            }
+        }
+    }"#;
+
+    mgr.sync_from_sources_with_role_items(
+        false,
+        now,
+        |url| match url {
+            "https://api.opendota.com/api/heroStats" => Ok(hero_stats_json.to_string()),
+            "https://api.opendota.com/api/constants/items" => Ok(item_constants_json.to_string()),
+            other => Err(truesight_core::ports::PortError(format!("unexpected {other}"))),
+        },
+        |_token| Ok(r#"{"data":{"heroStats":{"matchUp":[]}}}"#.to_string()),
+        |_token, hero_id, role| {
+            assert_eq!(hero_id, 32);
+            assert_eq!(role, Some(Role::Mid));
+            Ok(stratz_aliased.to_string())
+        },
+    )
+    .expect("v2 role-bracketed STRATZ sync should succeed");
+
+    assert!(
+        !mgr.is_target_item_heroes_uncached(),
+        "cached (HeroId(32), Mid) with STRATZ buckets should mark hero+role cached"
+    );
+    mgr.set_target_item_hero_roles(vec![(HeroId(32), Role::SoftSupport)]);
+    assert!(
+        mgr.is_target_item_heroes_uncached(),
+        "requesting uncached SoftSupport role on same hero must mark uncached"
+    );
+
+    let repo = mgr.build_item_repository();
+    let herald = repo
+        .hero_item_stats(HeroId(32), Role::Mid, Bracket::Herald)
+        .unwrap();
+    let divine = repo
+        .hero_item_stats(HeroId(32), Role::Mid, Bracket::Divine)
+        .unwrap();
+    let immortal = repo
+        .hero_item_stats(HeroId(32), Role::Mid, Bracket::Immortal)
+        .unwrap();
+
+    assert!(herald.iter().any(|s| s.item_id == ItemId(1107)));
+    assert!(!divine.iter().any(|s| s.item_id == ItemId(1107)));
+    assert!(divine.iter().any(|s| s.item_id == ItemId(1097)));
+
+    let div_diff = divine.iter().find(|s| s.item_id == ItemId(174)).unwrap().avg_time_mins;
+    let imm_diff = immortal.iter().find(|s| s.item_id == ItemId(174)).unwrap().avg_time_mins;
+    assert!(
+        div_diff > imm_diff,
+        "intra-bucket scaling must keep Divine ({div_diff}) > Immortal ({imm_diff})"
+    );
+
+    // Unbracketed custom_hero_stats fallback must still scale by bracket_timing_scale.
+    let mut unbracketed_repo = crate::item_repo::SeededItemMetaRepository::default();
+    unbracketed_repo.custom_hero_stats.push((
+        HeroId(99),
+        None,
+        None,
+        vec![truesight_core::domain::HeroItemStat {
+            item_id: ItemId(1),
+            phase: truesight_core::domain::ItemPhase::Core,
+            avg_time_mins: 15.0,
+            match_count: 500,
+            win_count: 270,
+        }],
+    ));
+    let u_herald = unbracketed_repo
+        .hero_item_stats(HeroId(99), Role::Offlane, Bracket::Herald)
+        .unwrap();
+    let u_legend = unbracketed_repo
+        .hero_item_stats(HeroId(99), Role::Offlane, Bracket::Legend)
+        .unwrap();
+    let u_immortal = unbracketed_repo
+        .hero_item_stats(HeroId(99), Role::Offlane, Bracket::Immortal)
+        .unwrap();
+    let t_herald = u_herald.iter().find(|s| s.item_id == ItemId(1)).unwrap().avg_time_mins;
+    let t_legend = u_legend.iter().find(|s| s.item_id == ItemId(1)).unwrap().avg_time_mins;
+    let t_immortal = u_immortal.iter().find(|s| s.item_id == ItemId(1)).unwrap().avg_time_mins;
+    assert!(
+        t_herald > t_legend && t_legend > t_immortal,
+        "unbracketed cached fallback must scale Herald ({t_herald}) > Legend ({t_legend}) > Immortal ({t_immortal})"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn is_valid_timed_progression_item_for_phase_allows_early_core_high_value_and_blocks_basic_and_late_raw() {
+    use crate::item_repo::{
+        SeededItemMetaRepository, is_valid_timed_progression_item_for_phase,
+    };
+    use truesight_core::domain::{ItemId, ItemPhase};
+
+    let repo = SeededItemMetaRepository::default();
+    // High-value Early/Core stepping stones are valid in Core.
+    for id in [24_u16, 54, 55, 170, 149] {
+        assert!(
+            is_valid_timed_progression_item_for_phase(&repo, ItemId(id), ItemPhase::Core),
+            "expected item #{id} to be valid in Core"
+        );
+    }
+    // Raw Secret Shop orbs/rel/hyperstone must stay blocked in Late.
+    for raw_late_id in [24_u16, 54, 55] {
+        assert!(
+            !is_valid_timed_progression_item_for_phase(&repo, ItemId(raw_late_id), ItemPhase::Late),
+            "expected raw stepping stone #{raw_late_id} to remain excluded in Late"
+        );
+    }
+    // Cheap basic ingredients must stay blocked in Early, Core, and Late.
+    for basic_id in [21_u16, 22, 67, 69, 1125] {
+        for ph in [ItemPhase::Early, ItemPhase::Core, ItemPhase::Late] {
+            assert!(
+                !is_valid_timed_progression_item_for_phase(&repo, ItemId(basic_id), ph),
+                "expected basic item #{basic_id} to be blocked in {ph:?}"
+            );
+        }
+    }
 }
