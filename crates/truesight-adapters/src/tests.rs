@@ -3589,6 +3589,321 @@ fn vision_ingame_excludes_player_color_strip_and_spectator_borders() {
 }
 
 #[test]
+fn vision_ingame_2560x1440_real_geometry_detects_rubick_and_dota_plus_badges() {
+    use crate::vision::{
+        HeroVisionCatalog, RgbFrame, ScreenFrameSource, VisionCaptureAdapter, VisionCaptureMode,
+        parse_hero_atlas,
+    };
+    use truesight_core::domain::{Faction, Role, Side};
+    use truesight_core::ports::{DraftEvent, DraftEventSource, PortError};
+
+    struct SingleFrame(Option<RgbFrame>);
+    impl ScreenFrameSource for SingleFrame {
+        fn capture_frame(&mut self) -> Result<Option<RgbFrame>, PortError> {
+            Ok(self.0.take())
+        }
+    }
+
+    let atlas = parse_hero_atlas().expect("base atlas must load");
+    let catalog = HeroVisionCatalog::from_embedded().expect("vision catalog must load");
+
+    // Real 2560x1440 Dota 2 In-Game top-bar strip: 82x46 portraits at y = 6..52 below a 5px
+    // player-color bar, cropped to 2560x115 with source_height = 1440.
+    let (w, h, source_h) = (2560_usize, 115_usize, 1440_usize);
+    let mut rgb = vec![16_u8; w * h * 3];
+
+    let player_colors: [[u8; 3]; 10] = [
+        [46, 115, 230],
+        [102, 255, 192],
+        [191, 0, 191],
+        [243, 240, 11],
+        [255, 107, 0],
+        [254, 134, 194],
+        [161, 180, 71],
+        [101, 217, 247],
+        [0, 131, 33],
+        [164, 105, 0],
+    ];
+    let paint_real_1440_slot =
+        |buf: &mut [u8],
+         x0: usize,
+         hid: u16,
+         strip_rgb: [u8; 3],
+         badge: Option<(usize, usize, usize, usize, [u8; 3])>| {
+            // 5px top player color bar (y = 0..5)
+            for py in 0..5 {
+                for px in x0..(x0 + 82) {
+                    let dst = (py * w + px) * 3;
+                    buf[dst..dst + 3].copy_from_slice(&strip_rgb);
+                }
+            }
+            // 82x46 portrait (y = 6..52) matching real 1440p In-Game HUD proportions
+            let src = &atlas.heroes[&HeroId(hid)];
+            for dy in 0..46_usize {
+                let sy = (dy * atlas.hero_height) / 46;
+                for dx in 0..82_usize {
+                    let sx = (dx * atlas.hero_width) / 82;
+                    let si = (sy * atlas.hero_width + sx) * 3;
+                    let dst = ((6 + dy) * w + x0 + dx) * 3;
+                    buf[dst..dst + 3].copy_from_slice(&src[si..si + 3]);
+                }
+            }
+            // Opaque Dota Plus tier corner badge in the bottom corner (matching live measurements)
+            if let Some((bx0, bx1, by0, by1, badge_rgb)) = badge {
+                for dy in by0..by1 {
+                    for dx in bx0..bx1 {
+                        let dst = ((6 + dy) * w + x0 + dx) * 3;
+                        buf[dst..dst + 3].copy_from_slice(&badge_rgb);
+                    }
+                }
+            }
+        };
+
+    // Match lineup from #87: Invoker(74), Axe(2), Shadow Shaman(27), Juggernaut(8), Pudge(14)
+    // vs Rubick(86), Templar Assassin(46), Mars(129), Sand King(16), Hoodwink(123).
+    let rad_ids = [74_u16, 2, 27, 8, 14];
+    let dire_ids = [86_u16, 46, 129, 16, 123];
+    let bronze_badge = [240_u8, 212, 132];
+    let platinum_badge = [52_u8, 130, 235];
+
+    for (slot, &hid) in rad_ids.iter().enumerate() {
+        let x0 = (728.0 + (slot as f32) * 83.5).round() as usize;
+        let badge = if slot == 4 {
+            // Radiant slot 4 Pudge wearing a bright blue Platinum Dota Plus shield
+            Some((2, 25, 22, 44, platinum_badge))
+        } else {
+            Some((2, 24, 25, 45, bronze_badge))
+        };
+        paint_real_1440_slot(&mut rgb, x0, hid, player_colors[slot], badge);
+    }
+    for (slot, &hid) in dire_ids.iter().enumerate() {
+        let x0 = (1420.0 + (slot as f32) * 83.5).round() as usize;
+        // Dire portraits carry the bright Dota Plus tier shield highlight in bottom-right
+        // (dx=52..78, dy=24..45), overlapping cols 6..7 of ingame_inner_core_rect.
+        paint_real_1440_slot(
+            &mut rgb,
+            x0,
+            hid,
+            player_colors[5 + slot],
+            Some((52, 78, 24, 45, bronze_badge)),
+        );
+    }
+
+    let mut adapter = VisionCaptureAdapter::new(
+        SingleFrame(Some(RgbFrame::with_source_height(w, h, source_h, rgb))),
+        catalog,
+    );
+    adapter.set_ally_faction(Faction::Radiant);
+    adapter.set_capture_mode(VisionCaptureMode::Any);
+
+    let events = adapter.poll_events().expect("poll_events must succeed");
+    assert!(
+        events.contains(&DraftEvent::PickDetected {
+            side: Side::Enemies,
+            slot: 0,
+            hero_id: HeroId(86),
+            role: Some(Role::Carry),
+        }),
+        "Dire slot 0 must detect base Rubick (86) despite Dota Plus badge in 2560x1440 InGame strip; got {events:?}"
+    );
+    assert!(
+        events.contains(&DraftEvent::PickDetected {
+            side: Side::Allies,
+            slot: 4,
+            hero_id: HeroId(14),
+            role: Some(Role::HardSupport),
+        }),
+        "Radiant slot 4 must detect Pudge (14) despite Platinum shield in 2560x1440 InGame strip; got {events:?}"
+    );
+    for (slot, &hid) in rad_ids.iter().enumerate() {
+        assert!(
+            events.contains(&DraftEvent::PickDetected {
+                side: Side::Allies,
+                slot,
+                hero_id: HeroId(hid),
+                role: Some(Role::ALL[slot]),
+            }),
+            "Radiant slot {slot} missing HeroId({hid}) in real 2560x1440 InGame strip: {events:?}"
+        );
+    }
+    for (slot, &hid) in dire_ids.iter().enumerate() {
+        assert!(
+            events.contains(&DraftEvent::PickDetected {
+                side: Side::Enemies,
+                slot,
+                hero_id: HeroId(hid),
+                role: Some(Role::ALL[slot]),
+            }),
+            "Dire slot {slot} missing HeroId({hid}) in real 2560x1440 InGame strip: {events:?}"
+        );
+    }
+}
+
+#[test]
+fn vision_ingame_rubick_overwrites_stale_visage_lock_after_two_frames() {
+    use crate::vision::{
+        HeroVisionCatalog, RgbFrame, ScreenFrameSource, VisionCaptureAdapter, VisionCaptureMode,
+        parse_hero_atlas,
+    };
+    use std::collections::VecDeque;
+    use truesight_core::domain::{Faction, Role, Side};
+    use truesight_core::ports::{DraftEvent, DraftEventSource, PortError};
+
+    struct QueueFrames(VecDeque<RgbFrame>);
+    impl ScreenFrameSource for QueueFrames {
+        fn capture_frame(&mut self) -> Result<Option<RgbFrame>, PortError> {
+            Ok(self.0.pop_front())
+        }
+    }
+
+    let atlas = parse_hero_atlas().expect("base atlas must load");
+    let catalog = HeroVisionCatalog::from_embedded().expect("vision catalog must load");
+    let (w, h, source_h) = (2560_usize, 115_usize, 1440_usize);
+
+    let paint_lineup_frame = |dire0_hero: u16, dire0_badge: bool, dire0_desaturated: bool| {
+        let mut buf = vec![16_u8; w * h * 3];
+        let rad_ids = [74_u16, 2, 27, 8, 14];
+        let dire_ids = [dire0_hero, 46, 129, 16, 123];
+        for (idx, (x0, hid)) in rad_ids
+            .iter()
+            .enumerate()
+            .map(|(i, &id)| (((728.0 + (i as f32) * 83.5).round() as usize), id))
+            .chain(
+                dire_ids
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &id)| (((1420.0 + (i as f32) * 83.5).round() as usize), id)),
+            )
+            .enumerate()
+        {
+            let src = &atlas.heroes[&HeroId(hid)];
+            for dy in 0..46_usize {
+                let sy = (dy * atlas.hero_height) / 46;
+                for dx in 0..82_usize {
+                    let sx = (dx * atlas.hero_width) / 82;
+                    let si = (sy * atlas.hero_width + sx) * 3;
+                    let dst = ((6 + dy) * w + x0 + dx) * 3;
+                    if idx == 5 && dire0_desaturated {
+                        let lum =
+                            ((u16::from(src[si]) + u16::from(src[si + 1]) + u16::from(src[si + 2]))
+                                / 3) as u8;
+                        buf[dst..dst + 3].copy_from_slice(&[lum, lum, lum]);
+                    } else {
+                        buf[dst..dst + 3].copy_from_slice(&src[si..si + 3]);
+                    }
+                }
+            }
+            if idx == 5 && dire0_badge {
+                for dy in 24..45_usize {
+                    for dx in 52..78_usize {
+                        let dst = ((6 + dy) * w + x0 + dx) * 3;
+                        buf[dst..dst + 3].copy_from_slice(&[240, 212, 132]);
+                    }
+                }
+            }
+        }
+        RgbFrame::with_source_height(w, h, source_h, buf)
+    };
+
+    // Frame 0: stale/misdetected Visage(92) in Dire slot 0 -> locked.
+    // Frames 1..2: real Rubick(86) + bottom-right bronze Dota Plus badge -> must overwrite on frame 2.
+    // Frame 3: desaturated dead Rubick portrait -> must NOT overwrite or emit phantom swaps.
+    let mut adapter = VisionCaptureAdapter::new(
+        QueueFrames(VecDeque::from([
+            paint_lineup_frame(92, false, false),
+            paint_lineup_frame(86, true, false),
+            paint_lineup_frame(86, true, false),
+            paint_lineup_frame(92, false, true),
+        ])),
+        catalog,
+    );
+    adapter.set_ally_faction(Faction::Radiant);
+    adapter.set_capture_mode(VisionCaptureMode::Any);
+
+    let ev0 = adapter.poll_events().expect("frame 0 must succeed");
+    assert!(
+        ev0.contains(&DraftEvent::PickDetected {
+            side: Side::Enemies,
+            slot: 0,
+            hero_id: HeroId(92),
+            role: Some(Role::Carry),
+        }),
+        "Frame 0 must establish initial Visage (92) lock in Dire slot 0: {ev0:?}"
+    );
+
+    let ev1 = adapter.poll_events().expect("frame 1 must succeed");
+    assert!(
+        ev1.is_empty(),
+        "First differing Rubick frame must obey OVERWRITE_CONFIRM_FRAMES=2 hysteresis: {ev1:?}"
+    );
+
+    let ev2 = adapter.poll_events().expect("frame 2 must succeed");
+    assert_eq!(
+        ev2,
+        vec![DraftEvent::PickDetected {
+            side: Side::Enemies,
+            slot: 0,
+            hero_id: HeroId(86),
+            role: Some(Role::Carry),
+        }],
+        "Second consecutive Rubick (86) frame must overwrite stale Visage (92) lock: {ev2:?}"
+    );
+
+    let ev3 = adapter.poll_events().expect("frame 3 must succeed");
+    assert!(
+        ev3.is_empty(),
+        "Desaturated dead portrait must not overwrite locked Rubick (86): {ev3:?}"
+    );
+}
+
+#[test]
+fn vision_ingame_upper_core_rect_bounds_and_scaling() {
+    use crate::vision::{TopBarSlotRect, compute_ingame_topbar_slot_rects, ingame_upper_core_rect};
+
+    let (rad_1440, dire_1440) = compute_ingame_topbar_slot_rects(2560, 1440);
+    for rect in rad_1440.into_iter().chain(dire_1440) {
+        let upper = ingame_upper_core_rect(rect);
+        assert_eq!(
+            upper,
+            TopBarSlotRect {
+                x: rect.x + 6,
+                y: 8,
+                width: 70,
+                height: 26,
+            },
+            "2560x1440 upper core must sit strictly inside rect above Dota Plus bottom badges"
+        );
+        assert!(upper.x + upper.width <= rect.x + rect.width);
+        assert!(upper.y + upper.height <= rect.y + rect.height);
+    }
+
+    let (rad_1080, dire_1080) = compute_ingame_topbar_slot_rects(1920, 1080);
+    for rect in rad_1080.into_iter().chain(dire_1080) {
+        let upper = ingame_upper_core_rect(rect);
+        assert_eq!(
+            upper,
+            TopBarSlotRect {
+                x: rect.x + 5,
+                y: 6,
+                width: 52,
+                height: 20,
+            },
+            "1920x1080 upper core must floor top inset to avoid double-rounding drift"
+        );
+        assert!(upper.x + upper.width <= rect.x + rect.width);
+        assert!(upper.y + upper.height <= rect.y + rect.height);
+    }
+
+    let tiny = TopBarSlotRect {
+        x: 10,
+        y: 2,
+        width: 8,
+        height: 8,
+    };
+    assert_eq!(ingame_upper_core_rect(tiny), tiny);
+}
+
+#[test]
 fn vision_dedup_resolves_two_slot_collision_via_next_best_and_drops_uniform_flood() {
     use crate::vision::dedup_layout_candidates;
 

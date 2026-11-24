@@ -199,6 +199,30 @@ pub(super) fn ingame_inner_core_rect(rect: TopBarSlotRect) -> TopBarSlotRect {
     }
 }
 
+/// Insets an `InGame` HUD slot rectangle to its badge-free upper portrait core, aligned with
+/// real `82x46 @ y=6` Dota 2 HUD portraits while staying within `rect` and excluding the top
+/// player-color strip and bottom Dota Plus tier emblems.
+pub(crate) fn ingame_upper_core_rect(rect: TopBarSlotRect) -> TopBarSlotRect {
+    let left = ((rect.width as f32) * (6.0 / 76.0)).round() as usize;
+    // Floor top inset so scaled resolutions (e.g. 1920x1080 where rect.y already rounds up)
+    // avoid double-rounding downward into the badge region.
+    let top = ((rect.height as f32) * (6.0 / 44.0)).floor() as usize;
+    let max_w = rect.width.saturating_sub(left);
+    let max_h = rect.height.saturating_sub(top);
+    let width = (((rect.width as f32) * (70.0 / 76.0)).round() as usize).min(max_w);
+    let height = (((rect.height as f32) * (26.0 / 44.0)).round() as usize).min(max_h);
+    if width >= DESC_COLS && height >= DESC_ROWS {
+        TopBarSlotRect {
+            x: rect.x + left,
+            y: rect.y + top,
+            width,
+            height,
+        }
+    } else {
+        rect
+    }
+}
+
 /// Computes In-Game HUD top-bar slot coordinates calibrated on real Dota 2 (`2560x1440` scaled).
 pub fn compute_ingame_topbar_slot_rects(
     frame_w: usize,
@@ -391,15 +415,14 @@ fn descriptor_total_variance(desc: &[u8; DESC_LEN]) -> f32 {
     var_sum / (n * 3.0)
 }
 
-fn rank_descriptor_sets(
+fn accumulate_descriptor_matches(
     entry_sets: &[&[(HeroId, [u8; DESC_LEN])]],
     query_desc: &[u8; DESC_LEN],
+    query_saturation: f32,
     threshold: f32,
     min_ncc8: f32,
-    max_candidates: usize,
-) -> Vec<(HeroId, f32)> {
-    let mut best_by_hero: HashMap<HeroId, f32> = HashMap::new();
-
+    best_by_hero: &mut HashMap<HeroId, (f32, f32)>,
+) {
     for entries in entry_sets {
         for (hero_id, candidate_desc) in *entries {
             let mut sum_abs = 0_u32;
@@ -418,27 +441,32 @@ fn rank_descriptor_sets(
             best_by_hero
                 .entry(*hero_id)
                 .and_modify(|prev| {
-                    if mean_l1 < *prev {
-                        *prev = mean_l1;
+                    if mean_l1 < prev.0 {
+                        *prev = (mean_l1, query_saturation);
                     }
                 })
-                .or_insert(mean_l1);
+                .or_insert((mean_l1, query_saturation));
         }
     }
-
-    let mut ranked: Vec<(HeroId, f32)> = best_by_hero.into_iter().collect();
-    ranked.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.0.cmp(&b.0.0)));
-    ranked.truncate(max_candidates);
-    ranked
 }
 
 fn match_descriptor_sets(
     entry_sets: &[&[(HeroId, [u8; DESC_LEN])]],
     query_desc: &[u8; DESC_LEN],
 ) -> Option<(HeroId, f32)> {
-    rank_descriptor_sets(entry_sets, query_desc, f32::MAX, -1.0, 1)
+    let mut best_by_hero = HashMap::new();
+    accumulate_descriptor_matches(
+        entry_sets,
+        query_desc,
+        0.0,
+        f32::MAX,
+        -1.0,
+        &mut best_by_hero,
+    );
+    best_by_hero
         .into_iter()
-        .next()
+        .map(|(hero_id, (diff, _))| (hero_id, diff))
+        .min_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.0.cmp(&b.0.0)))
 }
 
 /// Precomputed 8x4 cell-averaged RGB portrait catalog for all 127 Dota 2 heroes.
@@ -448,80 +476,60 @@ pub struct HeroVisionCatalog {
     inner_entries: Vec<(HeroId, [u8; DESC_LEN])>,
     upper_entries: Vec<(HeroId, [u8; DESC_LEN])>,
     ingame_core_entries: Vec<(HeroId, [u8; DESC_LEN])>,
+    ingame_upper_core_entries: Vec<(HeroId, [u8; DESC_LEN])>,
 }
 
 impl HeroVisionCatalog {
     pub fn from_embedded() -> Option<Self> {
         let atlas = parse_hero_atlas()?;
-        let full_rect = TopBarSlotRect {
-            x: 0,
-            y: 0,
-            width: atlas.hero_width,
-            height: atlas.hero_height,
-        };
-        let inner_rect = TopBarSlotRect {
-            x: 4,
-            y: 2,
-            width: atlas.hero_width.saturating_sub(8),
-            height: atlas.hero_height.saturating_sub(4),
-        };
-        let upper_rect = TopBarSlotRect {
-            x: 4,
-            y: 2,
-            width: atlas.hero_width.saturating_sub(8),
-            height: 22.min(atlas.hero_height.saturating_sub(2)),
-        };
-        let ingame_core_rect = TopBarSlotRect {
-            x: 5,
-            y: 2,
-            width: atlas.hero_width.saturating_sub(13),
-            height: atlas.hero_height.saturating_sub(8),
-        };
+        let (hw, hh) = (atlas.hero_width, atlas.hero_height);
+        let rect_specs = [
+            (0, 0, hw, hh),
+            (4, 2, hw.saturating_sub(8), hh.saturating_sub(4)),
+            (4, 2, hw.saturating_sub(8), 22.min(hh.saturating_sub(2))),
+            (5, 2, hw.saturating_sub(13), hh.saturating_sub(8)),
+            (5, 2, hw.saturating_sub(10), 20.min(hh.saturating_sub(2))),
+        ];
 
         let alt_atlas = crate::hero_alt_atlas::parse_hero_alt_atlas()?;
-        if alt_atlas.width != atlas.hero_width || alt_atlas.height != atlas.hero_height {
+        if alt_atlas.width != hw || alt_atlas.height != hh {
             return None;
         }
         let total_entries = atlas.heroes.len() + alt_atlas.entries.len();
-
-        let mut full_entries = Vec::with_capacity(total_entries);
-        let mut inner_entries = Vec::with_capacity(total_entries);
-        let mut upper_entries = Vec::with_capacity(total_entries);
-        let mut ingame_core_entries = Vec::with_capacity(total_entries);
+        let mut buckets: [Vec<(HeroId, [u8; DESC_LEN])>; 5] =
+            std::array::from_fn(|_| Vec::with_capacity(total_entries));
 
         for (hero_id, rgb) in atlas.heroes.into_iter().chain(alt_atlas.entries) {
-            if let Some((desc, _)) =
-                compute_descriptor_8x4(&rgb, atlas.hero_width, atlas.hero_height, full_rect)
-            {
-                full_entries.push((hero_id, desc));
-            }
-            if let Some((desc, _)) =
-                compute_descriptor_8x4(&rgb, atlas.hero_width, atlas.hero_height, inner_rect)
-            {
-                inner_entries.push((hero_id, desc));
-            }
-            if let Some((desc, _)) =
-                compute_descriptor_8x4(&rgb, atlas.hero_width, atlas.hero_height, upper_rect)
-            {
-                upper_entries.push((hero_id, desc));
-            }
-            if let Some((desc, _)) =
-                compute_descriptor_8x4(&rgb, atlas.hero_width, atlas.hero_height, ingame_core_rect)
-            {
-                ingame_core_entries.push((hero_id, desc));
+            for ((x, y, width, height), entries) in rect_specs.into_iter().zip(&mut buckets) {
+                let rect = TopBarSlotRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                };
+                if let Some((desc, _)) = compute_descriptor_8x4(&rgb, hw, hh, rect) {
+                    entries.push((hero_id, desc));
+                }
             }
         }
 
-        full_entries.sort_by_key(|(id, _)| id.0);
-        inner_entries.sort_by_key(|(id, _)| id.0);
-        upper_entries.sort_by_key(|(id, _)| id.0);
-        ingame_core_entries.sort_by_key(|(id, _)| id.0);
+        for entries in &mut buckets {
+            entries.sort_by_key(|(id, _)| id.0);
+        }
+        let [
+            full_entries,
+            inner_entries,
+            upper_entries,
+            ingame_core_entries,
+            ingame_upper_core_entries,
+        ] = buckets;
 
         Some(Self {
             full_entries,
             inner_entries,
             upper_entries,
             ingame_core_entries,
+            ingame_upper_core_entries,
         })
     }
 
@@ -555,68 +563,65 @@ impl HeroVisionCatalog {
         layout: TopBarLayout,
         max_candidates: usize,
     ) -> Vec<(HeroId, f32, f32)> {
-        let query_rect = match layout {
-            TopBarLayout::InGame => ingame_inner_core_rect(rect),
-            TopBarLayout::SyntheticExact | TopBarLayout::PickPhase => rect,
-        };
-        let Some((query_desc, mean_intensity)) =
-            compute_descriptor_8x4(frame_rgb, frame_w, frame_h, query_rect)
-        else {
-            return Vec::new();
-        };
-        if mean_intensity < DARK_INTENSITY_THRESHOLD {
-            return Vec::new();
-        }
-
-        let (ov, os) = outer_column_stats(&query_desc);
-        let tv = descriptor_total_variance(&query_desc);
-        let ms = mean_descriptor_saturation(&query_desc);
-        if ms < MIN_DESCRIPTOR_SATURATION || os < MIN_OUTER_SATURATION {
-            return Vec::new();
-        }
-
         type DescriptorSets<'a> = &'a [&'a [(HeroId, [u8; DESC_LEN])]];
 
-        let saturated_dark_border = ov >= 12.0 && ms >= 28.0 && os >= 28.0;
-        let (entry_sets, threshold, has_portrait_detail): (DescriptorSets<'_>, f32, bool) =
-            match layout {
-                TopBarLayout::SyntheticExact => (
-                    &[&self.full_entries],
-                    MATCH_L1_THRESHOLD,
-                    tv >= 12.5 && ov >= 11.0,
-                ),
-                // PickPhase captures both nameplate-cropped upper cards and full/inner 16:9 slots.
-                TopBarLayout::PickPhase => (
+        let passes: [Option<(TopBarSlotRect, DescriptorSets<'_>)>; 2] = match layout {
+            TopBarLayout::SyntheticExact => [Some((rect, &[&self.full_entries])), None],
+            TopBarLayout::PickPhase => [
+                Some((
+                    rect,
                     &[&self.upper_entries, &self.inner_entries, &self.full_entries],
-                    PICKPHASE_L1_THRESHOLD,
-                    tv >= 13.5
-                        && (ov >= 13.5
-                            || (ov >= 12.5 && tv >= 18.0 && os >= 20.0)
-                            || saturated_dark_border
-                            || (ov >= 7.5 && os >= 35.0)),
-                ),
-                TopBarLayout::InGame => (
+                )),
+                None,
+            ],
+            TopBarLayout::InGame => [
+                Some((
+                    ingame_inner_core_rect(rect),
                     &[&self.inner_entries, &self.ingame_core_entries],
-                    INGAME_L1_THRESHOLD,
-                    tv >= 13.5
-                        && os >= 10.5
-                        && (ov >= 13.5
-                            || (ov >= 12.5 && tv >= 18.0 && os >= 20.0)
-                            || saturated_dark_border
-                            || (ov >= 9.5 && os >= 35.0)),
-                ),
+                )),
+                Some((
+                    ingame_upper_core_rect(rect),
+                    &[&self.ingame_upper_core_entries],
+                )),
+            ],
+        };
+        let threshold = match layout {
+            TopBarLayout::SyntheticExact => MATCH_L1_THRESHOLD,
+            TopBarLayout::PickPhase => PICKPHASE_L1_THRESHOLD,
+            TopBarLayout::InGame => INGAME_L1_THRESHOLD,
+        };
+
+        let mut best_by_hero: HashMap<HeroId, (f32, f32)> = HashMap::new();
+        for (query_rect, entry_sets) in passes.into_iter().flatten() {
+            let Some((query_desc, mean_intensity)) =
+                compute_descriptor_8x4(frame_rgb, frame_w, frame_h, query_rect)
+            else {
+                continue;
             };
-        if !has_portrait_detail {
-            return Vec::new();
+            if mean_intensity < DARK_INTENSITY_THRESHOLD {
+                continue;
+            }
+
+            let Some(ms) = slot_portrait_saturation_if_detailed(layout, &query_desc) else {
+                continue;
+            };
+
+            accumulate_descriptor_matches(
+                entry_sets,
+                &query_desc,
+                ms,
+                threshold,
+                MIN_MATCH_NCC_8,
+                &mut best_by_hero,
+            );
         }
 
-        let ranked = rank_descriptor_sets(
-            entry_sets,
-            &query_desc,
-            threshold,
-            MIN_MATCH_NCC_8,
-            max_candidates,
-        );
+        let mut ranked: Vec<(HeroId, f32, f32)> = best_by_hero
+            .into_iter()
+            .map(|(hero_id, (diff, sat))| (hero_id, diff, sat))
+            .collect();
+        ranked.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.0.cmp(&b.0.0)));
+
         // A weak near-tie is not identity evidence: interior overlays or non-HUD chrome can shift
         // the nearest RGB template to an unrelated hero. Abstain before collision recovery can
         // promote indistinguishable alternatives, while keeping strong matches intact.
@@ -632,11 +637,34 @@ impl HeroVisionCatalog {
         {
             return Vec::new();
         }
+        ranked.truncate(max_candidates);
         ranked
-            .into_iter()
-            .map(|(hero_id, diff)| (hero_id, diff, ms))
-            .collect()
     }
+}
+
+fn slot_portrait_saturation_if_detailed(
+    layout: TopBarLayout,
+    query_desc: &[u8; DESC_LEN],
+) -> Option<f32> {
+    let (ov, os) = outer_column_stats(query_desc);
+    let tv = descriptor_total_variance(query_desc);
+    let ms = mean_descriptor_saturation(query_desc);
+    if ms < MIN_DESCRIPTOR_SATURATION || os < MIN_OUTER_SATURATION {
+        return None;
+    }
+
+    let common_edge = ov >= 13.5
+        || (ov >= 12.5 && tv >= 18.0 && os >= 20.0)
+        || (ov >= 12.0 && ms >= 28.0 && os >= 28.0);
+    let has_detail = match layout {
+        TopBarLayout::SyntheticExact => tv >= 12.5 && ov >= 11.0,
+        // PickPhase captures both nameplate-cropped upper cards and full/inner 16:9 slots.
+        TopBarLayout::PickPhase => tv >= 13.5 && (common_edge || (ov >= 7.5 && os >= 35.0)),
+        TopBarLayout::InGame => {
+            tv >= 13.5 && os >= 10.5 && (common_edge || (ov >= 9.5 && os >= 35.0))
+        }
+    };
+    has_detail.then_some(ms)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
