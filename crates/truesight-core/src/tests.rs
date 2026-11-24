@@ -1663,3 +1663,233 @@ fn recommend_item_build_groups_mutually_exclusive_early_boots_as_variants() {
     assert_eq!(owned_build.next_unowned_index, Some(1));
     assert_eq!(owned_build.steps[1].item_id, ItemId(168));
 }
+
+#[test]
+fn recommend_item_build_allocates_four_late_primary_steps() {
+    use crate::domain::{Bracket, ItemId, ItemPhase};
+    use crate::math::recommend_item_build;
+
+    let repo = MockItemRepo {
+        catalog: vec![
+            catalog_entry(75, "Wraith Band", 505, &[], false, false),
+            catalog_entry(63, "Power Treads", 1400, &[], false, false),
+            catalog_entry(166, "Maelstrom", 2950, &[], false, false),
+            catalog_entry(147, "Manta Style", 4550, &[], false, false),
+            catalog_entry(158, "Mjollnir", 5500, &[166], false, false),
+            catalog_entry(139, "Butterfly", 4975, &[], false, false),
+            catalog_entry(160, "Eye of Skadi", 5300, &[], false, false),
+            catalog_entry(141, "Daedalus", 5150, &[], false, false),
+            catalog_entry(156, "Satanic", 5050, &[], false, false),
+        ],
+        stats: vec![
+            item_stat(75, ItemPhase::Early, 6.0, 620, 320),
+            item_stat(63, ItemPhase::Early, 9.0, 980, 520),
+            item_stat(166, ItemPhase::Core, 15.0, 880, 480),
+            item_stat(147, ItemPhase::Core, 21.0, 840, 470),
+            item_stat(158, ItemPhase::Late, 26.0, 760, 440),
+            item_stat(139, ItemPhase::Late, 28.5, 690, 405),
+            item_stat(160, ItemPhase::Late, 31.0, 620, 370),
+            item_stat(141, ItemPhase::Late, 33.5, 580, 350),
+            item_stat(156, ItemPhase::Late, 36.0, 510, 310),
+        ],
+    };
+
+    let enemies = [None; 5];
+    let build = recommend_item_build(
+        &repo,
+        HeroId(41),
+        Role::Carry,
+        Bracket::Ancient,
+        &enemies,
+        &[],
+        600,
+    )
+    .expect("build should succeed");
+
+    let early_count = build
+        .steps
+        .iter()
+        .filter(|s| s.phase == ItemPhase::Early)
+        .count();
+    let core_count = build
+        .steps
+        .iter()
+        .filter(|s| s.phase == ItemPhase::Core)
+        .count();
+    let late_count = build
+        .steps
+        .iter()
+        .filter(|s| s.phase == ItemPhase::Late)
+        .count();
+
+    assert_eq!(early_count, 2, "expected 2 Early steps: {:?}", build.steps);
+    assert_eq!(core_count, 2, "expected 2 Core steps: {:?}", build.steps);
+    assert_eq!(late_count, 4, "expected 4 Late steps: {:?}", build.steps);
+    assert_eq!(build.steps.len(), 8);
+    assert!(
+        build
+            .steps
+            .iter()
+            .filter(|s| s.phase == ItemPhase::Late)
+            .any(|s| s.variants.iter().any(|v| v.item_id == ItemId(156))),
+        "5th Late candidate should attach as variant when 4 Late primaries are filled: {:?}",
+        build.steps
+    );
+}
+
+#[test]
+fn recommend_item_build_distinguishes_valuable_stepping_stones_from_basic_stats() {
+    use crate::domain::{Bracket, ItemId, ItemPhase};
+    use crate::math::recommend_item_build;
+
+    let repo = MockItemRepo {
+        catalog: vec![
+            catalog_entry(63, "Power Treads", 1400, &[], false, false),
+            catalog_entry(21, "Ogre Axe", 1000, &[], false, false),
+            catalog_entry(22, "Blade of Alacrity", 1000, &[], false, false),
+            catalog_entry(67, "Oblivion Staff", 1625, &[], false, false),
+            catalog_entry(69, "Perseverance", 1400, &[], false, false),
+            catalog_entry(170, "Yasha", 2000, &[], false, false),
+            catalog_entry(24, "Ultimate Orb", 2800, &[], false, false),
+            catalog_entry(147, "Manta Style", 4550, &[170, 20], false, false),
+            catalog_entry(160, "Eye of Skadi", 5300, &[24, 60], false, false),
+        ],
+        stats: vec![
+            item_stat(63, ItemPhase::Early, 9.0, 900, 470),
+            item_stat(21, ItemPhase::Early, 10.0, 650, 350),
+            item_stat(22, ItemPhase::Core, 15.0, 640, 345),
+            item_stat(67, ItemPhase::Core, 14.0, 620, 330),
+            item_stat(69, ItemPhase::Early, 11.0, 610, 325),
+            // Upgradable composite (Yasha 2000g) & high-value Ultimate Orb (2800g) bought >= 4m before Late parents.
+            item_stat(170, ItemPhase::Core, 19.0, 720, 405),
+            item_stat(24, ItemPhase::Core, 17.0, 560, 315),
+            item_stat(147, ItemPhase::Late, 25.5, 680, 400),
+            item_stat(160, ItemPhase::Late, 28.0, 540, 330),
+        ],
+    };
+
+    let enemies = [None; 5];
+    let build = recommend_item_build(
+        &repo,
+        HeroId(94),
+        Role::Carry,
+        Bracket::Ancient,
+        &enemies,
+        &[],
+        600,
+    )
+    .expect("build should succeed");
+
+    for forbidden in [21_u16, 22, 67, 69] {
+        assert!(
+            build.steps.iter().all(|s| {
+                s.item_id != ItemId(forbidden)
+                    && s.variants.iter().all(|v| v.item_id != ItemId(forbidden))
+            }),
+            "basic stat/ingredient item #{forbidden} must never appear in steps or variants: {:?}",
+            build.steps
+        );
+    }
+
+    assert!(
+        build
+            .steps
+            .iter()
+            .any(|s| s.item_id == ItemId(170) && s.phase == ItemPhase::Core),
+        "upgradable Yasha (170) @19m Core must coexist with Late Manta (147) @25.5m: {:?}",
+        build.steps
+    );
+    assert!(
+        build
+            .steps
+            .iter()
+            .any(|s| s.item_id == ItemId(24) && s.phase == ItemPhase::Core),
+        "high-value Ultimate Orb (24) @17m Core must coexist with Late Skadi (160) @28m: {:?}",
+        build.steps
+    );
+    assert!(
+        build.steps.iter().any(|s| s.item_id == ItemId(147))
+            && build.steps.iter().any(|s| s.item_id == ItemId(160)),
+        "Late parent upgrades must still be present: {:?}",
+        build.steps
+    );
+}
+
+#[test]
+fn recommend_item_build_protects_late_upgrade_chains_and_blocks_low_share_phase_filler() {
+    use crate::domain::{Bracket, ItemId, ItemPhase};
+    use crate::math::recommend_item_build;
+
+    let repo = MockItemRepo {
+        catalog: vec![
+            catalog_entry(75, "Wraith Band", 505, &[], false, false),
+            catalog_entry(63, "Power Treads", 1400, &[], false, false),
+            catalog_entry(174, "Diffusal Blade", 2500, &[], false, false),
+            catalog_entry(1107, "Phylactery", 2600, &[], false, false),
+            catalog_entry(147, "Manta Style", 4550, &[170], false, false),
+            catalog_entry(609, "Aghanim's Shard", 1400, &[], false, false),
+            catalog_entry(1097, "Disperser", 6100, &[174], false, false),
+            catalog_entry(143, "Skull Basher", 2875, &[], false, false),
+            catalog_entry(116, "Black King Bar", 4050, &[21], false, false),
+            catalog_entry(108, "Aghanim's Scepter", 4200, &[], false, false),
+            catalog_entry(139, "Butterfly", 4975, &[], false, false),
+            catalog_entry(208, "Abyssal Blade", 6250, &[143], false, false),
+        ],
+        stats: vec![
+            item_stat(75, ItemPhase::Early, 7.5, 180, 96),
+            item_stat(63, ItemPhase::Early, 10.2, 635, 333),
+            item_stat(174, ItemPhase::Core, 16.7, 642, 342),
+            // Low-share Core filler (~5.1% of Diffusal leader 642) must not steal Core slot 2.
+            item_stat(1107, ItemPhase::Core, 16.9, 33, 18),
+            item_stat(147, ItemPhase::Late, 25.7, 349, 201),
+            item_stat(609, ItemPhase::Late, 25.2, 258, 155),
+            item_stat(1097, ItemPhase::Late, 26.7, 126, 85),
+            item_stat(143, ItemPhase::Late, 25.1, 68, 44),
+            item_stat(116, ItemPhase::Late, 27.0, 33, 22),
+            item_stat(108, ItemPhase::Late, 26.6, 28, 19),
+            item_stat(139, ItemPhase::Late, 25.3, 19, 11),
+            // Protected Late upgrade of Skull Basher (143): mc=18, 72.2% WR.
+            item_stat(208, ItemPhase::Late, 26.9, 18, 13),
+        ],
+    };
+
+    let enemies = [None; 5];
+    let build = recommend_item_build(
+        &repo,
+        HeroId(32),
+        Role::Mid,
+        Bracket::Ancient,
+        &enemies,
+        &[],
+        300,
+    )
+    .expect("build should succeed");
+
+    assert!(
+        build
+            .steps
+            .iter()
+            .all(|s| s.item_id != ItemId(1107)),
+        "low-share Core filler Phylactery (33 vs 642) must not be promoted as primary step: {:?}",
+        build.steps
+    );
+    assert_eq!(
+        build
+            .steps
+            .iter()
+            .filter(|s| s.phase == ItemPhase::Late)
+            .count(),
+        4,
+        "Riki should populate 4 Late primary steps: {:?}",
+        build.steps
+    );
+    let abyssal_present = build
+        .steps
+        .iter()
+        .any(|s| s.item_id == ItemId(208) || s.variants.iter().any(|v| v.item_id == ItemId(208)));
+    assert!(
+        abyssal_present,
+        "Abyssal Blade (208, upgrade of Skull Basher 143) must be recommended in Late steps or variants: {:?}",
+        build.steps
+    );
+}
