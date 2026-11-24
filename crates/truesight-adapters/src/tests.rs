@@ -3743,7 +3743,7 @@ fn vision_ingame_2560x1440_real_geometry_detects_rubick_and_dota_plus_badges() {
 fn vision_ingame_rubick_overwrites_stale_visage_lock_after_two_frames() {
     use crate::vision::{
         HeroVisionCatalog, RgbFrame, ScreenFrameSource, VisionCaptureAdapter, VisionCaptureMode,
-        parse_hero_atlas,
+        compute_ingame_topbar_slot_rects, parse_hero_atlas,
     };
     use std::collections::VecDeque;
     use truesight_core::domain::{Faction, Role, Side};
@@ -3808,12 +3808,81 @@ fn vision_ingame_rubick_overwrites_stale_visage_lock_after_two_frames() {
     // Frame 0: stale/misdetected Visage(92) in Dire slot 0 -> locked.
     // Frames 1..2: real Rubick(86) + bottom-right bronze Dota Plus badge -> must overwrite on frame 2.
     // Frame 3: desaturated dead Rubick portrait -> must NOT overwrite or emit phantom swaps.
+    // Frames 4..5: two consecutive ambiguous shifted Nature's Prophet(53, (0,+2), bronze) frames.
+    // Frames 6..7: two consecutive half-obscured LeftHalf Slardar(28) frames.
+    let (rad_rects_1440, dire_rects_1440) = compute_ingame_topbar_slot_rects(w, source_h);
+    let mut np_shifted_frame = vec![16_u8; w * h * 3];
+    for (idx, (x0, hid)) in [
+        (rad_rects_1440[0].x, 74_u16),
+        (rad_rects_1440[2].x, 27),
+        (dire_rects_1440[0].x, 53),
+        (dire_rects_1440[3].x, 16),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        paint_real_ingame_hud_slot(
+            &atlas,
+            &mut np_shifted_frame,
+            w,
+            h,
+            source_h,
+            HudSlotSpec {
+                base_x0: x0,
+                dx_off: 0,
+                dy_off: if idx == 2 { 3 } else { 0 },
+                hid,
+                is_dire: idx >= 2,
+                strip_rgb: Some([180, 120, 60]),
+                badge: if idx == 2 {
+                    HudBadgeKind::Bronze
+                } else {
+                    HudBadgeKind::None
+                },
+                partial: HudPartialMask::Full,
+            },
+        );
+    }
+
+    let mut slardar_partial_frame = vec![16_u8; w * h * 3];
+    for (idx, (x0, hid, partial)) in [
+        (rad_rects_1440[0].x, 74_u16, HudPartialMask::Full),
+        (rad_rects_1440[2].x, 27, HudPartialMask::Full),
+        (dire_rects_1440[0].x, 28, HudPartialMask::LeftHalf),
+        (dire_rects_1440[3].x, 16, HudPartialMask::Full),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        paint_real_ingame_hud_slot(
+            &atlas,
+            &mut slardar_partial_frame,
+            w,
+            h,
+            source_h,
+            HudSlotSpec {
+                base_x0: x0,
+                dx_off: 0,
+                dy_off: 0,
+                hid,
+                is_dire: idx >= 2,
+                strip_rgb: Some([180, 120, 60]),
+                badge: HudBadgeKind::None,
+                partial,
+            },
+        );
+    }
+
     let mut adapter = VisionCaptureAdapter::new(
         QueueFrames(VecDeque::from([
             paint_lineup_frame(92, false, false),
             paint_lineup_frame(86, true, false),
             paint_lineup_frame(86, true, false),
             paint_lineup_frame(92, false, true),
+            RgbFrame::with_source_height(w, h, source_h, np_shifted_frame.clone()),
+            RgbFrame::with_source_height(w, h, source_h, np_shifted_frame),
+            RgbFrame::with_source_height(w, h, source_h, slardar_partial_frame.clone()),
+            RgbFrame::with_source_height(w, h, source_h, slardar_partial_frame),
         ])),
         catalog,
     );
@@ -3854,6 +3923,561 @@ fn vision_ingame_rubick_overwrites_stale_visage_lock_after_two_frames() {
         ev3.is_empty(),
         "Desaturated dead portrait must not overwrite locked Rubick (86): {ev3:?}"
     );
+
+    for (frame_idx, label) in [
+        (4, "ambiguous shifted 1"),
+        (5, "ambiguous shifted 2"),
+        (6, "half-obscured partial 1"),
+        (7, "half-obscured partial 2"),
+    ] {
+        let ev = adapter.poll_events().expect("stability poll must succeed");
+        assert!(
+            ev.iter().all(|e| !matches!(
+                e,
+                DraftEvent::PickDetected {
+                    side: Side::Enemies,
+                    slot: 0,
+                    ..
+                }
+            )),
+            "Frame {frame_idx} ({label}) must preserve locked Rubick (86) in Dire slot 0: {ev:?}"
+        );
+    }
+}
+
+#[derive(Clone, Copy)]
+enum HudBadgeKind {
+    None,
+    Thin,
+    Bronze,
+    Platinum,
+}
+
+#[derive(Clone, Copy)]
+enum HudPartialMask {
+    Full,
+    LeftHalf,
+    RightHalf,
+    BottomOnly,
+}
+
+struct HudSlotSpec {
+    base_x0: usize,
+    dx_off: isize,
+    dy_off: isize,
+    hid: u16,
+    is_dire: bool,
+    strip_rgb: Option<[u8; 3]>,
+    badge: HudBadgeKind,
+    partial: HudPartialMask,
+}
+
+fn paint_real_ingame_hud_slot(
+    atlas: &crate::vision::DecodedHeroAtlas,
+    buf: &mut [u8],
+    frame_w: usize,
+    frame_h: usize,
+    virtual_h: usize,
+    spec: HudSlotSpec,
+) {
+    let sx = (frame_w as f32) / 2560.0;
+    let sy = (virtual_h as f32) / 1440.0;
+    let pw = (82.0 * sx).round() as usize;
+    let ph = (46.0 * sy).round() as usize;
+    let py0 = (6.0 * sy).round() as isize;
+    let strip_h = (5.0 * sy).round() as isize;
+    let x0 = (spec.base_x0 as isize) + spec.dx_off;
+    let y0 = py0 + spec.dy_off;
+
+    if let Some(strip) = spec.strip_rgb {
+        for py in spec.dy_off.max(0)..(spec.dy_off + strip_h).min(frame_h as isize) {
+            for px in x0.max(0)..(x0 + pw as isize).min(frame_w as isize) {
+                let dst = ((py as usize) * frame_w + (px as usize)) * 3;
+                buf[dst..dst + 3].copy_from_slice(&strip);
+            }
+        }
+    }
+
+    let src = &atlas.heroes[&HeroId(spec.hid)];
+    for dy in 0..ph {
+        let sy_idx = (dy * atlas.hero_height) / ph;
+        let py = y0 + (dy as isize);
+        if py < 0 || py >= frame_h as isize {
+            continue;
+        }
+        for dx in 0..pw {
+            match spec.partial {
+                HudPartialMask::Full => {}
+                HudPartialMask::LeftHalf if dx >= pw / 2 => continue,
+                HudPartialMask::RightHalf if dx < pw / 2 => continue,
+                HudPartialMask::BottomOnly if dy < ph / 2 => continue,
+                _ => {}
+            }
+            let sx_idx = (dx * atlas.hero_width) / pw;
+            let px = x0 + (dx as isize);
+            if px < 0 || px >= frame_w as isize {
+                continue;
+            }
+            let si = (sy_idx * atlas.hero_width + sx_idx) * 3;
+            let dst = ((py as usize) * frame_w + (px as usize)) * 3;
+            buf[dst..dst + 3].copy_from_slice(&src[si..si + 3]);
+        }
+    }
+
+    let (bcol, alpha, by0_ref) = match spec.badge {
+        HudBadgeKind::None => return,
+        HudBadgeKind::Thin => ([240_u8, 212, 132], 0.55_f32, 28.0_f32),
+        HudBadgeKind::Bronze => ([240_u8, 212, 132], 1.0_f32, 24.0_f32),
+        HudBadgeKind::Platinum => ([52_u8, 130, 235], 1.0_f32, 22.0_f32),
+    };
+    let bx0 = ((if spec.is_dire {
+        if matches!(spec.badge, HudBadgeKind::Thin) {
+            56.0
+        } else {
+            52.0
+        }
+    } else {
+        2.0
+    }) * sx)
+        .round() as usize;
+    let bx1 = ((if spec.is_dire { 78.0 } else { 24.0 }) * sx).round() as usize;
+    let by0 = (by0_ref * sy).round() as usize;
+    let by1 = (45.0 * sy).round() as usize;
+    for dy in by0..by1 {
+        let py = y0 + (dy as isize);
+        if py < 0 || py >= frame_h as isize {
+            continue;
+        }
+        for dx in bx0..bx1 {
+            let px = x0 + (dx as isize);
+            if px < 0 || px >= frame_w as isize {
+                continue;
+            }
+            let dst = ((py as usize) * frame_w + (px as usize)) * 3;
+            for c in 0..3 {
+                buf[dst + c] = ((1.0 - alpha) * f32::from(buf[dst + c])
+                    + alpha * f32::from(bcol[c]))
+                .round() as u8;
+            }
+        }
+    }
+}
+
+#[test]
+fn vision_ingame_shifted_upper_only_matches_abstain_instead_of_locking_wrong_hero() {
+    use crate::vision::{
+        HeroVisionCatalog, RgbFrame, ScreenFrameSource, VisionCaptureAdapter, VisionCaptureMode,
+        compute_ingame_topbar_slot_rects, parse_hero_atlas,
+    };
+    use std::collections::VecDeque;
+    use truesight_core::domain::{Faction, Side};
+    use truesight_core::ports::{DraftEvent, DraftEventSource, PortError};
+
+    struct QueueFrames(VecDeque<RgbFrame>);
+    impl ScreenFrameSource for QueueFrames {
+        fn capture_frame(&mut self) -> Result<Option<RgbFrame>, PortError> {
+            Ok(self.0.pop_front())
+        }
+    }
+
+    let atlas = parse_hero_atlas().expect("base atlas must load");
+    let catalog = HeroVisionCatalog::from_embedded().expect("vision catalog must load");
+    let (w, h, source_h) = (1920_usize, 115_usize, 1080_usize);
+    let (rad_rects, dire_rects) = compute_ingame_topbar_slot_rects(w, source_h);
+
+    // Exact 6 1080p bronze corner-badge offset cases reproduced from PR #88 review:
+    let cases: [(&str, u16, bool, isize, isize, u16); 6] = [
+        ("Nature's Prophet Dire (0,+2)", 53, true, 0, 2, 21),
+        ("Nature's Prophet Rad (0,+2)", 53, false, 0, 2, 21),
+        ("Oracle Rad (-2,+2)", 111, false, -2, 2, 77),
+        ("Nyx Assassin Dire (+3,0)", 88, true, 3, 0, 137),
+        ("Nyx Assassin Dire (+2,-2)", 88, true, 2, -2, 137),
+        ("Legion Commander Dire (+2,-2)", 104, true, 2, -2, 62),
+    ];
+
+    for (label, target_hid, is_dire, dx, dy, known_wrong) in cases {
+        let mut buf = vec![16_u8; w * h * 3];
+        // Aligned control picks satisfy quorum (Radiant slot 2 Invoker, Dire slot 2 Sand King).
+        paint_real_ingame_hud_slot(
+            &atlas,
+            &mut buf,
+            w,
+            h,
+            source_h,
+            HudSlotSpec {
+                base_x0: rad_rects[2].x,
+                dx_off: 0,
+                dy_off: 0,
+                hid: 74,
+                is_dire: false,
+                strip_rgb: Some([191, 0, 191]),
+                badge: HudBadgeKind::None,
+                partial: HudPartialMask::Full,
+            },
+        );
+        paint_real_ingame_hud_slot(
+            &atlas,
+            &mut buf,
+            w,
+            h,
+            source_h,
+            HudSlotSpec {
+                base_x0: dire_rects[2].x,
+                dx_off: 0,
+                dy_off: 0,
+                hid: 16,
+                is_dire: true,
+                strip_rgb: Some([101, 217, 247]),
+                badge: HudBadgeKind::None,
+                partial: HudPartialMask::Full,
+            },
+        );
+        let target_x = if is_dire {
+            dire_rects[0].x
+        } else {
+            rad_rects[0].x
+        };
+        paint_real_ingame_hud_slot(
+            &atlas,
+            &mut buf,
+            w,
+            h,
+            source_h,
+            HudSlotSpec {
+                base_x0: target_x,
+                dx_off: dx,
+                dy_off: dy,
+                hid: target_hid,
+                is_dire,
+                strip_rgb: Some(if is_dire {
+                    [254, 134, 194]
+                } else {
+                    [46, 115, 230]
+                }),
+                badge: HudBadgeKind::Bronze,
+                partial: HudPartialMask::Full,
+            },
+        );
+
+        let mut adapter = VisionCaptureAdapter::new(
+            QueueFrames(VecDeque::from([
+                RgbFrame::with_source_height(w, h, source_h, buf.clone()),
+                RgbFrame::with_source_height(w, h, source_h, buf.clone()),
+                RgbFrame::with_source_height(w, h, source_h, buf),
+            ])),
+            catalog.clone(),
+        );
+        adapter.set_ally_faction(Faction::Radiant);
+        adapter.set_capture_mode(VisionCaptureMode::Any);
+
+        let target_side = if is_dire { Side::Enemies } else { Side::Allies };
+        let mut saw_rad_ctrl = false;
+        let mut saw_dire_ctrl = false;
+        for frame_idx in 0..3 {
+            let events = adapter.poll_events().expect("poll must succeed");
+            for ev in events {
+                if let DraftEvent::PickDetected {
+                    side,
+                    slot,
+                    hero_id,
+                    ..
+                } = ev
+                {
+                    if side == Side::Allies && slot == 2 && hero_id == HeroId(74) {
+                        saw_rad_ctrl = true;
+                    } else if side == Side::Enemies && slot == 2 && hero_id == HeroId(16) {
+                        saw_dire_ctrl = true;
+                    } else if side == target_side && slot == 0 {
+                        assert_eq!(
+                            hero_id,
+                            HeroId(target_hid),
+                            "{label} on frame {frame_idx} must either abstain or detect HeroId({target_hid}), NOT lock wrong HeroId({hero_id:?}) (known wrong={known_wrong})"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(
+            saw_rad_ctrl && saw_dire_ctrl,
+            "{label}: aligned control picks must confirm quorum"
+        );
+    }
+}
+
+#[test]
+fn vision_ingame_calibration_clean_and_badged_both_resolutions_and_sides() {
+    use crate::vision::{
+        HeroVisionCatalog, RgbFrame, ScreenFrameSource, VisionCaptureAdapter, VisionCaptureMode,
+        compute_ingame_topbar_slot_rects, parse_hero_atlas,
+    };
+    use truesight_core::domain::{Faction, Side};
+    use truesight_core::ports::{DraftEvent, DraftEventSource, PortError};
+
+    struct SingleFrame(Option<RgbFrame>);
+    impl ScreenFrameSource for SingleFrame {
+        fn capture_frame(&mut self) -> Result<Option<RgbFrame>, PortError> {
+            Ok(self.0.take())
+        }
+    }
+
+    let atlas = parse_hero_atlas().expect("base atlas must load");
+    let catalog = HeroVisionCatalog::from_embedded().expect("vision catalog must load");
+
+    for (w, h, source_h) in [(1920_usize, 115_usize, 1080_usize), (2560, 115, 1440)] {
+        let (rad_rects, dire_rects) = compute_ingame_topbar_slot_rects(w, source_h);
+        for target_hid in [86_u16, 14, 74, 123] {
+            for is_dire in [false, true] {
+                for slot in [0_usize, 4] {
+                    for badge in [
+                        HudBadgeKind::None,
+                        HudBadgeKind::Thin,
+                        HudBadgeKind::Bronze,
+                        HudBadgeKind::Platinum,
+                    ] {
+                        for with_strip in [false, true] {
+                            let mut buf = vec![16_u8; w * h * 3];
+                            // Quorum control picks at slot 2 on both sides (Axe 2, Mars 129).
+                            paint_real_ingame_hud_slot(
+                                &atlas,
+                                &mut buf,
+                                w,
+                                h,
+                                source_h,
+                                HudSlotSpec {
+                                    base_x0: rad_rects[2].x,
+                                    dx_off: 0,
+                                    dy_off: 0,
+                                    hid: 2,
+                                    is_dire: false,
+                                    strip_rgb: Some([191, 0, 191]),
+                                    badge: HudBadgeKind::None,
+                                    partial: HudPartialMask::Full,
+                                },
+                            );
+                            paint_real_ingame_hud_slot(
+                                &atlas,
+                                &mut buf,
+                                w,
+                                h,
+                                source_h,
+                                HudSlotSpec {
+                                    base_x0: dire_rects[2].x,
+                                    dx_off: 0,
+                                    dy_off: 0,
+                                    hid: 129,
+                                    is_dire: true,
+                                    strip_rgb: Some([101, 217, 247]),
+                                    badge: HudBadgeKind::None,
+                                    partial: HudPartialMask::Full,
+                                },
+                            );
+                            let x0 = if is_dire {
+                                dire_rects[slot].x
+                            } else {
+                                rad_rects[slot].x
+                            };
+                            paint_real_ingame_hud_slot(
+                                &atlas,
+                                &mut buf,
+                                w,
+                                h,
+                                source_h,
+                                HudSlotSpec {
+                                    base_x0: x0,
+                                    dx_off: 0,
+                                    dy_off: 0,
+                                    hid: target_hid,
+                                    is_dire,
+                                    strip_rgb: with_strip.then_some(if is_dire {
+                                        [254, 134, 194]
+                                    } else {
+                                        [46, 115, 230]
+                                    }),
+                                    badge,
+                                    partial: HudPartialMask::Full,
+                                },
+                            );
+
+                            let mut adapter = VisionCaptureAdapter::new(
+                                SingleFrame(Some(RgbFrame::with_source_height(
+                                    w, h, source_h, buf,
+                                ))),
+                                catalog.clone(),
+                            );
+                            adapter.set_ally_faction(Faction::Radiant);
+                            adapter.set_capture_mode(VisionCaptureMode::Any);
+                            let events = adapter.poll_events().expect("poll must succeed");
+                            let expected_side = if is_dire { Side::Enemies } else { Side::Allies };
+                            let detected = events.iter().find_map(|ev| match ev {
+                                DraftEvent::PickDetected {
+                                    side,
+                                    slot: s,
+                                    hero_id,
+                                    ..
+                                } if *side == expected_side && *s == slot => Some(*hero_id),
+                                _ => None,
+                            });
+                            assert_eq!(
+                                detected,
+                                Some(HeroId(target_hid)),
+                                "{w}x{source_h} is_dire={is_dire} slot={slot} strip={with_strip} failed for HeroId({target_hid}): {events:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn vision_ingame_negative_dark_blue_clock_and_partial_portraits_emit_zero_phantoms() {
+    use crate::vision::{
+        HeroVisionCatalog, RgbFrame, ScreenFrameSource, VisionCaptureAdapter, VisionCaptureMode,
+        compute_ingame_topbar_slot_rects, parse_hero_atlas,
+    };
+    use std::collections::VecDeque;
+    use truesight_core::domain::{Faction, Side};
+    use truesight_core::ports::{DraftEvent, DraftEventSource, PortError};
+
+    struct QueueFrames(VecDeque<RgbFrame>);
+    impl ScreenFrameSource for QueueFrames {
+        fn capture_frame(&mut self) -> Result<Option<RgbFrame>, PortError> {
+            Ok(self.0.pop_front())
+        }
+    }
+
+    let atlas = parse_hero_atlas().expect("base atlas must load");
+    let catalog = HeroVisionCatalog::from_embedded().expect("vision catalog must load");
+
+    // 1. Dark-blue clock/UI chrome across slots at 2560x1440 must emit 0 picks across 3 frames.
+    let (w, h, source_h) = (2560_usize, 115_usize, 1440_usize);
+    let (rad_rects, dire_rects) = compute_ingame_topbar_slot_rects(w, source_h);
+    let mut chrome_buf = vec![16_u8; w * h * 3];
+    for rect in rad_rects.into_iter().chain(dire_rects) {
+        for dy in 0..rect.height {
+            let v = (dy as f32) / (rect.height as f32);
+            for dx in 0..rect.width {
+                let u = (dx as f32) / (rect.width as f32);
+                let t = 0.6 * u + 0.4 * v;
+                let dst = ((rect.y + dy) * w + rect.x + dx) * 3;
+                chrome_buf[dst] = (14.0 + 28.0 * t) as u8;
+                chrome_buf[dst + 1] = (32.0 + 48.0 * t) as u8;
+                chrome_buf[dst + 2] = (54.0 + 70.0 * t) as u8;
+            }
+        }
+    }
+    let mut chrome_adapter = VisionCaptureAdapter::new(
+        QueueFrames(VecDeque::from([
+            RgbFrame::with_source_height(w, h, source_h, chrome_buf.clone()),
+            RgbFrame::with_source_height(w, h, source_h, chrome_buf.clone()),
+            RgbFrame::with_source_height(w, h, source_h, chrome_buf),
+        ])),
+        catalog.clone(),
+    );
+    chrome_adapter.set_ally_faction(Faction::Radiant);
+    chrome_adapter.set_capture_mode(VisionCaptureMode::Any);
+    for poll in 0..3 {
+        let events = chrome_adapter.poll_events().expect("poll must succeed");
+        assert!(
+            events.is_empty(),
+            "Dark-blue clock/chrome must emit 0 picks on poll {poll}: {events:?}"
+        );
+    }
+
+    // 2. Half-obscured partial portraits across 1080p and 1440p must never emit wrong heroes on repeated frames.
+    for (fw, vh) in [(1920_usize, 1080_usize), (2560, 1440)] {
+        let (rad, dire) = compute_ingame_topbar_slot_rects(fw, vh);
+        for hid in [28_u16, 94, 93] {
+            for partial in [
+                HudPartialMask::LeftHalf,
+                HudPartialMask::RightHalf,
+                HudPartialMask::BottomOnly,
+            ] {
+                let mut buf = vec![16_u8; fw * h * 3];
+                paint_real_ingame_hud_slot(
+                    &atlas,
+                    &mut buf,
+                    fw,
+                    h,
+                    vh,
+                    HudSlotSpec {
+                        base_x0: rad[2].x,
+                        dx_off: 0,
+                        dy_off: 0,
+                        hid: 74,
+                        is_dire: false,
+                        strip_rgb: Some([191, 0, 191]),
+                        badge: HudBadgeKind::None,
+                        partial: HudPartialMask::Full,
+                    },
+                );
+                paint_real_ingame_hud_slot(
+                    &atlas,
+                    &mut buf,
+                    fw,
+                    h,
+                    vh,
+                    HudSlotSpec {
+                        base_x0: dire[2].x,
+                        dx_off: 0,
+                        dy_off: 0,
+                        hid: 16,
+                        is_dire: true,
+                        strip_rgb: Some([101, 217, 247]),
+                        badge: HudBadgeKind::None,
+                        partial: HudPartialMask::Full,
+                    },
+                );
+                paint_real_ingame_hud_slot(
+                    &atlas,
+                    &mut buf,
+                    fw,
+                    h,
+                    vh,
+                    HudSlotSpec {
+                        base_x0: dire[0].x,
+                        dx_off: 0,
+                        dy_off: 0,
+                        hid,
+                        is_dire: true,
+                        strip_rgb: Some([254, 134, 194]),
+                        badge: HudBadgeKind::None,
+                        partial,
+                    },
+                );
+
+                let mut adapter = VisionCaptureAdapter::new(
+                    QueueFrames(VecDeque::from([
+                        RgbFrame::with_source_height(fw, h, vh, buf.clone()),
+                        RgbFrame::with_source_height(fw, h, vh, buf.clone()),
+                        RgbFrame::with_source_height(fw, h, vh, buf),
+                    ])),
+                    catalog.clone(),
+                );
+                adapter.set_ally_faction(Faction::Radiant);
+                adapter.set_capture_mode(VisionCaptureMode::Any);
+                for poll in 0..3 {
+                    let events = adapter.poll_events().expect("poll must succeed");
+                    for ev in events {
+                        if let DraftEvent::PickDetected {
+                            side: Side::Enemies,
+                            slot: 0,
+                            hero_id,
+                            ..
+                        } = ev
+                        {
+                            assert_eq!(
+                                hero_id,
+                                HeroId(hid),
+                                "Partial portrait HeroId({hid}) at {fw}x{vh} emitted wrong HeroId({hero_id:?}) on poll {poll}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[test]

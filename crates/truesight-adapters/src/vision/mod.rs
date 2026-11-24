@@ -251,6 +251,10 @@ const DARK_INTENSITY_THRESHOLD: f32 = 12.0;
 const MATCH_L1_THRESHOLD: f32 = 14.5;
 const PICKPHASE_L1_THRESHOLD: f32 = 31.0;
 const INGAME_L1_THRESHOLD: f32 = 35.0;
+/// Stricter L1 ceiling for the partial upper-core `InGame` crop (`20/36` portrait height),
+/// aligned with `MAX_OVERWRITE_L1_DIFF` and `weak_cutoff` so shifted or half-obscured portraits
+/// abstain instead of locking a wrong hero on frame 2.
+const INGAME_UPPER_CORE_L1_THRESHOLD: f32 = 26.0;
 const MIN_DESCRIPTOR_SATURATION: f32 = 13.0;
 const MIN_OUTER_SATURATION: f32 = 9.0;
 const MIN_MATCH_NCC_8: f32 = 0.68;
@@ -344,75 +348,53 @@ fn descriptor_ncc(a: &[u8; DESC_LEN], b: &[u8; DESC_LEN]) -> f32 {
     if denom < 1e-6 { 0.0 } else { num / denom }
 }
 
-fn outer_column_stats(desc: &[u8; DESC_LEN]) -> (f32, f32) {
-    let mut r_sum = 0_f32;
-    let mut g_sum = 0_f32;
-    let mut b_sum = 0_f32;
-    let mut sat_sum = 0_f32;
-    let outer_cols = [0_usize, 1, 6, 7];
-    let n = (DESC_ROWS * outer_cols.len()) as f32;
-
-    for cy in 0..DESC_ROWS {
-        for &cx in &outer_cols {
+fn descriptor_region_stats(desc: &[u8; DESC_LEN], rows: &[usize], cols: &[usize]) -> (f32, f32) {
+    let n = (rows.len() * cols.len()) as f32;
+    let (mut r_sum, mut g_sum, mut b_sum, mut sat_sum) = (0_f32, 0_f32, 0_f32, 0_f32);
+    for &cy in rows {
+        for &cx in cols {
             let idx = (cy * DESC_COLS + cx) * 3;
-            let r = f32::from(desc[idx]);
-            let g = f32::from(desc[idx + 1]);
-            let b = f32::from(desc[idx + 2]);
+            let (r, g, b) = (
+                f32::from(desc[idx]),
+                f32::from(desc[idx + 1]),
+                f32::from(desc[idx + 2]),
+            );
             r_sum += r;
             g_sum += g;
             b_sum += b;
             sat_sum += r.max(g).max(b) - r.min(g).min(b);
         }
     }
-
-    let mr = r_sum / n;
-    let mg = g_sum / n;
-    let mb = b_sum / n;
+    let (mr, mg, mb) = (r_sum / n, g_sum / n, b_sum / n);
     let mut var_sum = 0_f32;
-    for cy in 0..DESC_ROWS {
-        for &cx in &outer_cols {
+    for &cy in rows {
+        for &cx in cols {
             let idx = (cy * DESC_COLS + cx) * 3;
             var_sum += (f32::from(desc[idx]) - mr).abs()
                 + (f32::from(desc[idx + 1]) - mg).abs()
                 + (f32::from(desc[idx + 2]) - mb).abs();
         }
     }
-
     (var_sum / (n * 3.0), sat_sum / n)
 }
 
-fn mean_descriptor_saturation(desc: &[u8; DESC_LEN]) -> f32 {
-    let mut sat_sum = 0_f32;
-    let total_cells = DESC_COLS * DESC_ROWS;
-    for cell in 0..total_cells {
-        let idx = cell * 3;
-        let r = f32::from(desc[idx]);
-        let g = f32::from(desc[idx + 1]);
-        let b = f32::from(desc[idx + 2]);
-        sat_sum += r.max(g).max(b) - r.min(g).min(b);
-    }
-    sat_sum / (total_cells as f32)
-}
-
-fn descriptor_total_variance(desc: &[u8; DESC_LEN]) -> f32 {
-    let total_cells = DESC_COLS * DESC_ROWS;
-    let n = total_cells as f32;
-    let (mut r_sum, mut g_sum, mut b_sum) = (0_f32, 0_f32, 0_f32);
-    for cell in 0..total_cells {
-        let idx = cell * 3;
-        r_sum += f32::from(desc[idx]);
-        g_sum += f32::from(desc[idx + 1]);
-        b_sum += f32::from(desc[idx + 2]);
-    }
-    let (mr, mg, mb) = (r_sum / n, g_sum / n, b_sum / n);
-    let mut var_sum = 0_f32;
-    for cell in 0..total_cells {
-        let idx = cell * 3;
-        var_sum += (f32::from(desc[idx]) - mr).abs()
-            + (f32::from(desc[idx + 1]) - mg).abs()
-            + (f32::from(desc[idx + 2]) - mb).abs();
-    }
-    var_sum / (n * 3.0)
+/// Rejects half-obscured/partial `InGame` slots whose left, right, top, or bottom edge band is
+/// flat desaturated chrome/void. Across all 176 embedded hero/alt portraits, every edge band
+/// keeps `var >= 4.10` and `sat >= 10.88`.
+fn has_flat_occluded_border(desc: &[u8; DESC_LEN]) -> bool {
+    const ALL_ROWS: &[usize] = &[0, 1, 2, 3];
+    const ALL_COLS: &[usize] = &[0, 1, 2, 3, 4, 5, 6, 7];
+    [
+        (ALL_ROWS, &[0, 1][..]),
+        (ALL_ROWS, &[6, 7][..]),
+        (&[0, 1][..], ALL_COLS),
+        (&[2, 3][..], ALL_COLS),
+    ]
+    .into_iter()
+    .any(|(rows, cols)| {
+        let (var, sat) = descriptor_region_stats(desc, rows, cols);
+        var < 2.5 && sat < 5.0
+    })
 }
 
 fn accumulate_descriptor_matches(
@@ -565,12 +547,16 @@ impl HeroVisionCatalog {
     ) -> Vec<(HeroId, f32, f32)> {
         type DescriptorSets<'a> = &'a [&'a [(HeroId, [u8; DESC_LEN])]];
 
-        let passes: [Option<(TopBarSlotRect, DescriptorSets<'_>)>; 2] = match layout {
-            TopBarLayout::SyntheticExact => [Some((rect, &[&self.full_entries])), None],
+        let passes: [Option<(TopBarSlotRect, DescriptorSets<'_>, f32)>; 2] = match layout {
+            TopBarLayout::SyntheticExact => [
+                Some((rect, &[&self.full_entries], MATCH_L1_THRESHOLD)),
+                None,
+            ],
             TopBarLayout::PickPhase => [
                 Some((
                     rect,
                     &[&self.upper_entries, &self.inner_entries, &self.full_entries],
+                    PICKPHASE_L1_THRESHOLD,
                 )),
                 None,
             ],
@@ -578,21 +564,18 @@ impl HeroVisionCatalog {
                 Some((
                     ingame_inner_core_rect(rect),
                     &[&self.inner_entries, &self.ingame_core_entries],
+                    INGAME_L1_THRESHOLD,
                 )),
                 Some((
                     ingame_upper_core_rect(rect),
                     &[&self.ingame_upper_core_entries],
+                    INGAME_UPPER_CORE_L1_THRESHOLD,
                 )),
             ],
         };
-        let threshold = match layout {
-            TopBarLayout::SyntheticExact => MATCH_L1_THRESHOLD,
-            TopBarLayout::PickPhase => PICKPHASE_L1_THRESHOLD,
-            TopBarLayout::InGame => INGAME_L1_THRESHOLD,
-        };
 
         let mut best_by_hero: HashMap<HeroId, (f32, f32)> = HashMap::new();
-        for (query_rect, entry_sets) in passes.into_iter().flatten() {
+        for (query_rect, entry_sets, threshold) in passes.into_iter().flatten() {
             let Some((query_desc, mean_intensity)) =
                 compute_descriptor_8x4(frame_rgb, frame_w, frame_h, query_rect)
             else {
@@ -646,9 +629,8 @@ fn slot_portrait_saturation_if_detailed(
     layout: TopBarLayout,
     query_desc: &[u8; DESC_LEN],
 ) -> Option<f32> {
-    let (ov, os) = outer_column_stats(query_desc);
-    let tv = descriptor_total_variance(query_desc);
-    let ms = mean_descriptor_saturation(query_desc);
+    let (ov, os) = descriptor_region_stats(query_desc, &[0, 1, 2, 3], &[0, 1, 6, 7]);
+    let (tv, ms) = descriptor_region_stats(query_desc, &[0, 1, 2, 3], &[0, 1, 2, 3, 4, 5, 6, 7]);
     if ms < MIN_DESCRIPTOR_SATURATION || os < MIN_OUTER_SATURATION {
         return None;
     }
@@ -661,7 +643,10 @@ fn slot_portrait_saturation_if_detailed(
         // PickPhase captures both nameplate-cropped upper cards and full/inner 16:9 slots.
         TopBarLayout::PickPhase => tv >= 13.5 && (common_edge || (ov >= 7.5 && os >= 35.0)),
         TopBarLayout::InGame => {
-            tv >= 13.5 && os >= 10.5 && (common_edge || (ov >= 9.5 && os >= 35.0))
+            !has_flat_occluded_border(query_desc)
+                && tv >= 13.5
+                && os >= 10.5
+                && (common_edge || (ov >= 9.5 && os >= 35.0))
         }
     };
     has_detail.then_some(ms)
