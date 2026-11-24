@@ -666,6 +666,9 @@ impl GsiStateSnapshot {
                 }
             }
         }
+        // Remove any prior queued InventoryUpdated before replaying the snapshot inventory after
+        // LocalPlayerHeroDetected so fresh items always land under the reconciled hero identity.
+        out.retain(|e| !matches!(e, DraftEvent::InventoryUpdated { .. }));
         if let Some((ref inv_hero, ref item_slugs)) = self.latest_inventory {
             let matches_local = match (&self.latest_local_hero, inv_hero) {
                 (Some(local), Some(inv)) => local == inv,
@@ -673,13 +676,10 @@ impl GsiStateSnapshot {
                 (None, _) => true,
             };
             if matches_local {
-                upsert(
-                    out,
-                    DraftEvent::InventoryUpdated {
-                        hero_slug: inv_hero.clone(),
-                        item_slugs: item_slugs.clone(),
-                    },
-                );
+                out.push(DraftEvent::InventoryUpdated {
+                    hero_slug: inv_hero.clone(),
+                    item_slugs: item_slugs.clone(),
+                });
             }
         }
         if let Some((ref state_name, game_time_secs)) = self.latest_game_state {
@@ -830,7 +830,14 @@ impl BoundedDraftQueue {
 
     pub fn record_and_push_gsi_events(&self, events: Vec<DraftEvent>) -> bool {
         let mut g = self.lock_inner();
-        for ev in events {
+        for mut ev in events {
+            if let DraftEvent::InventoryUpdated {
+                ref mut hero_slug, ..
+            } = ev
+                && hero_slug.is_none()
+            {
+                *hero_slug = g.gsi_snapshot.latest_local_hero.clone();
+            }
             if g.gsi_snapshot.apply_event(&ev) {
                 g.queue.retain(|queued| {
                     matches!(

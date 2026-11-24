@@ -5036,3 +5036,139 @@ fn gsi_queue_coalescing_and_overflow_never_assign_previous_hero_inventory_to_nex
     assert_eq!(overflow_session.owned_items_owner, Some(es_id));
     assert_eq!(overflow_session.active_build_owned_items(), &[ItemId(1)]);
 }
+
+#[test]
+fn gsi_queue_preserves_items_only_update_when_same_hero_identity_repeats() {
+    use truesight_adapters::gsi::{BoundedDraftQueue, parse_gsi_json_events};
+    use truesight_core::domain::HeroId;
+
+    let mut session = AppSession::new().unwrap();
+    let wand_id = session
+        .item_repo
+        .item_by_slug("magic_wand")
+        .expect("magic_wand must exist in catalog")
+        .id;
+    let queue = BoundedDraftQueue::new(16);
+
+    // 1. Confirm Anti-Mage and drain the queue.
+    let am_initial = r#"{
+        "map": { "game_state": "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS", "clock_time": 400 },
+        "player": { "team_name": "radiant" },
+        "hero": { "name": "npc_dota_hero_antimage" }
+    }"#;
+    assert!(queue.record_and_push_gsi_events(parse_gsi_json_events(am_initial)));
+    for ev in queue.drain_and_reconcile_gsi() {
+        session.apply_event(ev);
+    }
+    assert_eq!(session.local_player_hero, Some(HeroId(1)));
+
+    // 2. Push items-only payload (no "hero" field), followed before drain by repeated Anti-Mage identity without items.
+    let items_only_wand = r#"{
+        "player": { "team_name": "radiant" },
+        "items": { "slot0": { "name": "item_magic_wand" } }
+    }"#;
+    let am_repeated_no_items = r#"{
+        "map": { "game_state": "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS", "clock_time": 405 },
+        "player": { "team_name": "radiant" },
+        "hero": { "name": "npc_dota_hero_antimage" }
+    }"#;
+    assert!(queue.record_and_push_gsi_events(parse_gsi_json_events(items_only_wand)));
+    assert!(queue.record_and_push_gsi_events(parse_gsi_json_events(am_repeated_no_items)));
+
+    for ev in queue.drain_and_reconcile_gsi() {
+        session.apply_event(ev);
+    }
+
+    assert_eq!(session.local_player_hero, Some(HeroId(1)));
+    assert_eq!(session.owned_items_owner, Some(HeroId(1)));
+    assert!(
+        session.active_build_owned_items().contains(&wand_id),
+        "repeated same-hero identity without items must preserve prior items-only update in queue: {:?}",
+        session.active_build_owned_items()
+    );
+}
+
+#[test]
+fn gsi_overflow_reconcile_emits_hero_identity_before_fresh_inventory() {
+    use truesight_adapters::gsi::{BoundedDraftQueue, GSI_QUEUE_CAPACITY, parse_gsi_json_events};
+    use truesight_core::domain::HeroId;
+    use truesight_core::ports::DraftEvent;
+
+    let mut session = AppSession::new().unwrap();
+    let wand_id = session
+        .item_repo
+        .item_by_slug("magic_wand")
+        .expect("magic_wand must exist in catalog")
+        .id;
+    let queue = BoundedDraftQueue::new(GSI_QUEUE_CAPACITY);
+
+    // 1. Confirm Anti-Mage first and drain.
+    let am_confirm = r#"{
+        "player": {},
+        "hero": { "name": "npc_dota_hero_antimage" }
+    }"#;
+    assert!(queue.record_and_push_gsi_events(parse_gsi_json_events(am_confirm)));
+    for ev in queue.drain_and_reconcile_gsi() {
+        session.apply_event(ev);
+    }
+    assert_eq!(session.local_player_hero, Some(HeroId(1)));
+
+    // 2. Queue Nyx + Magic Wand (2 events), fill remaining 14 slots with bans, then send critical FactionDetected
+    // to evict Nyx's identity from index 0 while leaving Magic Wand queued.
+    let nyx_with_wand = r#"{
+        "player": {},
+        "hero": { "name": "npc_dota_hero_nyx_assassin" },
+        "items": { "slot0": { "name": "item_magic_wand" } }
+    }"#;
+    let fourteen_bans = r#"{
+        "draft": {
+            "team2": { "ban0_id": 3, "ban1_id": 4, "ban2_id": 6, "ban3_id": 7, "ban4_id": 8, "ban5_id": 9, "ban6_id": 10 },
+            "team3": { "ban0_id": 11, "ban1_id": 12, "ban2_id": 14, "ban3_id": 15, "ban4_id": 16, "ban5_id": 18, "ban6_id": 19 }
+        }
+    }"#;
+    let critical_faction = r#"{
+        "player": { "team_name": "dire" }
+    }"#;
+    assert!(queue.record_and_push_gsi_events(parse_gsi_json_events(nyx_with_wand)));
+    assert!(queue.record_and_push_gsi_events(parse_gsi_json_events(fourteen_bans)));
+    assert!(queue.record_and_push_gsi_events(parse_gsi_json_events(critical_faction)));
+
+    let reconciled = queue.drain_and_reconcile_gsi();
+    let id_pos = reconciled
+        .iter()
+        .position(|e| {
+            matches!(
+                e,
+                DraftEvent::LocalPlayerHeroDetected { hero_slug }
+                    if hero_slug == "npc_dota_hero_nyx_assassin"
+            )
+        })
+        .expect("reconciled batch must include Nyx identity");
+    let inv_pos = reconciled
+        .iter()
+        .position(|e| {
+            matches!(
+                e,
+                DraftEvent::InventoryUpdated {
+                    hero_slug: Some(slug),
+                    ..
+                } if slug == "npc_dota_hero_nyx_assassin"
+            )
+        })
+        .expect("reconciled batch must include Nyx inventory");
+    assert!(
+        id_pos < inv_pos,
+        "reconciled batch must emit Nyx identity ({id_pos}) before Nyx inventory ({inv_pos}): {reconciled:?}"
+    );
+
+    for ev in reconciled {
+        session.apply_event(ev);
+    }
+    assert_eq!(session.local_player_hero, Some(HeroId(88)));
+    assert_eq!(session.owned_items_owner, Some(HeroId(88)));
+    assert!(
+        session.active_build_owned_items().contains(&wand_id),
+        "Nyx must retain Magic Wand after overflow reconciliation: {:?}",
+        session.active_build_owned_items()
+    );
+}
