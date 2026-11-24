@@ -62,7 +62,11 @@ pub struct AppSession {
     pub enemy_locked_slots: [bool; TEAM_SIZE],
     pub manually_dismissed: Vec<HeroId>,
     pub local_player_hero: Option<HeroId>,
+    pub local_player_hero_from_gsi: bool,
+    /// Optional allied hero explicitly clicked/selected for browsing item builds without altering local-player identity.
+    pub build_view_hero: Option<HeroId>,
     pub sync_in_flight: bool,
+    pending_item_build_refresh: bool,
     pub last_sync_notice: Option<String>,
     sync_generation: u64,
     sync_rx: Option<Receiver<SyncCompletion>>,
@@ -79,11 +83,14 @@ pub struct AppSession {
     pub item_repo: SeededItemMetaRepository,
     pub game_time_secs: i32,
     pub owned_items: Vec<ItemId>,
+    /// Confirmed GSI owner of [`AppSession::owned_items`], kept across manual slot clears so fallback allies never inherit another hero's inventory.
+    pub owned_items_owner: Option<HeroId>,
     pub selected_build_variants: Vec<VariantSelection>,
     pub post_draft_view_override: Option<bool>,
     pub active_game_patch: String,
     pub overlay_mode: bool,
     pub overlay_geometry: OverlayGeometry,
+    pub build_overlay_geometry: OverlayGeometry,
     pub active_monitor_rect: Option<MonitorRect>,
     pub known_monitors: Vec<MonitorRect>,
     pub active_capture_strip_rect: Option<(f32, f32, f32, f32)>,
@@ -212,7 +219,10 @@ impl AppSession {
             enemy_locked_slots: [false; TEAM_SIZE],
             manually_dismissed: Vec::new(),
             local_player_hero: None,
+            local_player_hero_from_gsi: false,
+            build_view_hero: None,
             sync_in_flight: false,
+            pending_item_build_refresh: false,
             last_sync_notice: None,
             sync_generation: 0,
             sync_rx: None,
@@ -231,11 +241,13 @@ impl AppSession {
             item_repo,
             game_time_secs: 0,
             owned_items: Vec::new(),
+            owned_items_owner: None,
             selected_build_variants: Vec::new(),
             post_draft_view_override: None,
             active_game_patch,
             overlay_mode: ui_cfg.overlay_mode,
             overlay_geometry: ui_cfg.overlay_geometry,
+            build_overlay_geometry: ui_cfg.build_overlay_geometry,
             active_monitor_rect: None,
             known_monitors: Vec::new(),
             active_capture_strip_rect: None,
@@ -259,6 +271,7 @@ impl AppSession {
             self.stratz_token_exp = resolved_exp;
             self.overlay_mode = ui_cfg.overlay_mode;
             self.overlay_geometry = ui_cfg.overlay_geometry;
+            self.build_overlay_geometry = ui_cfg.build_overlay_geometry;
             self.ui_language = ui_cfg.ui_language;
             if is_stratz_exp_expired(resolved_exp, now) {
                 self.cache_mgr.stratz_api_token = None;
@@ -403,6 +416,13 @@ impl AppSession {
                     .unwrap_or(Bracket::Legend);
             }
             self.reload_repository();
+            if self.pending_item_build_refresh {
+                if self.is_post_draft_build_view() {
+                    let _ = self.request_item_build_refresh_if_uncached();
+                } else {
+                    self.pending_item_build_refresh = false;
+                }
+            }
         } else if !self.sync_in_flight {
             let _ = self.apply_auto_bracket_from_cache();
             self.reload_repository();
@@ -492,12 +512,14 @@ impl AppSession {
                 self.cache_mgr
                     .freshness_badge(LocalCacheManager::now_unix())
             );
+            self.drain_pending_item_build_refresh();
             return true;
         };
 
         if done.generation != self.sync_generation
             || done.account_id != self.cache_mgr.player_account_id
         {
+            self.drain_pending_item_build_refresh();
             return true;
         }
 
@@ -511,6 +533,11 @@ impl AppSession {
                 match loaded {
                     Ok(m) if m.heroes().count() > 0 => {
                         self.matrix = m;
+                        self.item_repo = self.cache_mgr.build_item_repository();
+                        self.active_game_patch = self
+                            .cache_mgr
+                            .read_cached_game_patch()
+                            .unwrap_or_else(|| counter_trait_table_patch().to_string());
                         self.db_status = self
                             .cache_mgr
                             .freshness_badge(LocalCacheManager::now_unix());
@@ -541,7 +568,17 @@ impl AppSession {
                 self.last_sync_notice = Some(format!("Sync notice: {e} (using last valid model)"));
             }
         }
+        self.drain_pending_item_build_refresh();
         true
+    }
+
+    fn drain_pending_item_build_refresh(&mut self) {
+        if self.pending_item_build_refresh {
+            self.pending_item_build_refresh = false;
+            if self.is_post_draft_build_view() {
+                let _ = self.request_item_build_refresh_if_uncached();
+            }
+        }
     }
 
     pub fn sync_db(&mut self, force: bool) -> Result<String, String> {
@@ -560,6 +597,11 @@ impl AppSession {
         {
             self.matrix = m;
         }
+        self.item_repo = self.cache_mgr.build_item_repository();
+        self.active_game_patch = self
+            .cache_mgr
+            .read_cached_game_patch()
+            .unwrap_or_else(|| counter_trait_table_patch().to_string());
         self.db_status = self
             .cache_mgr
             .freshness_badge(LocalCacheManager::now_unix());
@@ -658,11 +700,15 @@ impl AppSession {
         self.enemy_locked_slots = [false; TEAM_SIZE];
         self.manually_dismissed.clear();
         self.local_player_hero = None;
+        self.local_player_hero_from_gsi = false;
+        self.build_view_hero = None;
+        self.pending_item_build_refresh = false;
         self.vision_reset_pending = true;
         self.vision_slots = [[None; TEAM_SIZE]; 2];
         self.vision_owned.clear();
         self.game_time_secs = 0;
         self.owned_items.clear();
+        self.owned_items_owner = None;
         self.selected_build_variants.clear();
         self.post_draft_view_override = None;
         self.sync_target_item_heroes_to_cache();
@@ -753,6 +799,7 @@ impl AppSession {
         if slot_a >= TEAM_SIZE || slot_b >= TEAM_SIZE || slot_a == slot_b {
             return;
         }
+        let prev_active_hero = self.active_build_hero().map(|(h, _)| h);
         let (pick_a, pick_b) = {
             let picks = self.side_picks_mut(side);
             picks.swap(slot_a, slot_b);
@@ -774,6 +821,8 @@ impl AppSession {
         locked[slot_a] = pick_a.is_some();
         locked[slot_b] = pick_b.is_some();
         self.sync_local_player_target_role();
+        self.sync_target_item_heroes_to_cache();
+        self.refresh_item_build_if_hero_changed(prev_active_hero);
     }
 
     fn remove_hero_from_opposite_and_bans(&mut self, side: Side, hero_id: HeroId) {
@@ -785,6 +834,9 @@ impl AppSession {
             if self.side_picks(opposite)[idx].map(|p| p.hero_id) == Some(hero_id) {
                 self.side_picks_mut(opposite)[idx] = None;
                 self.side_locked_mut(opposite)[idx] = false;
+                if opposite == Side::Allies && self.build_view_hero == Some(hero_id) {
+                    self.build_view_hero = None;
+                }
             }
         }
         for b in &mut self.draft.bans {
@@ -799,6 +851,7 @@ impl AppSession {
         if slot >= TEAM_SIZE {
             return;
         }
+        let prev_active_hero = self.active_build_hero().map(|(h, _)| h);
         self.manually_dismissed.retain(|&id| id != hero_id);
         if let Some(existing_slot) = self
             .side_picks(side)
@@ -815,14 +868,24 @@ impl AppSession {
 
         self.remove_hero_from_opposite_and_bans(side, hero_id);
 
+        let replaced_hero = self.side_picks(side)[slot].map(|p| p.hero_id);
         let pick = Some(DraftPick {
             hero_id,
             role: Role::ALL.get(slot).copied(),
         });
         self.side_picks_mut(side)[slot] = pick;
         self.side_locked_mut(side)[slot] = true;
+        if side == Side::Allies && replaced_hero.is_some() {
+            if !self.local_player_hero_from_gsi && self.local_player_hero == replaced_hero {
+                self.local_player_hero = Some(hero_id);
+            }
+            if self.build_view_hero == replaced_hero {
+                self.build_view_hero = Some(hero_id);
+            }
+        }
         self.sync_local_player_target_role();
         self.sync_target_item_heroes_to_cache();
+        self.refresh_item_build_if_hero_changed(prev_active_hero);
     }
 
     /// Clears `(side, slot)`, unlocks the slot, and suppresses vision re-adding that hero until reset.
@@ -830,17 +893,25 @@ impl AppSession {
         if slot >= TEAM_SIZE {
             return;
         }
+        let prev_active_hero = self.active_build_hero().map(|(h, _)| h);
         let old = self.side_picks_mut(side)[slot].take();
         self.side_locked_mut(side)[slot] = false;
         if let Some(pick) = old {
             if !self.manually_dismissed.contains(&pick.hero_id) {
                 self.manually_dismissed.push(pick.hero_id);
             }
-            if side == Side::Allies && self.local_player_hero == Some(pick.hero_id) {
-                self.local_player_hero = None;
+            if side == Side::Allies {
+                if self.local_player_hero == Some(pick.hero_id) {
+                    self.local_player_hero = None;
+                    self.local_player_hero_from_gsi = false;
+                }
+                if self.build_view_hero == Some(pick.hero_id) {
+                    self.build_view_hero = None;
+                }
             }
         }
         self.sync_target_item_heroes_to_cache();
+        self.refresh_item_build_if_hero_changed(prev_active_hero);
     }
 
     pub fn apply_event(&mut self, event: DraftEvent) {
@@ -849,6 +920,7 @@ impl AppSession {
                 state_name,
                 game_time_secs,
             } => {
+                let was_build_view = self.is_post_draft_build_view();
                 self.last_gsi_state = format!("{state_name} (t={game_time_secs}s)");
                 let entered_wait_for_players = state_name
                     == "DOTA_GAMERULES_STATE_WAIT_FOR_PLAYERS_TO_LOAD"
@@ -869,6 +941,9 @@ impl AppSession {
                 }
                 self.game_time_secs = game_time_secs;
                 self.last_rules_state = Some(state_name);
+                if !was_build_view && self.is_post_draft_build_view() {
+                    let _ = self.request_item_build_refresh_if_uncached();
+                }
             }
             DraftEvent::FactionDetected { faction } => {
                 self.set_ally_faction(faction);
@@ -883,10 +958,7 @@ impl AppSession {
             }
             DraftEvent::LocalPlayerHeroDetected { hero_slug } => {
                 if let Some(id) = self.find_hero(&hero_slug) {
-                    self.local_player_hero = Some(id);
-                    self.apply_side_pick(Side::Allies, 0, id, None);
-                    self.sync_local_player_target_role();
-                    self.sync_target_item_heroes_to_cache();
+                    self.apply_local_hero_identity(id, true);
                 }
             }
             DraftEvent::PlayerHeroMapped {
@@ -897,9 +969,7 @@ impl AppSession {
                 if self.cache_mgr.player_account_id == Some(steam32) {
                     self.set_ally_faction(faction);
                     if let Some(id) = self.find_hero(&hero_slug) {
-                        self.local_player_hero = Some(id);
-                        self.sync_local_player_target_role();
-                        self.sync_target_item_heroes_to_cache();
+                        self.apply_local_hero_identity(id, false);
                     }
                 }
             }
@@ -917,7 +987,25 @@ impl AppSession {
                     let _ = self.draft.toggle_ban(hero_id);
                 }
             }
-            DraftEvent::InventoryUpdated { item_slugs } => {
+            DraftEvent::InventoryUpdated {
+                hero_slug,
+                item_slugs,
+            } => {
+                let explicit_owner = match hero_slug.as_deref() {
+                    Some(slug) => match self.find_hero(slug) {
+                        Some(id) => Some(id),
+                        None => return,
+                    },
+                    None => None,
+                };
+                if let (Some(local_id), Some(inv_owner)) = (self.local_player_hero, explicit_owner)
+                    && local_id != inv_owner
+                {
+                    return;
+                }
+                if let Some(owner_id) = explicit_owner.or(self.local_player_hero) {
+                    self.owned_items_owner = Some(owner_id);
+                }
                 self.owned_items = item_slugs
                     .iter()
                     .filter_map(|slug| self.item_repo.item_by_slug(slug).map(|e| e.id))
@@ -974,6 +1062,7 @@ impl AppSession {
     // physical portrait in the same batch, including when all role slots are full.
     // Missing events are not removals (death/occlusion grace belongs to the adapter).
     pub(crate) fn apply_vision_events(&mut self, events: Vec<DraftEvent>) {
+        let prev_active_hero = self.active_build_hero().map(|(h, _)| h);
         // Cached observations support retirement only; replaying them as additions
         // would undo manual replacements and subsequent GSI side corrections.
         let mut fresh_slots = [[None; TEAM_SIZE]; 2];
@@ -1007,6 +1096,9 @@ impl AppSession {
                         && self.local_player_hero != Some(pick.hero_id)
                     {
                         self.side_picks_mut(side)[slot] = None;
+                        if side == Side::Allies && self.build_view_hero == Some(pick.hero_id) {
+                            self.build_view_hero = None;
+                        }
                     }
                 }
             }
@@ -1067,6 +1159,8 @@ impl AppSession {
                 self.rebalance_unlocked_side_roles(side);
             }
         }
+        self.sync_target_item_heroes_to_cache();
+        self.refresh_item_build_if_hero_changed(prev_active_hero);
     }
 
     pub fn poll_live_sources(
@@ -1185,6 +1279,7 @@ impl AppSession {
                 stratz_token_exp: self.stratz_token_exp,
                 overlay_mode: self.overlay_mode,
                 overlay_geometry: self.overlay_geometry,
+                build_overlay_geometry: self.build_overlay_geometry,
                 ui_language: self.ui_language,
             };
             if let Err(err) = save_ui_config_to_dir(dir, &cfg) {
@@ -1205,9 +1300,79 @@ impl AppSession {
         ))
     }
 
-    /// Toggles between the post-draft item build view and the suggested picks view.
+    fn invalidate_inventory_on_identity_change(&mut self, new_hero_id: HeroId) {
+        if self.owned_items_owner != Some(new_hero_id)
+            && (!self.owned_items.is_empty() || self.owned_items_owner.is_some())
+        {
+            self.owned_items.clear();
+            self.owned_items_owner = None;
+        }
+    }
+
+    fn apply_local_hero_identity(&mut self, id: HeroId, place_ally_pick: bool) {
+        let hero_changed = self.local_player_hero != Some(id);
+        self.local_player_hero = Some(id);
+        self.local_player_hero_from_gsi = true;
+        if hero_changed {
+            self.invalidate_inventory_on_identity_change(id);
+            self.build_view_hero = None;
+        }
+        if place_ally_pick {
+            self.apply_side_pick(Side::Allies, 0, id, None);
+        }
+        self.sync_local_player_target_role();
+        self.sync_target_item_heroes_to_cache();
+        if hero_changed && self.is_post_draft_build_view() {
+            let _ = self.request_item_build_refresh_if_uncached();
+        }
+    }
+
+    fn refresh_item_build_if_hero_changed(&mut self, prev_active_hero: Option<HeroId>) {
+        if self.is_post_draft_build_view()
+            && self.active_build_hero().map(|(h, _)| h) != prev_active_hero
+        {
+            let _ = self.request_item_build_refresh_if_uncached();
+        }
+    }
+
+    /// Requests a background item-build refresh when live persistence is configured and active
+    /// target heroes lack cached item stats. If another sync is already in flight, keeps the
+    /// request pending until `poll_sync_completion` drains it.
+    pub fn request_item_build_refresh_if_uncached(&mut self) -> bool {
+        self.sync_target_item_heroes_to_cache();
+        if self.config_path.is_none() || !self.cache_mgr.is_target_item_heroes_uncached() {
+            self.pending_item_build_refresh = false;
+            return false;
+        }
+        if self.sync_in_flight {
+            self.pending_item_build_refresh = true;
+            return false;
+        }
+        self.pending_item_build_refresh = false;
+        self.start_background_sync(false)
+    }
+
+    /// Selects an allied hero to inspect in the item build view without altering `local_player_hero`
+    /// or vision replacement authority. Schedules an item refresh if already in Build view.
+    pub fn select_build_view_hero(&mut self, hero_id: HeroId) {
+        let changed = self.build_view_hero != Some(hero_id);
+        self.build_view_hero = Some(hero_id);
+        self.sync_target_item_heroes_to_cache();
+        if changed && self.is_post_draft_build_view() {
+            let _ = self.request_item_build_refresh_if_uncached();
+        }
+    }
+
+    /// Toggles between the post-draft item build view and the suggested picks view, syncing
+    /// target hero item stats in the background when live persistence is active and uncached.
     pub fn toggle_post_draft_build_view(&mut self) {
-        self.post_draft_view_override = Some(!self.is_post_draft_build_view());
+        let next = !self.is_post_draft_build_view();
+        self.post_draft_view_override = Some(next);
+        if next {
+            let _ = self.request_item_build_refresh_if_uncached();
+        } else {
+            self.pending_item_build_refresh = false;
+        }
     }
 
     /// Returns `true` when the active game patch differs from the embedded counter-trait table patch.
@@ -1218,18 +1383,31 @@ impl AppSession {
 
     /// Resolves the active allied hero and role for item build recommendations.
     pub fn active_build_hero(&self) -> Option<(HeroId, Role)> {
-        if let Some(local_id) = self.local_player_hero {
-            let role = self
+        if let Some(browse_id) = self.build_view_hero
+            && let Some(found) = self
+                .draft
+                .allies
+                .iter()
+                .enumerate()
+                .find_map(|(idx, slot)| {
+                    slot.filter(|p| p.hero_id == browse_id)
+                        .map(|p| (browse_id, p.role.unwrap_or(Role::ALL[idx])))
+                })
+        {
+            return Some(found);
+        }
+        if let Some(local_id) = self.local_player_hero
+            && let Some(found) = self
                 .draft
                 .allies
                 .iter()
                 .enumerate()
                 .find_map(|(idx, slot)| {
                     slot.filter(|p| p.hero_id == local_id)
-                        .map(|p| p.role.unwrap_or(Role::ALL[idx]))
+                        .map(|p| (local_id, p.role.unwrap_or(Role::ALL[idx])))
                 })
-                .unwrap_or(self.draft.target_role);
-            return Some((local_id, role));
+        {
+            return Some(found);
         }
         if let Some(pick) = self.draft.allies[self.draft.target_role.index()] {
             return Some((pick.hero_id, pick.role.unwrap_or(self.draft.target_role)));
@@ -1239,6 +1417,25 @@ impl AppSession {
             .iter()
             .enumerate()
             .find_map(|(idx, slot)| slot.map(|p| (p.hero_id, p.role.unwrap_or(Role::ALL[idx]))))
+    }
+
+    /// Returns the GSI inventory items belonging to [`AppSession::active_build_hero`], or `&[]`
+    /// when browsing a teammate's build so local purchases never mark another hero's items owned.
+    pub fn active_build_owned_items(&self) -> &[ItemId] {
+        let Some((hero_id, _)) = self.active_build_hero() else {
+            return &[];
+        };
+        let owner = self.owned_items_owner.or(self.local_player_hero);
+        let owns_inventory = match owner {
+            Some(owner_id) => owner_id == hero_id,
+            // Without an identified inventory owner, allow fallback target inventory only when not browsing an explicit ally.
+            None => self.build_view_hero.is_none(),
+        };
+        if owns_inventory {
+            &self.owned_items
+        } else {
+            &[]
+        }
     }
 
     /// Selects a variant item override keyed by the step's currently displayed primary item ID
@@ -1301,6 +1498,7 @@ impl AppSession {
     /// Computes the recommended item build for the active allied hero, applying any selected variant swaps.
     pub fn compute_recommended_build(&self) -> Option<RecommendedBuild> {
         let (hero_id, role) = self.active_build_hero()?;
+        let owned_items = self.active_build_owned_items();
         let enemy_ids: [Option<HeroId>; TEAM_SIZE] =
             self.draft.enemies.map(|slot| slot.map(|p| p.hero_id));
         let mut build = recommend_item_build(
@@ -1309,7 +1507,7 @@ impl AppSession {
             role,
             self.draft.bracket,
             &enemy_ids,
-            &self.owned_items,
+            owned_items,
             self.game_time_secs,
         )
         .ok()?;
@@ -1344,13 +1542,13 @@ impl AppSession {
             step.score = chosen.score;
             step.avg_time_mins = chosen.avg_time_mins;
             step.counter_trait = chosen.counter_trait;
-            step.owned = self.owned_items.contains(&chosen.item_id);
+            step.owned = owned_items.contains(&chosen.item_id);
             if let Some(entry) = self.item_repo.item_catalog(chosen.item_id) {
                 step.total_components = entry.components.len();
                 step.owned_components = entry
                     .components
                     .iter()
-                    .filter(|c| self.owned_items.contains(c))
+                    .filter(|c| owned_items.contains(c))
                     .count();
             } else {
                 step.total_components = 0;
@@ -1493,25 +1691,49 @@ impl AppSession {
     /// and physical `capture_strip_rect_px`, scaling logical point bounds (`280..520` x `160..360`)
     /// by `pixels_per_point`.
     pub fn clamp_overlay_geometry_with_optional_monitor_scaled(
-        mut geom_px: OverlayGeometry,
+        geom_px: OverlayGeometry,
         monitor_px: Option<MonitorRect>,
         fallback_monitor_size_px: Option<(f32, f32)>,
         capture_strip_rect_px: Option<(f32, f32, f32, f32)>,
         pixels_per_point: f32,
     ) -> OverlayGeometry {
+        Self::clamp_overlay_geometry_with_optional_monitor_min_scaled(
+            geom_px,
+            monitor_px,
+            fallback_monitor_size_px,
+            capture_strip_rect_px,
+            pixels_per_point,
+            280.0,
+            160.0,
+        )
+    }
+
+    /// Clamps physical desktop pixel `geom_px` against optional physical monitor bounds,
+    /// enforcing custom logical minimum bounds `(min_w_pts, min_h_pts)` scaled by `pixels_per_point`.
+    pub fn clamp_overlay_geometry_with_optional_monitor_min_scaled(
+        mut geom_px: OverlayGeometry,
+        monitor_px: Option<MonitorRect>,
+        fallback_monitor_size_px: Option<(f32, f32)>,
+        capture_strip_rect_px: Option<(f32, f32, f32, f32)>,
+        pixels_per_point: f32,
+        min_w_pts: f32,
+        min_h_pts: f32,
+    ) -> OverlayGeometry {
         let ppp = Self::sanitize_pixels_per_point(pixels_per_point);
         if let Some(mon) = monitor_px {
-            return Self::clamp_overlay_geometry_in_monitor_scaled(
+            return Self::clamp_overlay_geometry_in_monitor_with_min_scaled(
                 geom_px,
                 mon,
                 capture_strip_rect_px,
                 ppp,
+                min_w_pts,
+                min_h_pts,
             );
         }
 
-        let min_w_px = 280.0 * ppp;
+        let min_w_px = min_w_pts * ppp;
         let max_w_cap_px = 840.0 * ppp;
-        let min_h_px = 160.0 * ppp;
+        let min_h_px = min_h_pts * ppp;
         let max_h_cap_px = 720.0 * ppp;
         let min_mon_w_px = 640.0 * ppp;
         let min_mon_h_px = 480.0 * ppp;
@@ -1618,15 +1840,35 @@ impl AppSession {
     /// monitor origins) and prevents it from intersecting physical `capture_strip_rect_px`,
     /// scaling logical point bounds (`280..840` x `160..720`) by `pixels_per_point`.
     pub fn clamp_overlay_geometry_in_monitor_scaled(
-        mut geom_px: OverlayGeometry,
+        geom_px: OverlayGeometry,
         monitor_px: MonitorRect,
         capture_strip_rect_px: Option<(f32, f32, f32, f32)>,
         pixels_per_point: f32,
     ) -> OverlayGeometry {
+        Self::clamp_overlay_geometry_in_monitor_with_min_scaled(
+            geom_px,
+            monitor_px,
+            capture_strip_rect_px,
+            pixels_per_point,
+            280.0,
+            160.0,
+        )
+    }
+
+    /// Clamps physical desktop pixel `geom_px` within physical `monitor_px`, enforcing custom
+    /// logical minimum bounds `(min_w_pts, min_h_pts)` scaled by `pixels_per_point`.
+    pub fn clamp_overlay_geometry_in_monitor_with_min_scaled(
+        mut geom_px: OverlayGeometry,
+        monitor_px: MonitorRect,
+        capture_strip_rect_px: Option<(f32, f32, f32, f32)>,
+        pixels_per_point: f32,
+        min_w_pts: f32,
+        min_h_pts: f32,
+    ) -> OverlayGeometry {
         let ppp = Self::sanitize_pixels_per_point(pixels_per_point);
-        let min_w_px = 280.0 * ppp;
+        let min_w_px = min_w_pts * ppp;
         let max_w_cap_px = 840.0 * ppp;
-        let min_h_px = 160.0 * ppp;
+        let min_h_px = min_h_pts * ppp;
         let max_h_cap_px = 720.0 * ppp;
         let min_mon_w_px = 640.0 * ppp;
         let min_mon_h_px = 480.0 * ppp;
@@ -1718,6 +1960,7 @@ impl AppSession {
         self.overlay_mode = enabled;
         if !enabled {
             self.overlay_geometry.click_through = false;
+            self.build_overlay_geometry.click_through = false;
         }
         let _ = self.persist_ui_config();
     }
@@ -1725,12 +1968,36 @@ impl AppSession {
     /// Enables or disables mouse click-through on the overlay window and persists the preference.
     pub fn set_overlay_click_through(&mut self, click_through: bool) {
         self.overlay_geometry.click_through = click_through;
+        self.build_overlay_geometry.click_through = click_through;
         let _ = self.persist_ui_config();
     }
 
-    /// Updates and persists the overlay window geometry.
+    /// Updates and persists the Picks overlay window geometry.
     pub fn set_overlay_geometry(&mut self, geom: OverlayGeometry) {
         self.overlay_geometry = geom;
+        let _ = self.persist_ui_config();
+    }
+
+    /// Returns the geometry corresponding to the active overlay mode (`build_overlay_geometry` in
+    /// post-draft Build view, `overlay_geometry` in Suggested Picks view), preserving shared `click_through`.
+    pub fn active_overlay_geometry(&self) -> OverlayGeometry {
+        let mut geom = if self.is_post_draft_build_view() {
+            self.build_overlay_geometry
+        } else {
+            self.overlay_geometry
+        };
+        geom.click_through = self.overlay_geometry.click_through;
+        geom
+    }
+
+    /// Updates and persists geometry only for the currently active overlay mode (`Picks` vs `Build`).
+    pub fn set_active_overlay_geometry(&mut self, mut geom: OverlayGeometry) {
+        geom.click_through = self.overlay_geometry.click_through;
+        if self.is_post_draft_build_view() {
+            self.build_overlay_geometry = geom;
+        } else {
+            self.overlay_geometry = geom;
+        }
         let _ = self.persist_ui_config();
     }
 
@@ -1904,6 +2171,19 @@ impl OverlayGeometry {
     }
 }
 
+impl OverlayGeometry {
+    /// Default geometry for the compact phased Build overlay.
+    pub const fn default_build() -> Self {
+        Self {
+            x: 24.0,
+            y: 112.0,
+            width: 420.0,
+            height: 168.0,
+            click_through: false,
+        }
+    }
+}
+
 impl Default for OverlayGeometry {
     fn default() -> Self {
         Self {
@@ -1960,14 +2240,29 @@ impl UiLanguage {
 }
 
 /// Persisted UI onboarding, overlay, language, and STRATZ token state stored in `ui_config.toml`.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct UiConfig {
     pub onboarding_dismissed: bool,
     pub stratz_api_token: Option<String>,
     pub stratz_token_exp: Option<u64>,
     pub overlay_mode: bool,
     pub overlay_geometry: OverlayGeometry,
+    pub build_overlay_geometry: OverlayGeometry,
     pub ui_language: UiLanguage,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            onboarding_dismissed: false,
+            stratz_api_token: None,
+            stratz_token_exp: None,
+            overlay_mode: false,
+            overlay_geometry: OverlayGeometry::default(),
+            build_overlay_geometry: OverlayGeometry::default_build(),
+            ui_language: UiLanguage::default(),
+        }
+    }
 }
 
 fn resolve_stratz_exp(token: Option<&str>, explicit_exp: Option<u64>) -> Option<u64> {
@@ -2081,6 +2376,8 @@ pub fn load_ui_config_from_dir(config_dir: &Path) -> UiConfig {
         return UiConfig::default();
     };
     let mut cfg = UiConfig::default();
+    let mut has_build_x = false;
+    let mut has_build_y = false;
     for line in raw.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -2123,6 +2420,28 @@ pub fn load_ui_config_from_dir(config_dir: &Path) -> UiConfig {
                     cfg.overlay_geometry.height = h;
                 }
             }
+            "build_overlay_x" => {
+                if let Ok(x) = val.parse::<f32>() {
+                    cfg.build_overlay_geometry.x = x;
+                    has_build_x = true;
+                }
+            }
+            "build_overlay_y" => {
+                if let Ok(y) = val.parse::<f32>() {
+                    cfg.build_overlay_geometry.y = y;
+                    has_build_y = true;
+                }
+            }
+            "build_overlay_width" => {
+                if let Ok(w) = val.parse::<f32>() {
+                    cfg.build_overlay_geometry.width = w;
+                }
+            }
+            "build_overlay_height" => {
+                if let Ok(h) = val.parse::<f32>() {
+                    cfg.build_overlay_geometry.height = h;
+                }
+            }
             "overlay_click_through" => cfg.overlay_geometry.click_through = val == "true",
             "ui_language" => {
                 if let Some(lang) = UiLanguage::parse(val) {
@@ -2132,6 +2451,13 @@ pub fn load_ui_config_from_dir(config_dir: &Path) -> UiConfig {
             _ => {}
         }
     }
+    if !has_build_x {
+        cfg.build_overlay_geometry.x = cfg.overlay_geometry.x;
+    }
+    if !has_build_y {
+        cfg.build_overlay_geometry.y = cfg.overlay_geometry.y;
+    }
+    cfg.build_overlay_geometry.click_through = cfg.overlay_geometry.click_through;
     if cfg.stratz_token_exp.is_none() {
         cfg.stratz_token_exp = resolve_stratz_exp(cfg.stratz_api_token.as_deref(), None);
     }
@@ -2166,6 +2492,22 @@ pub fn save_ui_config_to_dir(config_dir: &Path, cfg: &UiConfig) -> Result<(), St
     body.push_str(&format!(
         "overlay_click_through = {}\n",
         cfg.overlay_geometry.click_through
+    ));
+    body.push_str(&format!(
+        "build_overlay_x = {}\n",
+        cfg.build_overlay_geometry.x
+    ));
+    body.push_str(&format!(
+        "build_overlay_y = {}\n",
+        cfg.build_overlay_geometry.y
+    ));
+    body.push_str(&format!(
+        "build_overlay_width = {}\n",
+        cfg.build_overlay_geometry.width
+    ));
+    body.push_str(&format!(
+        "build_overlay_height = {}\n",
+        cfg.build_overlay_geometry.height
     ));
     body.push_str(&format!(
         "ui_language = \"{}\"\n",

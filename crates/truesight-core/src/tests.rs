@@ -1053,12 +1053,11 @@ fn recommend_item_build_base_meta_vs_enemy_counter_traits() {
     )
     .unwrap();
     assert!(base_build.steps.iter().all(|s| s.counter_trait.is_none()));
-    let base_mkb_score = base_build
-        .steps
-        .iter()
-        .find(|s| s.item_id == ItemId(135))
-        .map(|s| s.score)
-        .unwrap_or(0.0);
+    assert!(
+        base_build.optional_items.is_empty(),
+        "optional counter items must stay empty when no enemy activates counter traits: {:?}",
+        base_build.optional_items
+    );
 
     // Enemy Phantom Assassin (44) brings Evasion + CriticalPassives + HighPhysicalBurst.
     let pa_enemies = [Some(HeroId(44)), None, None, None, None];
@@ -1073,24 +1072,188 @@ fn recommend_item_build_base_meta_vs_enemy_counter_traits() {
     )
     .unwrap();
 
-    let mkb_step = counter_build
-        .steps
+    assert_eq!(
+        counter_build.steps.len(),
+        3,
+        "situational counters must not displace Early/Core/Late progression steps"
+    );
+    let mkb_opt = counter_build
+        .optional_items
         .iter()
-        .find(|s| s.item_id == ItemId(135))
-        .expect("MKB should be promoted into build against PA");
-    assert_eq!(mkb_step.counter_trait, Some(CounterTrait::Evasion));
-    assert!(mkb_step.score > base_mkb_score);
+        .find(|item| item.item_id == ItemId(135))
+        .expect("MKB should promote into Optional / Counters against PA on Carry");
+    assert_eq!(mkb_opt.counter_trait, Some(CounterTrait::Evasion));
+    assert!(mkb_opt.score > 0.5);
 
-    let silver_edge_present = counter_build.steps.iter().any(|s| {
-        s.item_id == ItemId(249) && s.counter_trait == Some(CounterTrait::CriticalPassives)
-    }) || counter_build.steps.iter().any(|s| {
-        s.variants.iter().any(|v| {
-            v.item_id == ItemId(249) && v.counter_trait == Some(CounterTrait::CriticalPassives)
-        })
+    let silver_edge_present = counter_build.optional_items.iter().any(|item| {
+        item.item_id == ItemId(249) && item.counter_trait == Some(CounterTrait::CriticalPassives)
     });
     assert!(
         silver_edge_present,
-        "Silver Edge should promote into build/variants against PA"
+        "Silver Edge should promote into Optional / Counters against PA on Carry"
+    );
+}
+
+#[test]
+fn recommend_item_build_filters_situational_counters_by_role_and_enemy_traits() {
+    use crate::domain::{
+        Bracket, CounterTrait, ItemId, ItemPhase, all_referenced_counter_item_ids,
+    };
+    use crate::math::recommend_item_build;
+
+    let mut catalog = vec![
+        catalog_entry(180, "Arcane Boots", 1500, &[], false, false),
+        catalog_entry(102, "Force Staff", 2200, &[], false, false),
+        catalog_entry(108, "Aghanim's Scepter", 4200, &[], false, false),
+    ];
+    let mut stats = vec![
+        item_stat(180, ItemPhase::Early, 7.5, 900, 485),
+        item_stat(102, ItemPhase::Core, 17.5, 850, 460),
+        item_stat(108, ItemPhase::Late, 30.0, 650, 365),
+    ];
+    for &cid in all_referenced_counter_item_ids() {
+        if catalog.iter().all(|c| c.id != cid) {
+            catalog.push(catalog_entry(cid.0, "Counter", 2500, &[], false, false));
+        }
+        stats.push(item_stat(cid.0, ItemPhase::Situational, 21.0, 220, 114));
+    }
+    let repo = MockItemRepo { catalog, stats };
+
+    // 1. Soft Support (Pos 4) vs PA + Shadow Shaman (no Invisibility!)
+    let pa_shaman = [Some(HeroId(44)), Some(HeroId(27)), None, None, None];
+    let sup_build = recommend_item_build(
+        &repo,
+        HeroId(88),
+        Role::SoftSupport,
+        Bracket::Ancient,
+        &pa_shaman,
+        &[],
+        600,
+    )
+    .unwrap();
+    assert!(
+        sup_build
+            .steps
+            .iter()
+            .all(|s| s.phase != ItemPhase::Situational),
+        "primary timed steps must strictly contain Early/Core/Late items"
+    );
+    for forbidden in [
+        30_u16, 40, 43, 90, 112, 135, 145, 158, 160, 225, 242, 249, 250,
+    ] {
+        assert!(
+            sup_build
+                .optional_items
+                .iter()
+                .all(|opt| opt.item_id != ItemId(forbidden)),
+            "Pos 4 without invisible enemies must not get item #{forbidden}: {:?}",
+            sup_build.optional_items
+        );
+    }
+    assert!(
+        sup_build
+            .optional_items
+            .iter()
+            .any(|opt| opt.item_id == ItemId(226)
+                && opt.counter_trait == Some(CounterTrait::HeavyMagicDisable)),
+        "Pos 4 vs Shadow Shaman should see Lotus Orb in Optional / Counters"
+    );
+
+    // 2. Soft Support (Pos 4) vs Riki (Invisibility): detection stays in optional_items and is capped at <= 2.
+    let riki_enemy = [Some(HeroId(32)), None, None, None, None];
+    let invis_sup = recommend_item_build(
+        &repo,
+        HeroId(88),
+        Role::SoftSupport,
+        Bracket::Ancient,
+        &riki_enemy,
+        &[],
+        600,
+    )
+    .unwrap();
+    let invis_opts: Vec<_> = invis_sup
+        .optional_items
+        .iter()
+        .filter(|o| o.counter_trait == Some(CounterTrait::Invisibility))
+        .collect();
+    assert!(
+        !invis_opts.is_empty() && invis_opts.len() <= 2,
+        "detection items should be present and capped at 2 in Optional: {invis_opts:?}"
+    );
+    assert!(
+        invis_sup
+            .steps
+            .iter()
+            .all(|s| !matches!(s.item_id.0, 30 | 40 | 43)),
+        "Gem/Dust/Sentry must never displace timed Early/Core/Late steps"
+    );
+
+    // 3. Carry (Pos 1) vs Riki + Lion: gets Dust, never Gem (30) or Pipe (90).
+    let riki_lion = [Some(HeroId(32)), Some(HeroId(26)), None, None, None];
+    let carry_build = recommend_item_build(
+        &repo,
+        HeroId(95),
+        Role::Carry,
+        Bracket::Ancient,
+        &riki_lion,
+        &[],
+        600,
+    )
+    .unwrap();
+    assert!(
+        carry_build
+            .optional_items
+            .iter()
+            .all(|o| !matches!(o.item_id.0, 30 | 90 | 242)),
+        "Pos 1 Carry must not be recommended Gem, Pipe, or Crimson Guard"
+    );
+    assert!(
+        carry_build
+            .optional_items
+            .iter()
+            .any(|o| o.item_id == ItemId(40)),
+        "Pos 1 Carry vs Riki can see Dust in Optional / Counters"
+    );
+
+    // 4. Synced un-roled stats containing detection/counter items in Early/Core must never
+    // leak Gem/Dust/Sentry into timed steps or role-ineligible Pipe onto Pos 4 Soft Support.
+    let polluted_sync_repo = MockItemRepo {
+        catalog: vec![
+            catalog_entry(180, "Arcane Boots", 1500, &[], false, false),
+            catalog_entry(30, "Gem of True Sight", 900, &[], false, false),
+            catalog_entry(90, "Pipe of Insight", 3725, &[], false, false),
+            catalog_entry(232, "Aether Lens", 2275, &[], false, false),
+        ],
+        stats: vec![
+            item_stat(180, ItemPhase::Early, 8.0, 1200, 640),
+            item_stat(30, ItemPhase::Core, 15.0, 900, 500),
+            item_stat(90, ItemPhase::Core, 21.0, 800, 440),
+            item_stat(232, ItemPhase::Core, 23.0, 1100, 600),
+        ],
+    };
+    let no_invis_enemies = [Some(HeroId(27)), None, None, None, None];
+    let clean_sup = recommend_item_build(
+        &polluted_sync_repo,
+        HeroId(88),
+        Role::SoftSupport,
+        Bracket::Ancient,
+        &no_invis_enemies,
+        &[],
+        900,
+    )
+    .unwrap();
+    assert!(
+        clean_sup
+            .steps
+            .iter()
+            .all(|s| !matches!(s.item_id.0, 30 | 90)),
+        "Gem and role-ineligible Pipe must not leak into timed core steps: {:?}",
+        clean_sup.steps
+    );
+    assert!(
+        clean_sup.optional_items.is_empty(),
+        "No-invis enemy + ineligible Pipe must leave optional_items empty: {:?}",
+        clean_sup.optional_items
     );
 }
 
@@ -1130,4 +1293,373 @@ fn recommend_item_build_classifies_same_phase_variants_with_fewer_than_six_candi
     assert_eq!(build.steps[0].item_id, ItemId(139));
     assert_eq!(build.steps[0].variants.len(), 1);
     assert_eq!(build.steps[0].variants[0].item_id, ItemId(160));
+}
+
+#[test]
+fn recommend_item_build_preserves_owned_role_ineligible_counters_under_optional() {
+    use crate::domain::{Bracket, ItemId, ItemPhase};
+    use crate::math::recommend_item_build;
+
+    let enemies_no_traits = [None; 5];
+
+    // 1a. Carry with Gem in Core stats: owned -> Optional (owned = true), never steps; unowned -> excluded.
+    let carry_with_core_gem = MockItemRepo {
+        catalog: vec![
+            catalog_entry(63, "Power Treads", 1400, &[], false, false),
+            catalog_entry(147, "Manta Style", 4550, &[], false, false),
+            catalog_entry(30, "Gem of True Sight", 900, &[], false, false),
+        ],
+        stats: vec![
+            item_stat(63, ItemPhase::Early, 7.0, 1200, 640),
+            item_stat(147, ItemPhase::Core, 20.0, 1100, 610),
+            item_stat(30, ItemPhase::Core, 15.0, 900, 500),
+        ],
+    };
+    let carry_owned_core = recommend_item_build(
+        &carry_with_core_gem,
+        HeroId(95),
+        Role::Carry,
+        Bracket::Ancient,
+        &enemies_no_traits,
+        &[ItemId(30)],
+        1020,
+    )
+    .unwrap();
+    assert!(
+        carry_owned_core
+            .steps
+            .iter()
+            .all(|s| s.item_id != ItemId(30)),
+        "owned Gem must not sit in timed steps"
+    );
+    assert!(
+        carry_owned_core
+            .optional_items
+            .iter()
+            .any(|o| o.item_id == ItemId(30) && o.owned),
+        "owned Gem on Carry must remain visible under Optional: {:?}",
+        carry_owned_core.optional_items
+    );
+    let carry_unowned_core = recommend_item_build(
+        &carry_with_core_gem,
+        HeroId(95),
+        Role::Carry,
+        Bracket::Ancient,
+        &enemies_no_traits,
+        &[],
+        1020,
+    )
+    .unwrap();
+    assert!(
+        carry_unowned_core
+            .steps
+            .iter()
+            .all(|s| s.item_id != ItemId(30))
+            && carry_unowned_core
+                .optional_items
+                .iter()
+                .all(|o| o.item_id != ItemId(30)),
+        "unowned Gem on Carry without invisibility traits must not be recommended"
+    );
+
+    // 1b. Carry when Gem is omitted from stats (role-filtered repository): still preserved when owned!
+    let carry_omitted_gem = MockItemRepo {
+        catalog: carry_with_core_gem.catalog.clone(),
+        stats: vec![
+            item_stat(63, ItemPhase::Early, 7.0, 1200, 640),
+            item_stat(147, ItemPhase::Core, 20.0, 1100, 610),
+        ],
+    };
+    let carry_owned_omitted = recommend_item_build(
+        &carry_omitted_gem,
+        HeroId(95),
+        Role::Carry,
+        Bracket::Ancient,
+        &enemies_no_traits,
+        &[ItemId(30)],
+        1020,
+    )
+    .unwrap();
+    assert!(
+        carry_owned_omitted
+            .steps
+            .iter()
+            .all(|s| s.item_id != ItemId(30))
+            && carry_owned_omitted
+                .optional_items
+                .iter()
+                .any(|o| o.item_id == ItemId(30) && o.owned),
+        "owned Gem omitted from stats must still appear in Optional on Carry: {:?}",
+        carry_owned_omitted.optional_items
+    );
+
+    // 2. Soft Support with BKB (116): owned -> Optional (owned = true), never steps; unowned -> excluded.
+    let sup_with_core_bkb = MockItemRepo {
+        catalog: vec![
+            catalog_entry(180, "Arcane Boots", 1500, &[], false, false),
+            catalog_entry(232, "Aether Lens", 2275, &[], false, false),
+            catalog_entry(116, "Black King Bar", 4050, &[], false, false),
+        ],
+        stats: vec![
+            item_stat(180, ItemPhase::Early, 7.5, 1200, 640),
+            item_stat(232, ItemPhase::Core, 18.0, 1100, 600),
+            item_stat(116, ItemPhase::Core, 24.0, 800, 440),
+        ],
+    };
+    let sup_owned_core = recommend_item_build(
+        &sup_with_core_bkb,
+        HeroId(88),
+        Role::SoftSupport,
+        Bracket::Ancient,
+        &enemies_no_traits,
+        &[ItemId(116)],
+        1440,
+    )
+    .unwrap();
+    assert!(
+        sup_owned_core
+            .steps
+            .iter()
+            .all(|s| s.item_id != ItemId(116)),
+        "owned role-ineligible BKB must not appear in timed steps on Pos 4"
+    );
+    assert!(
+        sup_owned_core
+            .optional_items
+            .iter()
+            .any(|o| o.item_id == ItemId(116) && o.owned),
+        "owned BKB on Soft Support must stay visible under Optional: {:?}",
+        sup_owned_core.optional_items
+    );
+    let sup_unowned_core = recommend_item_build(
+        &sup_with_core_bkb,
+        HeroId(88),
+        Role::SoftSupport,
+        Bracket::Ancient,
+        &enemies_no_traits,
+        &[],
+        1440,
+    )
+    .unwrap();
+    assert!(
+        sup_unowned_core
+            .steps
+            .iter()
+            .all(|s| s.item_id != ItemId(116))
+            && sup_unowned_core
+                .optional_items
+                .iter()
+                .all(|o| o.item_id != ItemId(116)),
+        "unowned role-ineligible BKB on Pos 4 must not be recommended"
+    );
+
+    let sup_omitted_bkb = MockItemRepo {
+        catalog: sup_with_core_bkb.catalog,
+        stats: vec![
+            item_stat(180, ItemPhase::Early, 7.5, 1200, 640),
+            item_stat(232, ItemPhase::Core, 18.0, 1100, 600),
+        ],
+    };
+    let sup_owned_omitted = recommend_item_build(
+        &sup_omitted_bkb,
+        HeroId(88),
+        Role::SoftSupport,
+        Bracket::Ancient,
+        &enemies_no_traits,
+        &[ItemId(116)],
+        1440,
+    )
+    .unwrap();
+    assert!(
+        sup_owned_omitted
+            .steps
+            .iter()
+            .all(|s| s.item_id != ItemId(116))
+            && sup_owned_omitted
+                .optional_items
+                .iter()
+                .any(|o| o.item_id == ItemId(116) && o.owned),
+        "owned BKB omitted from stats must still appear in Optional on Pos 4: {:?}",
+        sup_owned_omitted.optional_items
+    );
+}
+
+#[test]
+fn recommend_item_build_suppresses_tiny_sample_noise_and_redundant_subcomponents() {
+    use crate::domain::{Bracket, ItemId, ItemPhase};
+    use crate::math::recommend_item_build;
+
+    let repo = MockItemRepo {
+        catalog: vec![
+            catalog_entry(63, "Power Treads", 1400, &[], false, false),
+            catalog_entry(69, "Perseverance", 1400, &[], false, false),
+            catalog_entry(145, "Battle Fury", 3900, &[69], false, false),
+            catalog_entry(170, "Yasha", 2000, &[], false, false),
+            catalog_entry(147, "Manta Style", 4550, &[170], false, false),
+            catalog_entry(149, "Crystalys", 2000, &[], false, false),
+            catalog_entry(156, "Satanic", 5050, &[], false, false),
+            catalog_entry(534, "Witch Blade", 2775, &[], false, false),
+        ],
+        stats: vec![
+            item_stat(63, ItemPhase::Early, 9.0, 598, 258),
+            item_stat(69, ItemPhase::Early, 10.5, 387, 195),
+            item_stat(145, ItemPhase::Core, 16.0, 359, 165),
+            item_stat(170, ItemPhase::Core, 18.0, 379, 175),
+            item_stat(147, ItemPhase::Core, 23.5, 293, 152),
+            item_stat(149, ItemPhase::Core, 24.0, 80, 48),
+            item_stat(156, ItemPhase::Late, 26.0, 7, 7),
+            item_stat(534, ItemPhase::Early, 7.5, 1, 1),
+        ],
+    };
+
+    let enemies = [None; 5];
+    let build = recommend_item_build(
+        &repo,
+        HeroId(41),
+        Role::Carry,
+        Bracket::Ancient,
+        &enemies,
+        &[],
+        600,
+    )
+    .unwrap();
+
+    assert!(
+        build.steps.iter().all(|s| {
+            !matches!(s.item_id.0, 69 | 170 | 156 | 534)
+                && s.variants
+                    .iter()
+                    .all(|v| !matches!(v.item_id.0, 69 | 170 | 156 | 534))
+        }),
+        "Perseverance (69), bare Yasha (170 under Manta), and low-sample noise (Satanic 7/7, Witch Blade 1/1) must be excluded: {:?}",
+        build.steps
+    );
+    for expected in [63_u16, 145, 147] {
+        assert!(
+            build.steps.iter().any(|s| s.item_id == ItemId(expected)),
+            "high-volume item #{expected} must stay as primary step: {:?}",
+            build.steps
+        );
+    }
+    assert!(
+        build.steps.iter().any(|s| {
+            s.item_id == ItemId(149) || s.variants.iter().any(|v| v.item_id == ItemId(149))
+        }),
+        "standalone Crystalys (no Daedalus present) must be preserved in steps/variants: {:?}",
+        build.steps
+    );
+}
+
+#[test]
+fn recommend_item_build_groups_mutually_exclusive_early_boots_as_variants() {
+    use crate::domain::{Bracket, ItemId, ItemPhase};
+    use crate::math::recommend_item_build;
+
+    let enemies = [None; 5];
+
+    // 1. High-gap Power Treads (700) vs Phase Boots (120) -> 1 Early boot step with variant.
+    let carry_repo = MockItemRepo {
+        catalog: vec![
+            catalog_entry(63, "Power Treads", 1400, &[], false, false),
+            catalog_entry(50, "Phase Boots", 1450, &[], false, false),
+            catalog_entry(168, "Desolator", 3500, &[], false, false),
+        ],
+        stats: vec![
+            item_stat(63, ItemPhase::Early, 8.0, 700, 380),
+            item_stat(50, ItemPhase::Early, 8.5, 120, 55),
+            item_stat(168, ItemPhase::Core, 20.0, 500, 275),
+        ],
+    };
+    let carry_build = recommend_item_build(
+        &carry_repo,
+        HeroId(32),
+        Role::Carry,
+        Bracket::Ancient,
+        &enemies,
+        &[],
+        600,
+    )
+    .unwrap();
+    let early_boot_primaries: Vec<_> = carry_build
+        .steps
+        .iter()
+        .filter(|s| matches!(s.item_id.0, 50 | 63 | 180 | 214))
+        .collect();
+    assert_eq!(
+        early_boot_primaries.len(),
+        1,
+        "mutually exclusive Early boots must collapse into 1 primary step: {:?}",
+        carry_build.steps
+    );
+    assert_eq!(early_boot_primaries[0].item_id, ItemId(63));
+    assert!(
+        early_boot_primaries[0]
+            .variants
+            .iter()
+            .any(|v| v.item_id == ItemId(50)),
+        "Phase Boots must attach as variant of Power Treads: {:?}",
+        early_boot_primaries[0].variants
+    );
+
+    // 2. Tranquil Boots (Early 7.5m) vs Arcane Boots (Core 13m) -> collapses into 1 primary boot.
+    let support_repo = MockItemRepo {
+        catalog: vec![
+            catalog_entry(180, "Arcane Boots", 1500, &[], false, false),
+            catalog_entry(214, "Tranquil Boots", 900, &[], false, false),
+            catalog_entry(254, "Glimmer Cape", 2150, &[], false, false),
+        ],
+        stats: vec![
+            item_stat(180, ItemPhase::Core, 13.0, 420, 230),
+            item_stat(214, ItemPhase::Early, 7.5, 210, 108),
+            item_stat(254, ItemPhase::Core, 20.0, 460, 260),
+        ],
+    };
+    let sup_build = recommend_item_build(
+        &support_repo,
+        HeroId(5),
+        Role::HardSupport,
+        Bracket::Ancient,
+        &enemies,
+        &[],
+        720,
+    )
+    .unwrap();
+    assert_eq!(
+        sup_build
+            .steps
+            .iter()
+            .filter(|s| matches!(s.item_id.0, 180 | 214))
+            .count(),
+        1,
+        "Tranquil + Arcane must collapse even across Early/Core threshold: {:?}",
+        sup_build.steps
+    );
+
+    // 3. When player already owns Phase Boots (50), Phase Boots is primary and next_unowned advances.
+    let owned_build = recommend_item_build(
+        &carry_repo,
+        HeroId(32),
+        Role::Carry,
+        Bracket::Ancient,
+        &enemies,
+        &[ItemId(50)],
+        600,
+    )
+    .unwrap();
+    let owned_boots: Vec<_> = owned_build
+        .steps
+        .iter()
+        .filter(|s| matches!(s.item_id.0, 50 | 63))
+        .collect();
+    assert_eq!(owned_boots.len(), 1);
+    assert_eq!(owned_boots[0].item_id, ItemId(50));
+    assert!(owned_boots[0].owned);
+    assert!(
+        owned_boots[0]
+            .variants
+            .iter()
+            .any(|v| v.item_id == ItemId(63))
+    );
+    assert_eq!(owned_build.next_unowned_index, Some(1));
+    assert_eq!(owned_build.steps[1].item_id, ItemId(168));
 }

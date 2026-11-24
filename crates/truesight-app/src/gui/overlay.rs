@@ -7,18 +7,6 @@ use eframe::egui::{
     Stroke, StrokeKind, Vec2, pos2, vec2,
 };
 use truesight_core::domain::{ItemId, Role, TEAM_SIZE};
-use truesight_core::ports::ItemMetaRepository;
-
-fn format_clock(secs: i32) -> String {
-    let abs = secs.unsigned_abs();
-    let mins = abs / 60;
-    let rem = abs % 60;
-    if secs < 0 {
-        format!("-{mins:02}:{rem:02}")
-    } else {
-        format!("{mins:02}:{rem:02}")
-    }
-}
 
 fn overlay_icon_button(
     ui: &mut egui::Ui,
@@ -67,11 +55,20 @@ pub(super) struct OverlayPanelOutput {
     pub(super) resize_started: bool,
 }
 
-/// Builds the always-on-top frameless viewport configuration for the compact overlay window.
-pub(super) fn build_overlay_viewport_builder(geom: OverlayGeometry) -> egui::ViewportBuilder {
+/// Builds the always-on-top frameless viewport configuration for the compact overlay window,
+/// allowing tighter vertical sizing in the icon-only Build view (`220x104`) than Picks (`280x160`).
+pub(super) fn build_overlay_viewport_builder(
+    geom: OverlayGeometry,
+    is_post_draft: bool,
+) -> egui::ViewportBuilder {
+    let min_size = if is_post_draft {
+        [220.0, 104.0]
+    } else {
+        [280.0, 160.0]
+    };
     egui::ViewportBuilder::default()
         .with_inner_size([geom.width, geom.height])
-        .with_min_inner_size([280.0, 160.0])
+        .with_min_inner_size(min_size)
         .with_max_inner_size([840.0, 720.0])
         .with_resizable(true)
         .with_position([geom.x, geom.y])
@@ -123,14 +120,19 @@ impl TrueSightGuiApp {
             .filter(|(w, h)| *w > 0.0 && *h > 0.0);
         let fallback_monitor_size_px = fallback_monitor_size_pts.map(|(w, h)| (w * ppp, h * ppp));
 
+        let is_post_draft = self.session.is_post_draft_build_view();
+        let active_geom = self.session.active_overlay_geometry();
+        let (min_w_pts, min_h_pts) = if is_post_draft {
+            (220.0, 104.0)
+        } else {
+            (280.0, 160.0)
+        };
+
         let has_live_position = vp_outer_rect.is_some() || vp_inner_rect.is_some();
         let (x, y) = vp_outer_rect
             .or(vp_inner_rect)
             .map(|r| (r.min.x, r.min.y))
-            .unwrap_or((
-                self.session.overlay_geometry.x,
-                self.session.overlay_geometry.y,
-            ));
+            .unwrap_or((active_geom.x, active_geom.y));
 
         let live_screen_size = {
             let s = screen_rect.size();
@@ -140,27 +142,26 @@ impl TrueSightGuiApp {
             .or(vp_outer_rect)
             .map(|r| (r.width(), r.height()))
             .or(live_screen_size)
-            .unwrap_or((
-                self.session.overlay_geometry.width,
-                self.session.overlay_geometry.height,
-            ));
+            .unwrap_or((active_geom.width, active_geom.height));
 
         let candidate_pts = OverlayGeometry {
             x,
             y,
             width,
             height,
-            click_through: self.session.overlay_geometry.click_through,
+            click_through: active_geom.click_through,
         };
         let candidate_px = candidate_pts.scale_to_desktop_pixels(ppp);
         let monitor_rect_px = self.session.resolve_monitor_for_overlay(candidate_px);
         let clamped_px =
-            crate::session::AppSession::clamp_overlay_geometry_with_optional_monitor_scaled(
+            crate::session::AppSession::clamp_overlay_geometry_with_optional_monitor_min_scaled(
                 candidate_px,
                 monitor_rect_px,
                 fallback_monitor_size_px,
                 self.session.active_capture_strip_rect,
                 ppp,
+                min_w_pts,
+                min_h_pts,
             );
         let clamped_pts = clamped_px.scale_to_egui_points(ppp);
 
@@ -188,13 +189,12 @@ impl TrueSightGuiApp {
                 )));
             }
 
-            let prev = self.session.overlay_geometry;
-            if (clamped_pts.x - prev.x).abs() > 0.5
-                || (clamped_pts.y - prev.y).abs() > 0.5
-                || (clamped_pts.width - prev.width).abs() > 0.5
-                || (clamped_pts.height - prev.height).abs() > 0.5
+            if (clamped_pts.x - active_geom.x).abs() > 0.5
+                || (clamped_pts.y - active_geom.y).abs() > 0.5
+                || (clamped_pts.width - active_geom.width).abs() > 0.5
+                || (clamped_pts.height - active_geom.height).abs() > 0.5
             {
-                self.session.set_overlay_geometry(clamped_pts);
+                self.session.set_active_overlay_geometry(clamped_pts);
             }
         }
     }
@@ -595,147 +595,8 @@ impl TrueSightGuiApp {
                         });
                     });
                 } else {
-                    // Post-draft phase: Item images + clean badges + clickable item variants
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new(format!("T = {}", format_clock(summary.game_time_secs)))
-                                .size(9.5)
-                                .strong()
-                                .color(P_CYAN),
-                        );
-                        ui.label(
-                            RichText::new(tr.overlay_item_build_label)
-                                .size(9.5)
-                                .strong()
-                                .color(P_MUTED),
-                        );
-                    });
-                    ui.add_space(4.0);
-
-                    if let Some(build) = &summary.build {
-                        egui::ScrollArea::horizontal()
-                            .id_salt("truesight_overlay_build_scroll")
-                            .auto_shrink([false, false])
-                            .animated(false)
-                            .show(ui, |ui| {
-                                ui.horizontal_top(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 4.0;
-                                    for (idx, step) in build.steps.iter().enumerate() {
-                                        if idx > 0 {
-                                            ui.vertical(|ui| {
-                                                ui.add_space(16.0);
-                                                let (cr, _) = ui.allocate_exact_size(
-                                                    vec2(10.0, 12.0),
-                                                    Sense::hover(),
-                                                );
-                                                paint_chevron_right(ui.painter(), cr, P_GEM);
-                                            });
-                                        }
-                                        let is_next = build.next_unowned_index == Some(idx);
-                                        let border_col = if step.owned {
-                                            P_GEM_DEEP
-                                        } else if is_next {
-                                            P_GEM
-                                        } else {
-                                            P_LINE
-                                        };
-                                        let name = self
-                                            .session
-                                            .item_repo
-                                            .item_catalog(step.item_id)
-                                            .map(|e| e.display_name)
-                                            .unwrap_or_else(|| format!("#{}", step.item_id.0));
-                                        let step_tex = self.textures.items.get(&step.item_id);
-                                        let step_resp = ui
-                                            .vertical(|ui| {
-                                                ui.spacing_mut().item_spacing.y = 2.0;
-                                                egui::Frame::NONE
-                                                    .fill(P_INDIGO_2)
-                                                    .stroke(Stroke::new(1.0_f32, border_col))
-                                                    .inner_margin(Margin::symmetric(5, 4))
-                                                    .show(ui, |ui| {
-                                                        if step.owned {
-                                                            paint_mini_badge_scaled(
-                                                                ui, "OK", P_GEM, P_GEM_DEEP, 7.5, 2,
-                                                            );
-                                                        } else if is_next {
-                                                            paint_mini_badge_scaled(
-                                                                ui, "NEXT", P_GEM, P_GEM, 7.5, 2,
-                                                            );
-                                                        }
-                                                        ui.horizontal(|ui| {
-                                                            ui.spacing_mut().item_spacing.x = 4.0;
-                                                            paint_item_icon(
-                                                                ui,
-                                                                step_tex,
-                                                                vec2(34.0, 25.0),
-                                                                border_col,
-                                                                step.owned,
-                                                            );
-                                                            ui.label(
-                                                                RichText::new(name)
-                                                                    .size(9.5)
-                                                                    .strong()
-                                                                    .color(if step.owned {
-                                                                        P_MUTED
-                                                                    } else {
-                                                                        P_GLINT
-                                                                    }),
-                                                            );
-                                                        });
-                                                    });
-                                                for var in step.variants.iter().take(2) {
-                                                    let vname = self
-                                                        .session
-                                                        .item_repo
-                                                        .item_catalog(var.item_id)
-                                                        .map(|e| e.display_name)
-                                                        .unwrap_or_else(|| {
-                                                            format!("#{}", var.item_id.0)
-                                                        });
-                                                    let v_img =
-                                                        self.textures.items.get(&var.item_id).map(
-                                                            |t| {
-                                                                egui::Image::new((
-                                                                    t.id(),
-                                                                    vec2(18.0, 13.0),
-                                                                ))
-                                                            },
-                                                        );
-                                                    if ui
-                                                        .add(
-                                                            egui::Button::opt_image_and_text(
-                                                                v_img,
-                                                                Some(
-                                                                    RichText::new(vname)
-                                                                        .size(8.5)
-                                                                        .color(P_SILVER)
-                                                                        .into(),
-                                                                ),
-                                                            )
-                                                            .fill(P_INDIGO_1)
-                                                            .stroke(Stroke::new(1.0_f32, P_LINE)),
-                                                        )
-                                                        .clicked()
-                                                    {
-                                                        clicked_variant =
-                                                            Some((step.item_id, var.item_id));
-                                                    }
-                                                }
-                                            })
-                                            .response;
-                                        if is_next {
-                                            step_resp.scroll_to_me(Some(Align::Center));
-                                        }
-                                    }
-                                });
-                            });
-                    } else {
-                        ui.label(
-                            RichText::new(tr.overlay_pick_ally_hint)
-                                .size(9.5)
-                                .color(P_MUTED),
-                        );
+                    if let Some(pair) = self.render_overlay_build_panel(ui, &summary) {
+                        clicked_variant = Some(pair);
                     }
                 }
             });

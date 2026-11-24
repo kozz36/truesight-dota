@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use truesight_core::domain::{Bracket, HeroId, HeroItemStat, ItemCatalogEntry, ItemId, ItemPhase};
-use truesight_core::ports::PortError;
+use truesight_core::ports::{ItemMetaRepository, PortError};
 
 /// OpenDota `/api/heroStats` refreshes its rolling daily window once per 24h UTC.
 pub const META_TTL_SECS: u64 = 86_400;
@@ -510,7 +510,8 @@ impl LocalCacheManager {
         }
     }
 
-    fn is_target_item_heroes_uncached(&self) -> bool {
+    /// Returns `true` when any explicit target item hero lacks cached item build stats.
+    pub fn is_target_item_heroes_uncached(&self) -> bool {
         let configured = deduplicate_hero_ids(self.target_item_hero_ids.clone());
         if configured.is_empty() {
             return false;
@@ -970,7 +971,15 @@ impl LocalCacheManager {
                 let mut fetched_for_hero = false;
                 if let Some(ref token) = stratz_token {
                     if let Ok(sb) = fetch_stratz_items(token, hero_id.0) {
-                        let stats = parse_stratz_hero_item_purchase_json(&sb);
+                        let mut stats = parse_stratz_hero_item_purchase_json(&sb);
+                        stats.retain(|stat| {
+                            stat.phase == ItemPhase::Starting
+                                || stat.phase == ItemPhase::Situational
+                                || crate::item_repo::is_valid_timed_progression_item(
+                                    &catalog_repo,
+                                    stat.item_id,
+                                )
+                        });
                         if !stats.is_empty() {
                             merged_hero_items.insert(hero_id.0, stats);
                             any_item_stats_fetched = true;
@@ -983,23 +992,42 @@ impl LocalCacheManager {
                         "https://api.opendota.com/api/scenarios/itemTimings?hero_id={}",
                         hero_id.0
                     );
+                    let mut hero_stats_accum: Vec<HeroItemStat> = Vec::new();
                     if let Ok(ib_body) = fetch_opendota_url(&url) {
                         let grouped =
                             parse_hero_item_stats_grouped_by_hero(&ib_body, &catalog_repo);
                         if !grouped.is_empty() {
                             for (hid, stats) in grouped {
-                                if (!restrict_to_requested || hid == hero_id) && !stats.is_empty() {
+                                if hid == hero_id {
+                                    hero_stats_accum.extend(stats);
+                                } else if !restrict_to_requested && !stats.is_empty() {
                                     merged_hero_items.insert(hid.0, stats);
                                     any_item_stats_fetched = true;
                                 }
                             }
                         } else {
-                            let stats = parse_opendota_item_timings_json(&ib_body, &catalog_repo);
-                            if !stats.is_empty() {
-                                merged_hero_items.insert(hero_id.0, stats);
-                                any_item_stats_fetched = true;
+                            hero_stats_accum =
+                                parse_opendota_item_timings_json(&ib_body, &catalog_repo);
+                        }
+                    }
+
+                    let pop_url = format!(
+                        "https://api.opendota.com/api/heroes/{}/itemPopularity",
+                        hero_id.0
+                    );
+                    if let Ok(pop_body) = fetch_opendota_url(&pop_url) {
+                        let pop_stats =
+                            parse_opendota_item_popularity_json(&pop_body, &catalog_repo);
+                        for ps in pop_stats {
+                            if !hero_stats_accum.iter().any(|s| s.item_id == ps.item_id) {
+                                hero_stats_accum.push(ps);
                             }
                         }
+                    }
+
+                    if !hero_stats_accum.is_empty() {
+                        merged_hero_items.insert(hero_id.0, hero_stats_accum);
+                        any_item_stats_fetched = true;
                     }
                 }
             }
@@ -1669,9 +1697,9 @@ fn extract_i64_field(block: &str, key: &str) -> Option<i64> {
 }
 
 fn phase_from_avg_mins(avg_mins: f32) -> ItemPhase {
-    if avg_mins < 10.0 {
+    if avg_mins < 12.0 {
         ItemPhase::Early
-    } else if avg_mins <= 26.0 {
+    } else if avg_mins <= 24.5 {
         ItemPhase::Core
     } else {
         ItemPhase::Late
@@ -2065,12 +2093,36 @@ fn upsert_item_stat_bucket(
     }
 }
 
-/// Parses OpenDota `/api/scenarios/itemTimings` JSON rows into `Vec<HeroItemStat>`.
+fn finalize_weighted_item_buckets(
+    buckets: std::collections::BTreeMap<u16, (f64, u64, u64)>,
+) -> Vec<HeroItemStat> {
+    buckets
+        .into_iter()
+        .map(|(raw_id, (weighted_mins, matches, wins))| {
+            let avg_time_mins = if matches > 0 {
+                (weighted_mins / matches as f64) as f32
+            } else {
+                0.0
+            };
+            HeroItemStat {
+                item_id: ItemId(raw_id),
+                phase: phase_from_avg_mins(avg_time_mins),
+                avg_time_mins,
+                match_count: matches.min(u64::from(u32::MAX)) as u32,
+                win_count: wins.min(u64::from(u32::MAX)) as u32,
+            }
+        })
+        .collect()
+}
+
+/// Parses OpenDota `/api/scenarios/itemTimings` JSON rows into aggregated `Vec<HeroItemStat>`,
+/// weighting purchase times across all time buckets for each item.
 pub fn parse_opendota_item_timings_json(
     json: &str,
     catalog: &SeededItemMetaRepository,
 ) -> Vec<HeroItemStat> {
-    let mut out = Vec::new();
+    let mut agg: std::collections::BTreeMap<u16, (f64, u64, u64)> =
+        std::collections::BTreeMap::new();
     for obj_chunk in json.split('{').skip(1) {
         let Some(end) = obj_chunk.find('}') else {
             continue;
@@ -2082,20 +2134,86 @@ pub fn parse_opendota_item_timings_json(
         let Some(entry) = catalog.item_by_slug(slug) else {
             continue;
         };
+        if !crate::item_repo::is_valid_timed_progression_item(catalog, entry.id) {
+            continue;
+        }
         let time_secs = extract_i64_field(block, "\"time\"").unwrap_or(0).max(0);
-        let matches = extract_u64_or_quoted_field(block, "\"games\"").unwrap_or(0) as u32;
-        let wins = extract_u64_or_quoted_field(block, "\"wins\"").unwrap_or(0) as u32;
+        let matches = extract_u64_or_quoted_field(block, "\"games\"").unwrap_or(0);
+        let wins = extract_u64_or_quoted_field(block, "\"wins\"").unwrap_or(0);
         if matches == 0 {
             continue;
         }
-        let avg_time_mins = time_secs as f32 / 60.0;
-        out.push(HeroItemStat {
-            item_id: entry.id,
-            phase: phase_from_avg_mins(avg_time_mins),
-            avg_time_mins,
-            match_count: matches,
-            win_count: wins,
-        });
+        let avg_mins = f64::from(time_secs as f32 / 60.0);
+        let slot = agg.entry(entry.id.0).or_insert((0.0, 0, 0));
+        slot.0 += avg_mins * matches as f64;
+        slot.1 += matches;
+        slot.2 += wins;
+    }
+    finalize_weighted_item_buckets(agg)
+}
+
+/// Parses OpenDota `/api/heroes/{hero_id}/itemPopularity` JSON into `Vec<HeroItemStat>`.
+pub fn parse_opendota_item_popularity_json(
+    json: &str,
+    catalog: &SeededItemMetaRepository,
+) -> Vec<HeroItemStat> {
+    let sections = [
+        ("\"start_game_items\"", ItemPhase::Starting, 0.0_f32),
+        ("\"early_game_items\"", ItemPhase::Early, 7.5_f32),
+        ("\"mid_game_items\"", ItemPhase::Core, 18.5_f32),
+        ("\"late_game_items\"", ItemPhase::Late, 31.0_f32),
+    ];
+    let mut out: Vec<HeroItemStat> = Vec::new();
+    for (section_key, phase, default_mins) in sections {
+        let Some(idx) = json.find(section_key) else {
+            continue;
+        };
+        let Some(brace_rel) = json[idx..].find('{') else {
+            continue;
+        };
+        let Some((obj_slice, _)) = extract_balanced_braces(json, idx + brace_rel) else {
+            continue;
+        };
+        let inner = obj_slice
+            .trim()
+            .trim_start_matches('{')
+            .trim_end_matches('}');
+        for pair in inner.split(',') {
+            let Some((raw_k, raw_v)) = pair.split_once(':') else {
+                continue;
+            };
+            let Ok(id_num) = raw_k.trim().trim_matches('"').parse::<u16>() else {
+                continue;
+            };
+            let Ok(count) = raw_v.trim().trim_matches('"').parse::<u32>() else {
+                continue;
+            };
+            if id_num == 0 || count == 0 {
+                continue;
+            }
+            let item_id = ItemId(id_num);
+            let Some(entry) = catalog.item_catalog(item_id) else {
+                continue;
+            };
+            if (entry.cost == 0 && entry.is_consumable_drop) || entry.is_recipe {
+                continue;
+            }
+            if phase != ItemPhase::Starting
+                && (!crate::item_repo::is_valid_timed_progression_item(catalog, item_id)
+                    || truesight_core::domain::all_referenced_counter_item_ids().contains(&item_id))
+            {
+                continue;
+            }
+            if !out.iter().any(|s| s.item_id == item_id) {
+                out.push(HeroItemStat {
+                    item_id,
+                    phase,
+                    avg_time_mins: default_mins,
+                    match_count: count,
+                    win_count: count.div_ceil(2),
+                });
+            }
+        }
     }
     out
 }
@@ -2151,6 +2269,10 @@ fn parse_hero_item_stats_grouped_by_hero(
     }
 
     if grouped.is_empty() && !has_nonempty_graphql_errors(json) {
+        let mut agg_by_hero: std::collections::BTreeMap<
+            u16,
+            std::collections::BTreeMap<u16, (f64, u64, u64)>,
+        > = std::collections::BTreeMap::new();
         for obj_chunk in json.split('{').skip(1) {
             let Some(end) = obj_chunk.find('}') else {
                 continue;
@@ -2170,21 +2292,34 @@ fn parse_hero_item_stats_grouped_by_hero(
                 continue;
             };
             let time_secs = extract_i64_field(block, "\"time\"").unwrap_or(0).max(0);
-            let matches = extract_u64_or_quoted_field(block, "\"games\"").unwrap_or(0) as u32;
-            let wins = extract_u64_or_quoted_field(block, "\"wins\"").unwrap_or(0) as u32;
+            let matches = extract_u64_or_quoted_field(block, "\"games\"").unwrap_or(0);
+            let wins = extract_u64_or_quoted_field(block, "\"wins\"").unwrap_or(0);
             if matches == 0 {
                 continue;
             }
-            let avg_time_mins = time_secs as f32 / 60.0;
-            grouped.entry(hid).or_default().push(HeroItemStat {
-                item_id: entry.id,
-                phase: phase_from_avg_mins(avg_time_mins),
-                avg_time_mins,
-                match_count: matches,
-                win_count: wins,
-            });
+            let avg_mins = f64::from(time_secs as f32 / 60.0);
+            let slot = agg_by_hero
+                .entry(hid)
+                .or_default()
+                .entry(entry.id.0)
+                .or_insert((0.0, 0, 0));
+            slot.0 += avg_mins * matches as f64;
+            slot.1 += matches;
+            slot.2 += wins;
+        }
+        for (hid, item_buckets) in agg_by_hero {
+            grouped.insert(hid, finalize_weighted_item_buckets(item_buckets));
         }
     }
+
+    for stats in grouped.values_mut() {
+        stats.retain(|stat| {
+            stat.phase == ItemPhase::Starting
+                || stat.phase == ItemPhase::Situational
+                || crate::item_repo::is_valid_timed_progression_item(catalog, stat.item_id)
+        });
+    }
+    grouped.retain(|_, stats| !stats.is_empty());
 
     grouped
         .into_iter()

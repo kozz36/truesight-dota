@@ -3274,6 +3274,7 @@ fn session_transitions_to_post_draft_build_ticks_owned_items_and_swaps_variants(
 
     // InventoryUpdated populates owned_items and advances next_unowned_index.
     session.apply_event(DraftEvent::InventoryUpdated {
+        hero_slug: None,
         item_slugs: vec![format!("item_{first_slug}")],
     });
     assert!(session.owned_items.contains(&first_step.item_id));
@@ -3455,9 +3456,8 @@ fn variant_selection_persists_across_step_reorder_by_original_item_id() {
         .iter()
         .enumerate()
         .skip(1)
-        .take(1)
         .find_map(|(idx, s)| s.variants.first().map(|v| (idx, s.item_id, v.item_id)))
-        .expect("expected step 1 to have a variant");
+        .expect("expected a later step to have a variant");
 
     let earlier_variant_id = build_before.steps[0]
         .variants
@@ -3485,6 +3485,7 @@ fn variant_selection_persists_across_step_reorder_by_original_item_id() {
 
     // Owning the first two steps plus the first step's variant shifts `orig_idx` to a new index.
     session.apply_event(DraftEvent::InventoryUpdated {
+        hero_slug: None,
         item_slugs: owned_slugs,
     });
 
@@ -3749,4 +3750,1425 @@ fn ui_config_persists_ui_language_and_defaults_to_english_when_missing() {
     }
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn active_build_hero_evicts_stale_local_hero_and_persists_independent_build_overlay_geometry() {
+    use crate::session::{OverlayGeometry, load_ui_config_from_dir};
+    use truesight_adapters::sync::LocalCacheManager;
+    use truesight_core::domain::{HeroId, Role, Side};
+
+    let tmp_dir =
+        std::env::temp_dir().join(format!("truesight_build_geom_cfg_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    // 1. Legacy ui_config.toml without build_overlay_* seeds build X/Y from Picks and uses 390x136 default.
+    std::fs::write(
+        tmp_dir.join("ui_config.toml"),
+        "overlay_x = 140\noverlay_y = 220\noverlay_width = 430\noverlay_height = 290\n",
+    )
+    .unwrap();
+    let legacy = load_ui_config_from_dir(&tmp_dir);
+    assert_eq!(legacy.overlay_geometry.width, 430.0);
+    assert_eq!(legacy.overlay_geometry.height, 290.0);
+    assert_eq!(legacy.build_overlay_geometry.x, 140.0);
+    assert_eq!(legacy.build_overlay_geometry.y, 220.0);
+    assert_eq!(legacy.build_overlay_geometry.width, 420.0);
+    assert_eq!(legacy.build_overlay_geometry.height, 168.0);
+
+    // 2. Resizing Picks vs Build geometries persists independently via set_active_overlay_geometry.
+    let cfg_path = tmp_dir.join("config.toml");
+    let mgr = LocalCacheManager::with_optional_account(tmp_dir.join("cache"), None);
+    let mut session = AppSession::with_cache_and_config(mgr, Some(cfg_path.clone())).unwrap();
+    let picks_geom = OverlayGeometry {
+        x: 50.0,
+        y: 120.0,
+        width: 440.0,
+        height: 270.0,
+        click_through: false,
+    };
+    session.set_active_overlay_geometry(picks_geom);
+    session.toggle_post_draft_build_view();
+    assert!(session.is_post_draft_build_view());
+    let build_geom = OverlayGeometry {
+        x: 90.0,
+        y: 150.0,
+        width: 520.0,
+        height: 128.0,
+        click_through: false,
+    };
+    session.set_active_overlay_geometry(build_geom);
+
+    let reloaded_mgr = LocalCacheManager::with_optional_account(tmp_dir.join("cache"), None);
+    let reloaded = AppSession::with_cache_and_config(reloaded_mgr, Some(cfg_path)).unwrap();
+    assert_eq!(reloaded.overlay_geometry, picks_geom);
+    assert_eq!(reloaded.build_overlay_geometry, build_geom);
+
+    // 3. Stale local_player_hero must update when slot hero is replaced or evicted, never staying stuck.
+    session.set_slot_manual(Side::Allies, 3, HeroId(121)); // Grimstroke Pos 4
+    session.local_player_hero = Some(HeroId(121));
+    assert_eq!(
+        session.active_build_hero(),
+        Some((HeroId(121), Role::SoftSupport))
+    );
+    session.set_slot_manual(Side::Allies, 3, HeroId(50)); // Replaced with Dazzle Pos 4
+    assert_eq!(
+        session.active_build_hero(),
+        Some((HeroId(50), Role::SoftSupport)),
+        "replacing manual local hero slot must update active_build_hero instead of keeping Grimstroke"
+    );
+
+    // Even if local_player_hero pointed to a hero not in allies, active_build_hero falls back cleanly.
+    session.local_player_hero = Some(HeroId(121));
+    session.draft.target_role = Role::Carry;
+    session.set_slot_manual(Side::Allies, 0, HeroId(95)); // Troll Warlord Pos 1
+    assert_eq!(
+        session.active_build_hero(),
+        Some((HeroId(95), Role::Carry)),
+        "evicted local_player_hero not in draft must fall back to active target_role hero"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn build_view_browsing_preserves_vision_replacement_without_setting_local_identity() {
+    use truesight_core::domain::{HeroId, Side};
+    use truesight_core::ports::DraftEvent;
+
+    let mut session = AppSession::new().unwrap();
+    // Vision detects two allies with zero GSI local-player identity.
+    session.apply_vision_events(vec![
+        DraftEvent::PickDetected {
+            side: Side::Allies,
+            slot: 0,
+            hero_id: HeroId(1), // Anti-Mage
+            role: None,
+        },
+        DraftEvent::PickDetected {
+            side: Side::Allies,
+            slot: 1,
+            hero_id: HeroId(88), // Nyx Assassin
+            role: None,
+        },
+    ]);
+    assert_eq!(session.local_player_hero, None);
+
+    // Browse the second ally's build; this must NOT hijack local_player_hero.
+    session.select_build_view_hero(HeroId(88));
+    assert_eq!(session.build_view_hero, Some(HeroId(88)));
+    assert_eq!(session.local_player_hero, None);
+    assert_eq!(
+        session.active_build_hero().map(|(h, _)| h),
+        Some(HeroId(88))
+    );
+
+    // Subsequent confirmed vision replacement in portrait slot 1 replaces HeroId(88) with HeroId(50).
+    session.apply_vision_events(vec![DraftEvent::PickDetected {
+        side: Side::Allies,
+        slot: 1,
+        hero_id: HeroId(50), // Dazzle
+        role: None,
+    }]);
+    assert!(
+        !session
+            .draft
+            .allies
+            .iter()
+            .flatten()
+            .any(|p| p.hero_id == HeroId(88)),
+        "browsing a vision-owned ally must not shield it from confirmed vision replacement"
+    );
+    assert!(
+        session
+            .draft
+            .allies
+            .iter()
+            .flatten()
+            .any(|p| p.hero_id == HeroId(50)),
+        "confirmed vision replacement hero (Dazzle) must occupy the allied draft"
+    );
+    assert_eq!(session.build_view_hero, None);
+}
+
+#[test]
+fn item_build_refresh_triggers_on_gsi_entry_and_queues_while_sync_in_flight() {
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    };
+    use std::time::Duration;
+    use truesight_adapters::sync::LocalCacheManager;
+    use truesight_core::domain::{Bracket, HeroId, ItemId, Role, Side};
+    use truesight_core::ports::{DraftEvent, ItemMetaRepository};
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_item_refresh_queue_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    let cache_dir = tmp_dir.join("cache");
+    std::fs::create_dir_all(&cache_dir).unwrap();
+    let cfg_path = tmp_dir.join("config.toml");
+
+    let mgr = LocalCacheManager::with_optional_account(cache_dir.clone(), None);
+    let mut session = AppSession::with_cache_and_config(mgr, Some(cfg_path)).unwrap();
+    session.set_slot_manual(Side::Allies, 3, HeroId(88)); // Nyx Assassin (uncached)
+    session.select_build_view_hero(HeroId(88));
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let recorded_targets: Arc<Mutex<Vec<Vec<HeroId>>>> = Arc::new(Mutex::new(Vec::new()));
+    let (gate_tx, gate_rx) = mpsc::sync_channel::<()>(1);
+    let gate_rx = Arc::new(Mutex::new(gate_rx));
+    let block_next_call = Arc::new(Mutex::new(false));
+    let (blocked_started_tx, blocked_started_rx) = mpsc::sync_channel::<()>(2);
+    let fail_next_call = Arc::new(Mutex::new(false));
+
+    let calls_bg = Arc::clone(&calls);
+    let targets_bg = Arc::clone(&recorded_targets);
+    let cache_dir_bg = cache_dir.clone();
+    let gate_rx_bg = Arc::clone(&gate_rx);
+    let block_bg = Arc::clone(&block_next_call);
+    let blocked_started_bg = blocked_started_tx.clone();
+    let fail_bg = Arc::clone(&fail_next_call);
+
+    session.set_background_sync_runner(move |bg_mgr, _force| {
+        calls_bg.fetch_add(1, Ordering::SeqCst);
+        targets_bg
+            .lock()
+            .unwrap()
+            .push(bg_mgr.target_item_hero_ids.clone());
+        let should_block = {
+            let mut flag = block_bg.lock().unwrap();
+            let v = *flag;
+            *flag = false;
+            v
+        };
+        if should_block {
+            let _ = blocked_started_bg.send(());
+            let _ = gate_rx_bg.lock().unwrap().recv();
+        }
+        let should_fail = bg_mgr.target_item_hero_ids.contains(&HeroId(121)) && {
+            let mut flag = fail_bg.lock().unwrap();
+            let v = *flag;
+            *flag = false;
+            v
+        };
+        if should_fail {
+            return Err("Simulated offline failure".into());
+        }
+        let mut entries = Vec::new();
+        for hid in &bg_mgr.target_item_hero_ids {
+            entries.push(format!(
+                r#"{{"heroId":{},"itemStartingPurchase":[],"itemFullPurchase":[{{"itemId":1,"time":13,"matchCount":3210,"winCount":1850}}]}}"#,
+                hid.0
+            ));
+        }
+        let existing_path = cache_dir_bg.join("hero_item_stats.json");
+        let existing_inner = std::fs::read_to_string(&existing_path)
+            .ok()
+            .map(|s| {
+                s.trim()
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .to_string()
+            })
+            .filter(|s| !s.is_empty());
+        if let Some(prev) = existing_inner {
+            entries.insert(0, prev);
+        }
+        std::fs::write(&existing_path, format!("[{}]", entries.join(",")))
+            .map_err(|e| e.to_string())?;
+        Ok("Item cache synced".into())
+    });
+
+    // 1. Automatic GSI transition into PRE_GAME must trigger item refresh for uncached active hero.
+    session.apply_event(DraftEvent::GameRulesStateChanged {
+        state_name: "DOTA_GAMERULES_STATE_PRE_GAME".into(),
+        game_time_secs: -30,
+    });
+    assert!(
+        session.sync_in_flight,
+        "GSI transition to PRE_GAME must trigger item refresh for uncached active build hero"
+    );
+    for _ in 0..100 {
+        session.poll_live_sources(None, None);
+        if !session.sync_in_flight {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!session.sync_in_flight);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(
+        recorded_targets.lock().unwrap()[0].contains(&HeroId(88)),
+        "first sync must target active build hero Nyx Assassin (88)"
+    );
+    let nyx_stats = session
+        .item_repo
+        .hero_item_stats(HeroId(88), Role::SoftSupport, Bracket::Ancient)
+        .unwrap();
+    assert!(
+        nyx_stats
+            .iter()
+            .any(|s| s.item_id == ItemId(1) && s.match_count == 3210),
+        "poll_sync_completion must reload session.item_repo with synced stats: {nyx_stats:?}"
+    );
+
+    // Repeating GAME_IN_PROGRESS once already in Build view & cached must not spam extra syncs.
+    session.apply_event(DraftEvent::GameRulesStateChanged {
+        state_name: "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS".into(),
+        game_time_secs: 5,
+    });
+    assert!(!session.sync_in_flight);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    // 2. Manual Build toggle while another sync is in flight must stay pending and run once on completion.
+    session.toggle_post_draft_build_view(); // Switch back to Picks
+    assert!(!session.is_post_draft_build_view());
+    *block_next_call.lock().unwrap() = true;
+    assert!(session.start_background_sync(true));
+    blocked_started_rx
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap();
+    session.set_slot_manual(Side::Allies, 4, HeroId(50)); // Dazzle (uncached)
+    session.select_build_view_hero(HeroId(50));
+    session.toggle_post_draft_build_view(); // Manual entry into Build view during in-flight sync
+    assert!(session.is_post_draft_build_view());
+    gate_tx.send(()).unwrap();
+
+    for _ in 0..100 {
+        session.poll_live_sources(None, None);
+        if !session.sync_in_flight && calls.load(Ordering::SeqCst) >= 3 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        3,
+        "manual Build entry during in-flight sync must queue and drain exactly one follow-up sync"
+    );
+    assert!(
+        recorded_targets.lock().unwrap()[2].contains(&HeroId(50)),
+        "queued follow-up sync must target Dazzle (50)"
+    );
+
+    // 3. GSI-driven Build entry during an in-flight sync must also queue cleanly and never loop on error.
+    session.apply_event(DraftEvent::GameRulesStateChanged {
+        state_name: "DOTA_GAMERULES_STATE_HERO_SELECTION".into(),
+        game_time_secs: 0,
+    });
+    assert!(!session.is_post_draft_build_view());
+    *block_next_call.lock().unwrap() = true;
+    assert!(session.start_background_sync(true));
+    blocked_started_rx
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap();
+
+    session.set_slot_manual(Side::Allies, 1, HeroId(121)); // Grimstroke (uncached)
+    session.select_build_view_hero(HeroId(121));
+    *fail_next_call.lock().unwrap() = true; // Next follow-up fails to verify no retry loop
+    session.apply_event(DraftEvent::GameRulesStateChanged {
+        state_name: "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS".into(),
+        game_time_secs: 120,
+    });
+    assert!(session.is_post_draft_build_view());
+    gate_tx.send(()).unwrap();
+
+    for _ in 0..100 {
+        session.poll_live_sources(None, None);
+        if !session.sync_in_flight && calls.load(Ordering::SeqCst) >= 5 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!session.sync_in_flight);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        5,
+        "GSI Build entry during in-flight sync must launch one queued refresh and stop on error"
+    );
+    assert!(
+        recorded_targets.lock().unwrap()[4].contains(&HeroId(121)),
+        "GSI queued refresh must target Grimstroke (121)"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn local_inventory_applies_only_to_local_hero_build_not_browsed_teammate() {
+    use truesight_core::domain::{HeroId, ItemId};
+    use truesight_core::ports::{DraftEvent, ItemMetaRepository};
+
+    let mut session = AppSession::new().unwrap();
+    assert!(execute_command(&mut session, "ally 1 anti-mage").unwrap());
+    assert!(execute_command(&mut session, "ally 4 nyx assassin").unwrap());
+    assert!(execute_command(&mut session, "enemy 1 phantom assassin").unwrap());
+    assert!(execute_command(&mut session, "enemy 4 riki").unwrap());
+
+    session.apply_event(DraftEvent::LocalPlayerHeroDetected {
+        hero_slug: "antimage".into(),
+    });
+    session.apply_event(DraftEvent::GameRulesStateChanged {
+        state_name: "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS".into(),
+        game_time_secs: 900,
+    });
+    assert!(session.is_post_draft_build_view());
+    assert_eq!(session.active_build_hero().map(|(h, _)| h), Some(HeroId(1)));
+
+    let am_base = session
+        .compute_recommended_build()
+        .expect("local Anti-Mage must produce a build");
+    let am_step0_id = am_base.steps[0].item_id;
+
+    // Inspect Nyx build first (before acquiring items) to collect real Nyx step, variant, start, and optional IDs.
+    session.select_build_view_hero(HeroId(88));
+    let nyx_base = session
+        .compute_recommended_build()
+        .expect("teammate Nyx must produce a build");
+    let nyx_step0_id = nyx_base.steps[0].item_id;
+    let nyx_variant_pair = nyx_base
+        .steps
+        .iter()
+        .find_map(|s| s.variants.first().map(|v| (s.item_id, v.item_id)));
+    let nyx_start_id = nyx_base.starting_items.first().copied();
+    let nyx_opt_id = nyx_base.optional_items.first().map(|o| o.item_id);
+
+    // Clear explicit browse selection back to local hero and equip overlapping items from both builds.
+    session.build_view_hero = None;
+    let mut owned_ids: Vec<ItemId> = vec![am_step0_id, nyx_step0_id];
+    if let Some((_, var_id)) = nyx_variant_pair {
+        owned_ids.push(var_id);
+    }
+    if let Some(sid) = nyx_start_id {
+        owned_ids.push(sid);
+    }
+    if let Some(oid) = nyx_opt_id {
+        owned_ids.push(oid);
+    }
+    let item_slugs: Vec<String> = owned_ids
+        .into_iter()
+        .filter_map(|id| {
+            session
+                .item_repo
+                .item_catalog(id)
+                .map(|e| format!("item_{}", e.slug))
+        })
+        .collect();
+    session.apply_event(DraftEvent::InventoryUpdated {
+        hero_slug: Some("antimage".into()),
+        item_slugs,
+    });
+
+    // 1. On the local player hero (Anti-Mage), owned_items apply normally.
+    assert_eq!(
+        session.active_build_owned_items(),
+        session.owned_items.as_slice()
+    );
+    let am_owned = session.compute_recommended_build().unwrap();
+    assert!(am_owned.steps[0].owned);
+    assert_ne!(am_owned.next_unowned_index, Some(0));
+
+    // 2. Switching to teammate Nyx must NOT apply local inventory to primary, variant, start, or optional items.
+    session.select_build_view_hero(HeroId(88));
+    assert_eq!(
+        session.active_build_hero().map(|(h, _)| h),
+        Some(HeroId(88))
+    );
+    assert!(
+        session.active_build_owned_items().is_empty(),
+        "browsing teammate Nyx must return empty active_build_owned_items"
+    );
+    let nyx_browsed = session.compute_recommended_build().unwrap();
+    assert!(
+        nyx_browsed
+            .steps
+            .iter()
+            .all(|s| !s.owned && s.owned_components == 0),
+        "teammate build steps must never be marked owned from local inventory: {:?}",
+        nyx_browsed.steps
+    );
+    assert_eq!(nyx_browsed.next_unowned_index, Some(0));
+    assert!(
+        nyx_browsed.optional_items.iter().all(|o| !o.owned),
+        "teammate optional items must never be marked owned from local inventory"
+    );
+
+    // Even after swapping to a variant whose item exists in local owned_items, teammate ownership stays false.
+    if let Some((primary_id, var_id)) = nyx_variant_pair {
+        session.select_build_variant_for_item(primary_id, var_id);
+        let nyx_swapped = session.compute_recommended_build().unwrap();
+        let swapped_step = nyx_swapped
+            .steps
+            .iter()
+            .find(|s| s.item_id == var_id)
+            .expect("swapped variant must appear as step item");
+        assert!(
+            !swapped_step.owned && swapped_step.owned_components == 0,
+            "swapped variant on teammate build must remain unowned"
+        );
+    }
+
+    // 3. Switching explicitly back to the local hero restores owned_items application.
+    session.select_build_view_hero(HeroId(1));
+    assert_eq!(
+        session.active_build_owned_items(),
+        session.owned_items.as_slice()
+    );
+    let am_restored = session.compute_recommended_build().unwrap();
+    assert!(am_restored.steps[0].owned);
+    assert_ne!(am_restored.next_unowned_index, Some(0));
+}
+
+#[test]
+fn manual_slot_replacement_in_build_view_requests_or_queues_item_refresh() {
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    };
+    use std::time::Duration;
+    use truesight_adapters::sync::LocalCacheManager;
+    use truesight_core::domain::{Bracket, HeroId, ItemId, Role, Side};
+    use truesight_core::ports::ItemMetaRepository;
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_manual_replace_refresh_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    let cache_dir = tmp_dir.join("cache");
+    std::fs::create_dir_all(&cache_dir).unwrap();
+    let cfg_path = tmp_dir.join("config.toml");
+
+    let mgr = LocalCacheManager::with_optional_account(cache_dir.clone(), None);
+    let mut session = AppSession::with_cache_and_config(mgr, Some(cfg_path)).unwrap();
+    session.set_slot_manual(Side::Allies, 0, HeroId(1)); // Anti-Mage
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let recorded_targets: Arc<Mutex<Vec<Vec<HeroId>>>> = Arc::new(Mutex::new(Vec::new()));
+    let (gate_tx, gate_rx) = mpsc::sync_channel::<()>(1);
+    let gate_rx = Arc::new(Mutex::new(gate_rx));
+    let block_next_call = Arc::new(Mutex::new(false));
+    let (blocked_started_tx, blocked_started_rx) = mpsc::sync_channel::<()>(2);
+
+    let calls_bg = Arc::clone(&calls);
+    let targets_bg = Arc::clone(&recorded_targets);
+    let cache_dir_bg = cache_dir.clone();
+    let gate_rx_bg = Arc::clone(&gate_rx);
+    let block_bg = Arc::clone(&block_next_call);
+    let blocked_started_bg = blocked_started_tx.clone();
+
+    session.set_background_sync_runner(move |bg_mgr, _force| {
+        calls_bg.fetch_add(1, Ordering::SeqCst);
+        targets_bg
+            .lock()
+            .unwrap()
+            .push(bg_mgr.target_item_hero_ids.clone());
+        let should_block = {
+            let mut flag = block_bg.lock().unwrap();
+            let v = *flag;
+            *flag = false;
+            v
+        };
+        if should_block {
+            let _ = blocked_started_bg.send(());
+            let _ = gate_rx_bg.lock().unwrap().recv();
+        }
+        let mut entries = Vec::new();
+        for hid in &bg_mgr.target_item_hero_ids {
+            entries.push(format!(
+                r#"{{"heroId":{},"itemStartingPurchase":[],"itemFullPurchase":[{{"itemId":1,"time":12,"matchCount":4321,"winCount":2400}}]}}"#,
+                hid.0
+            ));
+        }
+        let existing_path = cache_dir_bg.join("hero_item_stats.json");
+        let existing_inner = std::fs::read_to_string(&existing_path)
+            .ok()
+            .map(|s| {
+                s.trim()
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .to_string()
+            })
+            .filter(|s| !s.is_empty());
+        if let Some(prev) = existing_inner {
+            entries.insert(0, prev);
+        }
+        std::fs::write(&existing_path, format!("[{}]", entries.join(",")))
+            .map_err(|e| e.to_string())?;
+        Ok("Item cache synced".into())
+    });
+
+    // Open Build view and drain initial sync for Anti-Mage.
+    session.toggle_post_draft_build_view();
+    assert!(session.is_post_draft_build_view());
+    assert!(session.sync_in_flight);
+    for _ in 0..100 {
+        session.poll_live_sources(None, None);
+        if !session.sync_in_flight {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    // 1. Replace active slot while Build view is open -> immediate background refresh for Nyx (88).
+    session.set_slot_manual(Side::Allies, 0, HeroId(88));
+    assert_eq!(
+        session.active_build_hero().map(|(h, _)| h),
+        Some(HeroId(88))
+    );
+    assert!(
+        session.sync_in_flight,
+        "replacing active build ally in Build view must start background refresh when uncached"
+    );
+    for _ in 0..100 {
+        session.poll_live_sources(None, None);
+        if !session.sync_in_flight {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(recorded_targets.lock().unwrap()[1].contains(&HeroId(88)));
+    let nyx_stats = session
+        .item_repo
+        .hero_item_stats(HeroId(88), Role::Carry, Bracket::Ancient)
+        .unwrap();
+    assert!(
+        nyx_stats
+            .iter()
+            .any(|s| s.item_id == ItemId(1) && s.match_count == 4321),
+        "replacement sync must populate item stats for replaced hero: {nyx_stats:?}"
+    );
+
+    // 2. Replace browsed ally while another sync is in flight -> must queue pending refresh for Dazzle (50).
+    session.select_build_view_hero(HeroId(88));
+    *block_next_call.lock().unwrap() = true;
+    assert!(session.start_background_sync(true));
+    blocked_started_rx
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap();
+    session.set_slot_manual(Side::Allies, 0, HeroId(50));
+    assert_eq!(
+        session.active_build_hero().map(|(h, _)| h),
+        Some(HeroId(50))
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        3,
+        "replacing active build ally during an in-flight sync must wait for active sync instead of spawning duplicate"
+    );
+    gate_tx.send(()).unwrap();
+    for _ in 0..100 {
+        session.poll_live_sources(None, None);
+        if !session.sync_in_flight && calls.load(Ordering::SeqCst) >= 4 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 4);
+    assert!(recorded_targets.lock().unwrap()[3].contains(&HeroId(50)));
+
+    // 3. Clearing the active slot while Build is open falls back to remaining uncached ally (Grimstroke 121).
+    session.set_slot_manual(Side::Allies, 3, HeroId(121)); // inactive slot -> no spurious sync
+    assert!(!session.sync_in_flight);
+    session.clear_slot_manual(Side::Allies, 0);
+    assert_eq!(
+        session.active_build_hero().map(|(h, _)| h),
+        Some(HeroId(121))
+    );
+    assert!(
+        session.sync_in_flight,
+        "clearing active slot in Build view must refresh newly fallen-back uncached hero"
+    );
+    for _ in 0..100 {
+        session.poll_live_sources(None, None);
+        if !session.sync_in_flight {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 5);
+    assert!(recorded_targets.lock().unwrap()[4].contains(&HeroId(121)));
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn clearing_confirmed_local_hero_keeps_inventory_bound_and_does_not_leak_to_fallback_ally() {
+    use truesight_core::domain::{HeroId, ItemId, Side};
+    use truesight_core::ports::{DraftEvent, ItemMetaRepository};
+
+    let mut session = AppSession::new().unwrap();
+    assert!(execute_command(&mut session, "ally 1 anti-mage").unwrap());
+    assert!(execute_command(&mut session, "ally 4 nyx assassin").unwrap());
+    assert!(execute_command(&mut session, "enemy 1 phantom assassin").unwrap());
+    assert!(execute_command(&mut session, "enemy 4 riki").unwrap());
+
+    session.apply_event(DraftEvent::LocalPlayerHeroDetected {
+        hero_slug: "antimage".into(),
+    });
+    session.apply_event(DraftEvent::GameRulesStateChanged {
+        state_name: "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS".into(),
+        game_time_secs: 900,
+    });
+    assert!(session.is_post_draft_build_view());
+    assert_eq!(session.build_view_hero, None);
+    assert_eq!(session.active_build_hero().map(|(h, _)| h), Some(HeroId(1)));
+
+    let am_base = session
+        .compute_recommended_build()
+        .expect("local Anti-Mage must produce a build");
+    let am_step0_id = am_base.steps[0].item_id;
+
+    // Collect Nyx step, variant, starting, and optional IDs before restoring default focus.
+    session.select_build_view_hero(HeroId(88));
+    let nyx_base = session
+        .compute_recommended_build()
+        .expect("fallback ally Nyx must produce a build");
+    let nyx_step0_id = nyx_base.steps[0].item_id;
+    let nyx_variant_pair = nyx_base
+        .steps
+        .iter()
+        .find_map(|s| s.variants.first().map(|v| (s.item_id, v.item_id)));
+    let nyx_start_id = nyx_base.starting_items.first().copied();
+    let nyx_opt_id = nyx_base.optional_items.first().map(|o| o.item_id);
+    session.build_view_hero = None;
+
+    let mut owned_ids: Vec<ItemId> = vec![am_step0_id, nyx_step0_id];
+    if let Some((_, var_id)) = nyx_variant_pair {
+        owned_ids.push(var_id);
+    }
+    if let Some(sid) = nyx_start_id {
+        owned_ids.push(sid);
+    }
+    if let Some(oid) = nyx_opt_id {
+        owned_ids.push(oid);
+    }
+    let item_slugs: Vec<String> = owned_ids
+        .into_iter()
+        .filter_map(|id| {
+            session
+                .item_repo
+                .item_catalog(id)
+                .map(|e| format!("item_{}", e.slug))
+        })
+        .collect();
+    session.apply_event(DraftEvent::InventoryUpdated {
+        hero_slug: Some("antimage".into()),
+        item_slugs,
+    });
+
+    assert_eq!(session.owned_items_owner, Some(HeroId(1)));
+    assert_eq!(
+        session.active_build_owned_items(),
+        session.owned_items.as_slice()
+    );
+    let am_owned = session.compute_recommended_build().unwrap();
+    assert!(am_owned.steps[0].owned);
+
+    // Click '×' on confirmed local hero Anti-Mage with no explicit browse selection:
+    // fallback ally Nyx becomes active_build_hero, while inventory stays bound to Anti-Mage.
+    session.clear_slot_manual(Side::Allies, 0);
+    assert_eq!(session.local_player_hero, None);
+    assert_eq!(session.build_view_hero, None);
+    assert_eq!(
+        session.active_build_hero().map(|(h, _)| h),
+        Some(HeroId(88)),
+        "clearing Ally 1 must fall back active_build_hero to Ally 4 Nyx"
+    );
+    assert!(
+        !session.owned_items.is_empty(),
+        "inventory remains recorded while bound to its confirmed owner"
+    );
+    assert_eq!(session.owned_items_owner, Some(HeroId(1)));
+    assert!(
+        session.active_build_owned_items().is_empty(),
+        "fallback ally must NOT inherit cleared local hero's inventory"
+    );
+
+    let nyx_fallback = session.compute_recommended_build().unwrap();
+    assert!(
+        nyx_fallback
+            .steps
+            .iter()
+            .all(|s| !s.owned && s.owned_components == 0),
+        "fallback ally steps must remain unowned after clearing local hero: {:?}",
+        nyx_fallback.steps
+    );
+    assert_eq!(nyx_fallback.next_unowned_index, Some(0));
+    assert!(
+        nyx_fallback.optional_items.iter().all(|o| !o.owned),
+        "fallback ally optional items must remain unowned after clearing local hero"
+    );
+
+    // Re-adding Anti-Mage manually restores ownership recognition for Anti-Mage's build.
+    session.set_slot_manual(Side::Allies, 0, HeroId(1));
+    assert_eq!(
+        session.active_build_owned_items(),
+        session.owned_items.as_slice()
+    );
+    let am_readded = session.compute_recommended_build().unwrap();
+    assert!(am_readded.steps[0].owned);
+
+    // Resetting the draft clears both inventory items and their bound owner.
+    session.reset_draft();
+    assert!(session.owned_items.is_empty());
+    assert_eq!(session.owned_items_owner, None);
+}
+
+#[test]
+fn vision_populating_active_build_hero_in_build_view_triggers_item_refresh() {
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use std::time::Duration;
+    use truesight_adapters::sync::LocalCacheManager;
+    use truesight_core::domain::{Bracket, HeroId, ItemId, Role, Side};
+    use truesight_core::ports::{DraftEvent, ItemMetaRepository};
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_vision_build_refresh_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    let cache_dir = tmp_dir.join("cache");
+    std::fs::create_dir_all(&cache_dir).unwrap();
+    let cfg_path = tmp_dir.join("config.toml");
+
+    let mgr = LocalCacheManager::with_optional_account(cache_dir.clone(), None);
+    let mut session = AppSession::with_cache_and_config(mgr, Some(cfg_path)).unwrap();
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let recorded_targets: Arc<Mutex<Vec<Vec<HeroId>>>> = Arc::new(Mutex::new(Vec::new()));
+    let calls_bg = Arc::clone(&calls);
+    let targets_bg = Arc::clone(&recorded_targets);
+    let cache_dir_bg = cache_dir.clone();
+
+    session.set_background_sync_runner(move |bg_mgr, _force| {
+        calls_bg.fetch_add(1, Ordering::SeqCst);
+        targets_bg
+            .lock()
+            .unwrap()
+            .push(bg_mgr.target_item_hero_ids.clone());
+        let mut entries = Vec::new();
+        for hid in &bg_mgr.target_item_hero_ids {
+            entries.push(format!(
+                r#"{{"heroId":{},"itemStartingPurchase":[],"itemFullPurchase":[{{"itemId":1,"time":11,"matchCount":5120,"winCount":2900}}]}}"#,
+                hid.0
+            ));
+        }
+        std::fs::write(
+            cache_dir_bg.join("hero_item_stats.json"),
+            format!("[{}]", entries.join(",")),
+        )
+        .map_err(|e| e.to_string())?;
+        Ok("Item cache synced".into())
+    });
+
+    // Open Build view while no allies are picked yet.
+    session.toggle_post_draft_build_view();
+    assert!(session.is_post_draft_build_view());
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    // Vision detects an uncached allied hero while Build view is already open.
+    session.apply_vision_events(vec![DraftEvent::PickDetected {
+        side: Side::Allies,
+        slot: 0,
+        hero_id: HeroId(88),
+        role: None,
+    }]);
+
+    assert_eq!(
+        session.active_build_hero().map(|(h, _)| h),
+        Some(HeroId(88))
+    );
+    assert!(
+        session.sync_in_flight,
+        "vision populating active build hero in Build view must start item refresh"
+    );
+
+    for _ in 0..100 {
+        session.poll_live_sources(None, None);
+        if !session.sync_in_flight {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!session.sync_in_flight);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(recorded_targets.lock().unwrap()[0].contains(&HeroId(88)));
+    let nyx_stats = session
+        .item_repo
+        .hero_item_stats(HeroId(88), Role::Carry, Bracket::Ancient)
+        .unwrap();
+    assert!(
+        nyx_stats
+            .iter()
+            .any(|s| s.item_id == ItemId(1) && s.match_count == 5120),
+        "vision-triggered item refresh must populate item_repo for Ally Nyx: {nyx_stats:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn unlinking_steam_account_preserves_and_drains_queued_item_refresh() {
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    };
+    use std::time::Duration;
+    use truesight_adapters::sync::LocalCacheManager;
+    use truesight_core::domain::{Bracket, HeroId, ItemId, Role, Side};
+    use truesight_core::ports::ItemMetaRepository;
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_unlink_preserves_queue_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    let cache_dir = tmp_dir.join("cache");
+    std::fs::create_dir_all(&cache_dir).unwrap();
+    let cfg_path = tmp_dir.join("config.toml");
+
+    let mgr = LocalCacheManager::with_optional_account(cache_dir.clone(), Some(12345));
+    let mut session = AppSession::with_cache_and_config(mgr, Some(cfg_path)).unwrap();
+    session.set_slot_manual(Side::Allies, 0, HeroId(1)); // Anti-Mage
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let recorded_targets: Arc<Mutex<Vec<Vec<HeroId>>>> = Arc::new(Mutex::new(Vec::new()));
+    let (gate_tx, gate_rx) = mpsc::sync_channel::<()>(1);
+    let gate_rx = Arc::new(Mutex::new(gate_rx));
+    let block_next_call = Arc::new(Mutex::new(false));
+    let (blocked_started_tx, blocked_started_rx) = mpsc::sync_channel::<()>(2);
+    let file_lock = Arc::new(Mutex::new(()));
+
+    let calls_bg = Arc::clone(&calls);
+    let targets_bg = Arc::clone(&recorded_targets);
+    let cache_dir_bg = cache_dir.clone();
+    let gate_rx_bg = Arc::clone(&gate_rx);
+    let block_bg = Arc::clone(&block_next_call);
+    let blocked_started_bg = blocked_started_tx.clone();
+    let file_lock_bg = Arc::clone(&file_lock);
+
+    session.set_background_sync_runner(move |bg_mgr, _force| {
+        calls_bg.fetch_add(1, Ordering::SeqCst);
+        targets_bg
+            .lock()
+            .unwrap()
+            .push(bg_mgr.target_item_hero_ids.clone());
+        let should_block = {
+            let mut flag = block_bg.lock().unwrap();
+            let v = *flag;
+            *flag = false;
+            v
+        };
+        if should_block {
+            let _ = blocked_started_bg.send(());
+            let _ = gate_rx_bg.lock().unwrap().recv();
+        }
+        let _guard = file_lock_bg.lock().unwrap();
+        let mut entries = Vec::new();
+        for hid in &bg_mgr.target_item_hero_ids {
+            entries.push(format!(
+                r#"{{"heroId":{},"itemStartingPurchase":[],"itemFullPurchase":[{{"itemId":1,"time":15,"matchCount":6789,"winCount":3600}}]}}"#,
+                hid.0
+            ));
+        }
+        let existing_path = cache_dir_bg.join("hero_item_stats.json");
+        let existing_inner = std::fs::read_to_string(&existing_path)
+            .ok()
+            .map(|s| {
+                s.trim()
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .to_string()
+            })
+            .filter(|s| !s.is_empty());
+        if let Some(prev) = existing_inner {
+            entries.insert(0, prev);
+        }
+        std::fs::write(&existing_path, format!("[{}]", entries.join(",")))
+            .map_err(|e| e.to_string())?;
+        Ok("Item cache synced".into())
+    });
+
+    // Open Build view and drain initial sync for Anti-Mage (call #1).
+    session.toggle_post_draft_build_view();
+    assert!(session.is_post_draft_build_view());
+    for _ in 0..100 {
+        session.poll_live_sources(None, None);
+        if !session.sync_in_flight {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    // Start a blocked sync (call #2), then replace active ally with uncached Nyx (88) -> queues refresh.
+    *block_next_call.lock().unwrap() = true;
+    assert!(session.start_background_sync(true));
+    blocked_started_rx
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap();
+    session.set_slot_manual(Side::Allies, 0, HeroId(88));
+    assert_eq!(
+        session.active_build_hero().map(|(h, _)| h),
+        Some(HeroId(88))
+    );
+
+    // Unlink Steam account while sync #2 is in flight and queued refresh is pending.
+    session.set_account_id(None, true);
+    assert!(
+        session.sync_in_flight,
+        "unlinking Steam account must immediately drain pending queued item refresh into a fresh sync"
+    );
+
+    // Unblock cancelled sync #2 and wait for the fresh post-unlink sync #3 to complete.
+    gate_tx.send(()).unwrap();
+    for _ in 0..100 {
+        session.poll_live_sources(None, None);
+        if !session.sync_in_flight && calls.load(Ordering::SeqCst) >= 3 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!session.sync_in_flight);
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    assert!(
+        recorded_targets.lock().unwrap()[2].contains(&HeroId(88)),
+        "post-unlink queued refresh must target replaced hero Nyx (88): {:?}",
+        *recorded_targets.lock().unwrap()
+    );
+    let nyx_stats = session
+        .item_repo
+        .hero_item_stats(HeroId(88), Role::Carry, Bracket::Ancient)
+        .unwrap();
+    assert!(
+        nyx_stats
+            .iter()
+            .any(|s| s.item_id == ItemId(1) && s.match_count == 6789),
+        "post-unlink item refresh must reload item_repo with synced Nyx stats: {nyx_stats:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn identity_change_without_inventory_event_does_not_reassign_stored_inventory() {
+    use truesight_adapters::sync::LocalCacheManager;
+    use truesight_core::domain::{Faction, HeroId, ItemId};
+    use truesight_core::ports::{DraftEvent, ItemMetaRepository};
+
+    let tmp_dir =
+        std::env::temp_dir().join(format!("truesight_identity_no_inv_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let mgr = LocalCacheManager::with_optional_account(tmp_dir.clone(), None);
+    let mut session = AppSession::with_cache_and_config(mgr, None).unwrap();
+    assert!(execute_command(&mut session, "ally 1 anti-mage").unwrap());
+    assert!(execute_command(&mut session, "ally 4 nyx assassin").unwrap());
+    assert!(execute_command(&mut session, "enemy 1 phantom assassin").unwrap());
+    assert!(execute_command(&mut session, "enemy 4 riki").unwrap());
+
+    // Confirm Hero A (Anti-Mage) and enter post-draft Build view.
+    session.apply_event(DraftEvent::LocalPlayerHeroDetected {
+        hero_slug: "antimage".into(),
+    });
+    session.apply_event(DraftEvent::GameRulesStateChanged {
+        state_name: "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS".into(),
+        game_time_secs: 900,
+    });
+    assert!(session.is_post_draft_build_view());
+
+    let am_base = session
+        .compute_recommended_build()
+        .expect("Anti-Mage must produce a build");
+    let am_step0_id = am_base.steps[0].item_id;
+
+    // Collect Nyx items before clearing back to default focus.
+    session.select_build_view_hero(HeroId(88));
+    let nyx_base = session
+        .compute_recommended_build()
+        .expect("Nyx Assassin must produce a build");
+    let nyx_step0_id = nyx_base.steps[0].item_id;
+    let nyx_variant_id = nyx_base
+        .steps
+        .iter()
+        .find_map(|s| s.variants.first().map(|v| v.item_id));
+    let nyx_start_id = nyx_base.starting_items.first().copied();
+    let nyx_opt_id = nyx_base.optional_items.first().map(|o| o.item_id);
+    session.build_view_hero = None;
+
+    let mut owned_ids: Vec<ItemId> = vec![am_step0_id, nyx_step0_id];
+    if let Some(vid) = nyx_variant_id {
+        owned_ids.push(vid);
+    }
+    if let Some(sid) = nyx_start_id {
+        owned_ids.push(sid);
+    }
+    if let Some(oid) = nyx_opt_id {
+        owned_ids.push(oid);
+    }
+    let to_slugs = |s: &AppSession, ids: &[ItemId]| -> Vec<String> {
+        ids.iter()
+            .filter_map(|id| {
+                s.item_repo
+                    .item_catalog(*id)
+                    .map(|e| format!("item_{}", e.slug))
+            })
+            .collect()
+    };
+
+    let mixed_slugs = to_slugs(&session, &owned_ids);
+    session.apply_event(DraftEvent::InventoryUpdated {
+        hero_slug: Some("antimage".into()),
+        item_slugs: mixed_slugs,
+    });
+    assert_eq!(session.owned_items_owner, Some(HeroId(1)));
+    assert!(session.compute_recommended_build().unwrap().steps[0].owned);
+
+    // 1. Identity event for Hero B (Nyx) arrives WITHOUT a new InventoryUpdated:
+    // Nyx must NOT inherit Anti-Mage's stored purchases or advance [NEXT].
+    session.apply_event(DraftEvent::LocalPlayerHeroDetected {
+        hero_slug: "nyx_assassin".into(),
+    });
+    assert_eq!(session.local_player_hero, Some(HeroId(88)));
+    assert_eq!(
+        session.active_build_hero().map(|(h, _)| h),
+        Some(HeroId(88))
+    );
+    assert!(
+        session.active_build_owned_items().is_empty(),
+        "Hero B must not inherit Hero A's stored inventory after LocalPlayerHeroDetected without InventoryUpdated"
+    );
+    let nyx_before_inv = session.compute_recommended_build().unwrap();
+    assert!(
+        nyx_before_inv
+            .steps
+            .iter()
+            .all(|s| !s.owned && s.owned_components == 0),
+        "Hero B build steps must stay unowned before Hero B's InventoryUpdated: {:?}",
+        nyx_before_inv.steps
+    );
+    assert_eq!(nyx_before_inv.next_unowned_index, Some(0));
+    assert!(
+        nyx_before_inv.optional_items.iter().all(|o| !o.owned),
+        "Hero B optional items must stay unowned before Hero B's InventoryUpdated"
+    );
+
+    // Once Nyx's own InventoryUpdated arrives, Nyx becomes the owner and marks its item owned.
+    let nyx_slug = to_slugs(&session, &[nyx_step0_id]);
+    session.apply_event(DraftEvent::InventoryUpdated {
+        hero_slug: Some("nyx_assassin".into()),
+        item_slugs: nyx_slug,
+    });
+    assert_eq!(session.owned_items_owner, Some(HeroId(88)));
+    let nyx_after_inv = session.compute_recommended_build().unwrap();
+    assert!(nyx_after_inv.steps[0].owned);
+    assert_ne!(nyx_after_inv.next_unowned_index, Some(0));
+
+    // 2. PlayerHeroMapped path: account links and emits Hero A (Anti-Mage) WITHOUT InventoryUpdated:
+    // Anti-Mage must NOT inherit Nyx's stored purchases either.
+    session.set_account_id(Some(4242), true);
+    session.apply_event(DraftEvent::PlayerHeroMapped {
+        steam32: 4242,
+        faction: Faction::Radiant,
+        hero_slug: "antimage".into(),
+    });
+    assert_eq!(session.local_player_hero, Some(HeroId(1)));
+    assert_eq!(session.active_build_hero().map(|(h, _)| h), Some(HeroId(1)));
+    assert!(
+        session.active_build_owned_items().is_empty(),
+        "PlayerHeroMapped identity switch without InventoryUpdated must not inherit previous hero's inventory"
+    );
+    let am_after_map = session.compute_recommended_build().unwrap();
+    assert!(
+        am_after_map
+            .steps
+            .iter()
+            .all(|s| !s.owned && s.owned_components == 0),
+        "Anti-Mage steps must stay unowned until fresh InventoryUpdated arrives: {:?}",
+        am_after_map.steps
+    );
+    assert_eq!(am_after_map.next_unowned_index, Some(0));
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn gsi_queue_coalescing_and_overflow_never_assign_previous_hero_inventory_to_next_hero() {
+    use truesight_adapters::gsi::{BoundedDraftQueue, parse_gsi_json_events};
+    use truesight_core::domain::{HeroId, ItemId};
+    use truesight_core::ports::ItemMetaRepository;
+
+    // 1. Live queue coalescing: Anti-Mage with Magic Wand -> Nyx Assassin without items before poll.
+    let mut session = AppSession::new().unwrap();
+    let queue = BoundedDraftQueue::new(16);
+
+    let am_with_wand = r#"{
+        "map": { "game_state": "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS", "clock_time": 600 },
+        "player": { "team_name": "radiant" },
+        "hero": { "name": "npc_dota_hero_antimage" },
+        "items": { "slot0": { "name": "item_magic_wand" } }
+    }"#;
+    let nyx_without_items = r#"{
+        "map": { "game_state": "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS", "clock_time": 601 },
+        "player": { "team_name": "radiant" },
+        "hero": { "name": "npc_dota_hero_nyx_assassin" }
+    }"#;
+
+    assert!(queue.record_and_push_gsi_events(parse_gsi_json_events(am_with_wand)));
+    assert!(queue.record_and_push_gsi_events(parse_gsi_json_events(nyx_without_items)));
+
+    for ev in queue.drain_and_reconcile_gsi() {
+        session.apply_event(ev);
+    }
+
+    assert_eq!(session.local_player_hero, Some(HeroId(88)));
+    assert_eq!(
+        session.active_build_hero().map(|(h, _)| h),
+        Some(HeroId(88))
+    );
+    assert!(
+        session.active_build_owned_items().is_empty(),
+        "queued coalescing from Anti-Mage + wand -> Nyx without items must not assign Anti-Mage's wand to Nyx"
+    );
+    let nyx_before = session.compute_recommended_build().unwrap();
+    assert!(
+        nyx_before
+            .steps
+            .iter()
+            .all(|s| !s.owned && s.owned_components == 0),
+        "Nyx build steps must stay unowned when previous queued hero's items were discarded: {:?}",
+        nyx_before.steps
+    );
+    assert_eq!(nyx_before.next_unowned_index, Some(0));
+    assert!(nyx_before.optional_items.iter().all(|o| !o.owned));
+
+    // Fresh inventory for Nyx arrives through the queue and applies normally.
+    let nyx_step0_id = nyx_before.steps[0].item_id;
+    let nyx_step0_slug = session
+        .item_repo
+        .item_catalog(nyx_step0_id)
+        .expect("Nyx step0 item must exist in catalog")
+        .slug;
+    let nyx_with_own_item = format!(
+        r#"{{
+            "map": {{ "game_state": "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS", "clock_time": 605 }},
+            "player": {{ "team_name": "radiant" }},
+            "hero": {{ "name": "npc_dota_hero_nyx_assassin" }},
+            "items": {{ "slot0": {{ "name": "item_{nyx_step0_slug}" }} }}
+        }}"#
+    );
+    assert!(queue.record_and_push_gsi_events(parse_gsi_json_events(&nyx_with_own_item)));
+    for ev in queue.drain_and_reconcile_gsi() {
+        session.apply_event(ev);
+    }
+    assert_eq!(session.owned_items_owner, Some(HeroId(88)));
+    assert_eq!(session.active_build_owned_items(), &[nyx_step0_id]);
+    let nyx_after = session.compute_recommended_build().unwrap();
+    assert!(nyx_after.steps[0].owned);
+    assert_ne!(nyx_after.next_unowned_index, Some(0));
+
+    // 2. Overflow recovery path: Axe with Blink Dagger -> overflowed Earthshaker without items.
+    let mut overflow_session = AppSession::new().unwrap();
+    let small_queue = BoundedDraftQueue::new(3);
+    let axe_with_blink = r#"{
+        "map": { "game_state": "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS", "clock_time": 900 },
+        "player": { "team_name": "radiant" },
+        "hero": { "name": "npc_dota_hero_axe" },
+        "items": { "slot0": { "name": "item_blink" } },
+        "draft": { "team2": { "ban0_id": 3, "ban1_id": 4, "ban2_id": 6, "ban3_id": 7 } }
+    }"#;
+    let es_without_items = r#"{
+        "map": { "game_state": "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS", "clock_time": 902 },
+        "player": { "team_name": "radiant" },
+        "hero": { "name": "npc_dota_hero_earthshaker" }
+    }"#;
+    assert!(small_queue.record_and_push_gsi_events(parse_gsi_json_events(axe_with_blink)));
+    assert!(small_queue.record_and_push_gsi_events(parse_gsi_json_events(es_without_items)));
+
+    for ev in small_queue.drain_and_reconcile_gsi() {
+        overflow_session.apply_event(ev);
+    }
+    let q_stats = small_queue.stats();
+    assert!(
+        q_stats.dropped > 0 && q_stats.recovered_resyncs == 1,
+        "expected overflow reconciliation to run: {q_stats:?}"
+    );
+    let es_id = overflow_session.find_hero("earthshaker").unwrap();
+    assert_eq!(overflow_session.local_player_hero, Some(es_id));
+    assert!(
+        overflow_session.active_build_owned_items().is_empty(),
+        "overflow recovery must not replay Axe's Blink Dagger onto Earthshaker"
+    );
+    let es_before = overflow_session.compute_recommended_build().unwrap();
+    assert!(
+        es_before
+            .steps
+            .iter()
+            .all(|s| !s.owned && s.owned_components == 0),
+        "Earthshaker steps must stay unowned after overflow resync: {:?}",
+        es_before.steps
+    );
+
+    // Fresh Blink Dagger event for Earthshaker applies cleanly after overflow recovery.
+    let es_with_blink = r#"{
+        "map": { "game_state": "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS", "clock_time": 910 },
+        "player": { "team_name": "radiant" },
+        "hero": { "name": "npc_dota_hero_earthshaker" },
+        "items": { "slot0": { "name": "item_blink" } }
+    }"#;
+    assert!(small_queue.record_and_push_gsi_events(parse_gsi_json_events(es_with_blink)));
+    for ev in small_queue.drain_and_reconcile_gsi() {
+        overflow_session.apply_event(ev);
+    }
+    assert_eq!(overflow_session.owned_items_owner, Some(es_id));
+    assert_eq!(overflow_session.active_build_owned_items(), &[ItemId(1)]);
+}
+
+#[test]
+fn gsi_queue_preserves_items_only_update_when_same_hero_identity_repeats() {
+    use truesight_adapters::gsi::{BoundedDraftQueue, parse_gsi_json_events};
+    use truesight_core::domain::HeroId;
+
+    let mut session = AppSession::new().unwrap();
+    let wand_id = session
+        .item_repo
+        .item_by_slug("magic_wand")
+        .expect("magic_wand must exist in catalog")
+        .id;
+    let queue = BoundedDraftQueue::new(16);
+
+    // 1. Confirm Anti-Mage and drain the queue.
+    let am_initial = r#"{
+        "map": { "game_state": "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS", "clock_time": 400 },
+        "player": { "team_name": "radiant" },
+        "hero": { "name": "npc_dota_hero_antimage" }
+    }"#;
+    assert!(queue.record_and_push_gsi_events(parse_gsi_json_events(am_initial)));
+    for ev in queue.drain_and_reconcile_gsi() {
+        session.apply_event(ev);
+    }
+    assert_eq!(session.local_player_hero, Some(HeroId(1)));
+
+    // 2. Push items-only payload (no "hero" field), followed before drain by repeated Anti-Mage identity without items.
+    let items_only_wand = r#"{
+        "player": { "team_name": "radiant" },
+        "items": { "slot0": { "name": "item_magic_wand" } }
+    }"#;
+    let am_repeated_no_items = r#"{
+        "map": { "game_state": "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS", "clock_time": 405 },
+        "player": { "team_name": "radiant" },
+        "hero": { "name": "npc_dota_hero_antimage" }
+    }"#;
+    assert!(queue.record_and_push_gsi_events(parse_gsi_json_events(items_only_wand)));
+    assert!(queue.record_and_push_gsi_events(parse_gsi_json_events(am_repeated_no_items)));
+
+    for ev in queue.drain_and_reconcile_gsi() {
+        session.apply_event(ev);
+    }
+
+    assert_eq!(session.local_player_hero, Some(HeroId(1)));
+    assert_eq!(session.owned_items_owner, Some(HeroId(1)));
+    assert!(
+        session.active_build_owned_items().contains(&wand_id),
+        "repeated same-hero identity without items must preserve prior items-only update in queue: {:?}",
+        session.active_build_owned_items()
+    );
+}
+
+#[test]
+fn gsi_overflow_reconcile_emits_hero_identity_before_fresh_inventory() {
+    use truesight_adapters::gsi::{BoundedDraftQueue, GSI_QUEUE_CAPACITY, parse_gsi_json_events};
+    use truesight_core::domain::HeroId;
+    use truesight_core::ports::DraftEvent;
+
+    let mut session = AppSession::new().unwrap();
+    let wand_id = session
+        .item_repo
+        .item_by_slug("magic_wand")
+        .expect("magic_wand must exist in catalog")
+        .id;
+    let queue = BoundedDraftQueue::new(GSI_QUEUE_CAPACITY);
+
+    // 1. Confirm Anti-Mage first and drain.
+    let am_confirm = r#"{
+        "player": {},
+        "hero": { "name": "npc_dota_hero_antimage" }
+    }"#;
+    assert!(queue.record_and_push_gsi_events(parse_gsi_json_events(am_confirm)));
+    for ev in queue.drain_and_reconcile_gsi() {
+        session.apply_event(ev);
+    }
+    assert_eq!(session.local_player_hero, Some(HeroId(1)));
+
+    // 2. Queue Nyx + Magic Wand (2 events), fill remaining 14 slots with bans, then send critical FactionDetected
+    // to evict Nyx's identity from index 0 while leaving Magic Wand queued.
+    let nyx_with_wand = r#"{
+        "player": {},
+        "hero": { "name": "npc_dota_hero_nyx_assassin" },
+        "items": { "slot0": { "name": "item_magic_wand" } }
+    }"#;
+    let fourteen_bans = r#"{
+        "draft": {
+            "team2": { "ban0_id": 3, "ban1_id": 4, "ban2_id": 6, "ban3_id": 7, "ban4_id": 8, "ban5_id": 9, "ban6_id": 10 },
+            "team3": { "ban0_id": 11, "ban1_id": 12, "ban2_id": 14, "ban3_id": 15, "ban4_id": 16, "ban5_id": 18, "ban6_id": 19 }
+        }
+    }"#;
+    let critical_faction = r#"{
+        "player": { "team_name": "dire" }
+    }"#;
+    assert!(queue.record_and_push_gsi_events(parse_gsi_json_events(nyx_with_wand)));
+    assert!(queue.record_and_push_gsi_events(parse_gsi_json_events(fourteen_bans)));
+    assert!(queue.record_and_push_gsi_events(parse_gsi_json_events(critical_faction)));
+
+    let reconciled = queue.drain_and_reconcile_gsi();
+    let id_pos = reconciled
+        .iter()
+        .position(|e| {
+            matches!(
+                e,
+                DraftEvent::LocalPlayerHeroDetected { hero_slug }
+                    if hero_slug == "npc_dota_hero_nyx_assassin"
+            )
+        })
+        .expect("reconciled batch must include Nyx identity");
+    let inv_pos = reconciled
+        .iter()
+        .position(|e| {
+            matches!(
+                e,
+                DraftEvent::InventoryUpdated {
+                    hero_slug: Some(slug),
+                    ..
+                } if slug == "npc_dota_hero_nyx_assassin"
+            )
+        })
+        .expect("reconciled batch must include Nyx inventory");
+    assert!(
+        id_pos < inv_pos,
+        "reconciled batch must emit Nyx identity ({id_pos}) before Nyx inventory ({inv_pos}): {reconciled:?}"
+    );
+
+    for ev in reconciled {
+        session.apply_event(ev);
+    }
+    assert_eq!(session.local_player_hero, Some(HeroId(88)));
+    assert_eq!(session.owned_items_owner, Some(HeroId(88)));
+    assert!(
+        session.active_build_owned_items().contains(&wand_id),
+        "Nyx must retain Magic Wand after overflow reconciliation: {:?}",
+        session.active_build_owned_items()
+    );
 }

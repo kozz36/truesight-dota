@@ -5,6 +5,7 @@ mod matrix_card;
 mod onboarding;
 mod oracle_card;
 mod overlay;
+mod overlay_build;
 mod suggested_table;
 mod team_card;
 #[cfg(test)]
@@ -88,6 +89,7 @@ pub struct TrueSightGuiApp {
     pub(super) overlay_drag_armed: Option<egui::Pos2>,
     pub(super) overlay_resize_armed: Option<egui::Pos2>,
     pub(super) overlay_wm_gesture_cooldown: u8,
+    pub(super) last_overlay_is_post_draft: Option<bool>,
     hotkey_listener: Option<hotkey::GlobalHotkeyListener>,
 }
 
@@ -154,6 +156,7 @@ impl TrueSightGuiApp {
             overlay_drag_armed: None,
             overlay_resize_armed: None,
             overlay_wm_gesture_cooldown: 0,
+            last_overlay_is_post_draft: None,
             hotkey_listener: None,
         }
     }
@@ -605,8 +608,38 @@ impl TrueSightGuiApp {
 
         if self.session.overlay_mode {
             let overlay_id = egui::ViewportId::from_hash_of("truesight_compact_overlay");
-            let builder = overlay::build_overlay_viewport_builder(self.session.overlay_geometry);
+            let is_post_draft = self.session.is_post_draft_build_view();
+            let target_geom = self.session.active_overlay_geometry();
+            let builder = overlay::build_overlay_viewport_builder(target_geom, is_post_draft);
             ctx.show_viewport_immediate(overlay_id, builder, |vctx, _class| {
+                if self
+                    .last_overlay_is_post_draft
+                    .is_some_and(|prev| prev != is_post_draft)
+                {
+                    self.overlay_wm_gesture_cooldown = 2;
+                    let min_sz = if is_post_draft {
+                        vec2(220.0, 104.0)
+                    } else {
+                        vec2(280.0, 160.0)
+                    };
+                    vctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(min_sz));
+                    vctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(
+                        target_geom.width,
+                        target_geom.height,
+                    )));
+                    let has_pos = vctx.input(|i| {
+                        let vp = i.viewport();
+                        vp.outer_rect.is_some() || vp.inner_rect.is_some()
+                    });
+                    if has_pos {
+                        vctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
+                            target_geom.x,
+                            target_geom.y,
+                        )));
+                    }
+                }
+                self.last_overlay_is_post_draft = Some(is_post_draft);
+
                 if !f8_root && Self::is_non_repeating_key_pressed(vctx, egui::Key::F8) {
                     self.session.set_overlay_mode(false);
                     ctx.request_repaint();
@@ -645,6 +678,7 @@ impl TrueSightGuiApp {
             self.overlay_drag_armed = None;
             self.overlay_resize_armed = None;
             self.overlay_wm_gesture_cooldown = 0;
+            self.last_overlay_is_post_draft = None;
         }
 
         rects

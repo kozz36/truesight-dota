@@ -106,13 +106,14 @@ fn parse_gsi_events_from_root(root: &JsonVal) -> Vec<DraftEvent> {
         {
             events.push(DraftEvent::FactionDetected { faction: f });
         }
-        if let Some(slug) = hero_node_opt
+        let local_hero_slug = hero_node_opt
             .and_then(|hs| hs.get("name"))
             .and_then(JsonVal::as_str)
             .filter(|s| s.starts_with("npc_dota_hero_"))
-        {
+            .map(ToOwned::to_owned);
+        if let Some(ref slug) = local_hero_slug {
             events.push(DraftEvent::LocalPlayerHeroDetected {
-                hero_slug: slug.to_string(),
+                hero_slug: slug.clone(),
             });
         }
         if let Some(items_node) = root.get("items") {
@@ -159,7 +160,10 @@ fn parse_gsi_events_from_root(root: &JsonVal) -> Vec<DraftEvent> {
                     }
                 }
                 if saw_recognized_slot {
-                    events.push(DraftEvent::InventoryUpdated { item_slugs });
+                    events.push(DraftEvent::InventoryUpdated {
+                        hero_slug: local_hero_slug,
+                        item_slugs,
+                    });
                 }
             }
         }
@@ -501,7 +505,7 @@ struct GsiStateSnapshot {
     latest_player_mappings: Vec<(u64, Faction, String)>,
     latest_picks: [SideSlotPicks; 2],
     latest_bans: Vec<HeroId>,
-    latest_inventory: Option<Vec<String>>,
+    latest_inventory: Option<(Option<String>, Vec<String>)>,
 }
 
 impl GsiStateSnapshot {
@@ -536,6 +540,13 @@ impl GsiStateSnapshot {
                 false
             }
             DraftEvent::LocalPlayerHeroDetected { hero_slug } => {
+                if self
+                    .latest_inventory
+                    .as_ref()
+                    .is_some_and(|(owner, _)| owner.as_deref() != Some(hero_slug.as_str()))
+                {
+                    self.latest_inventory = None;
+                }
                 self.latest_local_hero = Some(hero_slug.clone());
                 false
             }
@@ -572,8 +583,18 @@ impl GsiStateSnapshot {
                 self.latest_bans.push(*hero_id);
                 false
             }
-            DraftEvent::InventoryUpdated { item_slugs } => {
-                self.latest_inventory = Some(item_slugs.clone());
+            DraftEvent::InventoryUpdated {
+                hero_slug,
+                item_slugs,
+            } => {
+                if hero_slug.is_some()
+                    && self.latest_local_hero.is_some()
+                    && hero_slug.as_deref() != self.latest_local_hero.as_deref()
+                {
+                    return false;
+                }
+                let owner = hero_slug.clone().or_else(|| self.latest_local_hero.clone());
+                self.latest_inventory = Some((owner, item_slugs.clone()));
                 false
             }
             _ => false,
@@ -645,13 +666,21 @@ impl GsiStateSnapshot {
                 }
             }
         }
-        if let Some(ref item_slugs) = self.latest_inventory {
-            upsert(
-                out,
-                DraftEvent::InventoryUpdated {
+        // Remove any prior queued InventoryUpdated before replaying the snapshot inventory after
+        // LocalPlayerHeroDetected so fresh items always land under the reconciled hero identity.
+        out.retain(|e| !matches!(e, DraftEvent::InventoryUpdated { .. }));
+        if let Some((ref inv_hero, ref item_slugs)) = self.latest_inventory {
+            let matches_local = match (&self.latest_local_hero, inv_hero) {
+                (Some(local), Some(inv)) => local == inv,
+                (Some(_), None) => false,
+                (None, _) => true,
+            };
+            if matches_local {
+                out.push(DraftEvent::InventoryUpdated {
+                    hero_slug: inv_hero.clone(),
                     item_slugs: item_slugs.clone(),
-                },
-            );
+                });
+            }
         }
         if let Some((ref state_name, game_time_secs)) = self.latest_game_state {
             upsert(
@@ -738,6 +767,33 @@ impl BoundedDraftQueue {
         if poll_seq != g.epoch {
             return true;
         }
+        if let DraftEvent::LocalPlayerHeroDetected {
+            hero_slug: ref new_hero,
+        } = ev
+        {
+            g.queue.retain(|queued| {
+                !matches!(
+                    queued,
+                    DraftEvent::InventoryUpdated { hero_slug, .. }
+                        if hero_slug.as_deref() != Some(new_hero.as_str())
+                )
+            });
+        } else if let DraftEvent::InventoryUpdated {
+            hero_slug: Some(ref inv_hero),
+            ..
+        } = ev
+        {
+            let stale_for_queued_hero = g.queue.iter().any(|queued| {
+                matches!(
+                    queued,
+                    DraftEvent::LocalPlayerHeroDetected { hero_slug }
+                        if hero_slug != inv_hero
+                )
+            });
+            if stale_for_queued_hero {
+                return true;
+            }
+        }
         g.stats.enqueued += 1;
         if let Some(pos) = g.queue.iter().position(|old| should_coalesce(old, &ev)) {
             g.queue[pos] = ev;
@@ -774,7 +830,14 @@ impl BoundedDraftQueue {
 
     pub fn record_and_push_gsi_events(&self, events: Vec<DraftEvent>) -> bool {
         let mut g = self.lock_inner();
-        for ev in events {
+        for mut ev in events {
+            if let DraftEvent::InventoryUpdated {
+                ref mut hero_slug, ..
+            } = ev
+                && hero_slug.is_none()
+            {
+                *hero_slug = g.gsi_snapshot.latest_local_hero.clone();
+            }
             if g.gsi_snapshot.apply_event(&ev) {
                 g.queue.retain(|queued| {
                     matches!(

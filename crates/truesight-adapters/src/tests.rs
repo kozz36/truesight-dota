@@ -5070,6 +5070,7 @@ fn gsi_parser_extracts_local_player_items_ignores_empty_and_coalesces_in_queue()
     let events = parse_gsi_json_events(local_payload);
     assert!(
         events.contains(&DraftEvent::InventoryUpdated {
+            hero_slug: Some("npc_dota_hero_antimage".to_string()),
             item_slugs: vec![
                 "bfury".to_string(),
                 "power_treads".to_string(),
@@ -5083,7 +5084,8 @@ fn gsi_parser_extracts_local_player_items_ignores_empty_and_coalesces_in_queue()
     );
     assert!(
         !events.iter().any(|ev| match ev {
-            DraftEvent::InventoryUpdated { item_slugs } => item_slugs.iter().any(|s| s == "rapier"),
+            DraftEvent::InventoryUpdated { item_slugs, .. } =>
+                item_slugs.iter().any(|s| s == "rapier"),
             _ => false,
         }),
         "must never parse allplayers inventories"
@@ -5100,6 +5102,7 @@ fn gsi_parser_extracts_local_player_items_ignores_empty_and_coalesces_in_queue()
     let empty_events = parse_gsi_json_events(all_empty_payload);
     assert!(
         empty_events.contains(&DraftEvent::InventoryUpdated {
+            hero_slug: None,
             item_slugs: Vec::new(),
         }),
         "all-empty recognized slots must still emit empty InventoryUpdated: {empty_events:?}"
@@ -5119,18 +5122,21 @@ fn gsi_parser_extracts_local_player_items_ignores_empty_and_coalesces_in_queue()
     assert!(queue.push_for_epoch(
         0,
         DraftEvent::InventoryUpdated {
+            hero_slug: Some("npc_dota_hero_antimage".to_string()),
             item_slugs: vec!["bfury".to_string()],
         },
     ));
     assert!(queue.push_for_epoch(
         0,
         DraftEvent::InventoryUpdated {
+            hero_slug: Some("npc_dota_hero_antimage".to_string()),
             item_slugs: vec!["bfury".to_string(), "manta".to_string()],
         },
     ));
     assert!(queue.push_for_epoch(
         0,
         DraftEvent::InventoryUpdated {
+            hero_slug: Some("npc_dota_hero_antimage".to_string()),
             item_slugs: vec![
                 "bfury".to_string(),
                 "manta".to_string(),
@@ -5148,12 +5154,33 @@ fn gsi_parser_extracts_local_player_items_ignores_empty_and_coalesces_in_queue()
     }));
     assert!(drained.contains(&DraftEvent::DraftReset));
     assert!(drained.contains(&DraftEvent::InventoryUpdated {
+        hero_slug: Some("npc_dota_hero_antimage".to_string()),
         item_slugs: vec![
             "bfury".to_string(),
             "manta".to_string(),
             "skadi".to_string(),
         ],
     }));
+
+    // Hero change without new items must evict stale queued inventory and overflow snapshot.
+    let gsi_queue = BoundedDraftQueue::new(16);
+    assert!(gsi_queue.record_and_push_gsi_events(parse_gsi_json_events(local_payload)));
+    let next_hero_no_items = r#"{
+        "map": { "game_state": "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS", "clock_time": 905 },
+        "player": { "steamid": "76561198000000001", "team_name": "radiant" },
+        "hero": { "name": "npc_dota_hero_nyx_assassin" }
+    }"#;
+    assert!(gsi_queue.record_and_push_gsi_events(parse_gsi_json_events(next_hero_no_items)));
+    let reconciled = gsi_queue.drain_and_reconcile_gsi();
+    assert!(reconciled.contains(&DraftEvent::LocalPlayerHeroDetected {
+        hero_slug: "npc_dota_hero_nyx_assassin".to_string(),
+    }));
+    assert!(
+        !reconciled
+            .iter()
+            .any(|ev| matches!(ev, DraftEvent::InventoryUpdated { .. })),
+        "switching queued local hero without items must evict prior hero inventory: {reconciled:?}"
+    );
 }
 
 #[test]
@@ -5803,6 +5830,10 @@ fn embedded_item_atlas_decodes_all_embedded_catalog_items() {
     assert_eq!(atlas.item_height, 32);
     let ids = crate::item_repo::embedded_item_ids();
     assert!(!ids.is_empty());
+    assert!(
+        ids.len() >= 150,
+        "expanded catalog should cover at least 150 items"
+    );
     assert_eq!(atlas.items.len(), ids.len());
     for id in ids {
         let rgb = atlas
@@ -5811,4 +5842,171 @@ fn embedded_item_atlas_decodes_all_embedded_catalog_items() {
             .unwrap_or_else(|| panic!("missing embedded icon for item {:?}", id));
         assert_eq!(rgb.len(), 44 * 32 * 3);
     }
+}
+
+#[test]
+fn opendota_item_timings_aggregates_weighted_times_and_item_popularity_parses_phases() {
+    use crate::item_repo::SeededItemMetaRepository;
+    use crate::sync::{parse_opendota_item_popularity_json, parse_opendota_item_timings_json};
+    use truesight_core::domain::{Bracket, HeroId, HeroItemStat, ItemId, ItemPhase, Role};
+    use truesight_core::ports::ItemMetaRepository;
+
+    let repo = SeededItemMetaRepository::default();
+    let multi_bucket_timings = r#"[
+        {"hero_id": 88, "item": "arcane_boots", "time": 420, "games": "60", "wins": "36"},
+        {"hero_id": 88, "item": "arcane_boots", "time": 720, "games": "40", "wins": "22"}
+    ]"#;
+    let parsed_timings = parse_opendota_item_timings_json(multi_bucket_timings, &repo);
+    assert_eq!(parsed_timings.len(), 1);
+    assert_eq!(parsed_timings[0].item_id, ItemId(180));
+    assert_eq!(parsed_timings[0].match_count, 100);
+    assert_eq!(parsed_timings[0].win_count, 58);
+    // Weighted average: (60 * 7m + 40 * 12m) / 100 = 9.0m
+    assert!((parsed_timings[0].avg_time_mins - 9.0).abs() < 0.05);
+    assert_eq!(parsed_timings[0].phase, ItemPhase::Early);
+
+    let pop_json = r#"{
+        "start_game_items": {"44": 90, "34": 60, "38": 75, "9999": 40, "4204": 50},
+        "early_game_items": {"180": 80, "46": 190, "44": 150, "40": 140, "38": 120, "8": 210, "69": 180, "9999": 110},
+        "mid_game_items": {"1107": 45, "104": 30, "30": 95, "43": 85, "90": 70, "24": 300, "51": 280, "52": 260, "53": 240},
+        "late_game_items": {"108": 25}
+    }"#;
+    let pop_stats = parse_opendota_item_popularity_json(pop_json, &repo);
+    assert!(
+        pop_stats
+            .iter()
+            .any(|s| s.item_id == ItemId(44) && s.phase == ItemPhase::Starting)
+    );
+    assert!(
+        pop_stats
+            .iter()
+            .any(|s| s.item_id == ItemId(38) && s.phase == ItemPhase::Starting),
+        "Clarity (38) must be accepted in Starting"
+    );
+    for forbidden_id in [4204_u16, 9999, 46, 30, 40, 43, 90, 8, 24, 51, 52, 53, 69] {
+        assert!(
+            !pop_stats.iter().any(|s| s.item_id == ItemId(forbidden_id)),
+            "uncataloged/consumable/detection/counter/component item {forbidden_id} must be excluded from itemPopularity"
+        );
+    }
+    assert!(
+        !pop_stats
+            .iter()
+            .any(|s| matches!(s.item_id.0, 44 | 38) && s.phase != ItemPhase::Starting),
+        "lane consumables (Tango/Clarity) must never leak into Early/Core/Late from itemPopularity"
+    );
+
+    // Cached STRATZ custom_hero_stats with raw Secret Shop / Basic components must filter them
+    // out of Early/Core/Late while keeping standalone Blink (1)/Shard (609) & completed items.
+    let mut custom_repo = SeededItemMetaRepository::default();
+    custom_repo.custom_hero_stats.push((
+        HeroId(41),
+        None,
+        None,
+        vec![
+            HeroItemStat {
+                item_id: ItemId(24), // Ultimate Orb
+                phase: ItemPhase::Late,
+                avg_time_mins: 26.5,
+                match_count: 67,
+                win_count: 54,
+            },
+            HeroItemStat {
+                item_id: ItemId(51), // Demon Edge
+                phase: ItemPhase::Core,
+                avg_time_mins: 24.2,
+                match_count: 63,
+                win_count: 40,
+            },
+            HeroItemStat {
+                item_id: ItemId(69), // Perseverance
+                phase: ItemPhase::Early,
+                avg_time_mins: 11.0,
+                match_count: 380,
+                win_count: 190,
+            },
+            HeroItemStat {
+                item_id: ItemId(1), // Blink Dagger (standalone allowed)
+                phase: ItemPhase::Core,
+                avg_time_mins: 18.0,
+                match_count: 120,
+                win_count: 70,
+            },
+            HeroItemStat {
+                item_id: ItemId(609), // Aghanim's Shard (standalone allowed)
+                phase: ItemPhase::Core,
+                avg_time_mins: 20.0,
+                match_count: 200,
+                win_count: 130,
+            },
+            HeroItemStat {
+                item_id: ItemId(145), // Battle Fury (completed)
+                phase: ItemPhase::Core,
+                avg_time_mins: 17.4,
+                match_count: 359,
+                win_count: 165,
+            },
+            HeroItemStat {
+                item_id: ItemId(147), // Manta Style (completed)
+                phase: ItemPhase::Core,
+                avg_time_mins: 23.0,
+                match_count: 293,
+                win_count: 152,
+            },
+        ],
+    ));
+    let void_stats = custom_repo
+        .hero_item_stats(HeroId(41), Role::Carry, Bracket::Ancient)
+        .unwrap();
+    for raw_id in [24_u16, 51, 69] {
+        assert!(
+            void_stats.iter().all(|s| s.item_id != ItemId(raw_id)),
+            "raw component #{raw_id} must be filtered from cached Void progression: {void_stats:?}"
+        );
+    }
+    for kept_id in [1_u16, 609, 145, 147] {
+        assert!(
+            void_stats.iter().any(|s| s.item_id == ItemId(kept_id)),
+            "standalone/completed item #{kept_id} must stay in cached Void progression"
+        );
+    }
+    assert!(
+        pop_stats
+            .iter()
+            .any(|s| s.item_id == ItemId(1107) && s.phase == ItemPhase::Core)
+    );
+    assert!(
+        pop_stats
+            .iter()
+            .any(|s| s.item_id == ItemId(108) && s.phase == ItemPhase::Late)
+    );
+
+    // Curated hero-specific progressions and role-filtered situational items:
+    let nyx_pos4 = repo
+        .hero_item_stats(HeroId(88), Role::SoftSupport, Bracket::Ancient)
+        .unwrap();
+    assert!(
+        nyx_pos4
+            .iter()
+            .any(|s| s.item_id == ItemId(1107) && s.phase == ItemPhase::Core)
+    );
+    assert!(
+        nyx_pos4
+            .iter()
+            .all(|s| s.item_id != ItemId(90) && s.item_id != ItemId(145))
+    );
+
+    let troll_pos1 = repo
+        .hero_item_stats(HeroId(95), Role::Carry, Bracket::Ancient)
+        .unwrap();
+    assert!(
+        troll_pos1
+            .iter()
+            .any(|s| s.item_id == ItemId(145) && s.phase == ItemPhase::Core)
+    );
+    assert!(
+        troll_pos1
+            .iter()
+            .all(|s| s.item_id != ItemId(30) && s.item_id != ItemId(90))
+    );
 }
