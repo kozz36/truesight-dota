@@ -3,6 +3,27 @@ use super::{
     run_cli_loop, spawn_input_reader,
 };
 
+fn wait_for_sync_until<F>(session: &mut AppSession, mut ready: F)
+where
+    F: FnMut() -> bool,
+{
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        session.poll_live_sources(None, None);
+        if !session.sync_in_flight && ready() {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+fn wait_for_sync_idle(session: &mut AppSession) {
+    wait_for_sync_until(session, || true);
+}
+
 #[test]
 fn interactive_commands_update_5v5_table_and_recommendations() {
     use truesight_adapters::sync::LocalCacheManager;
@@ -50,13 +71,7 @@ fn interactive_commands_update_5v5_table_and_recommendations() {
 
     assert!(execute_command(&mut session, "account 76561198061460213").unwrap());
     assert_eq!(session.cache_mgr.player_account_id, Some(101_194_485));
-    for _ in 0..100 {
-        session.poll_live_sources(None, None);
-        if !session.sync_in_flight {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
+    wait_for_sync_idle(&mut session);
     assert!(session.db_status.contains("Player #101194485"));
 
     // Explicit account override must not be overwritten by GSI SteamID
@@ -71,13 +86,7 @@ fn interactive_commands_update_5v5_table_and_recommendations() {
         steam32: 222_333_444,
     });
     assert_eq!(session.cache_mgr.player_account_id, Some(222_333_444));
-    for _ in 0..100 {
-        session.poll_live_sources(None, None);
-        if !session.sync_in_flight {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
+    wait_for_sync_idle(&mut session);
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
 
@@ -306,13 +315,7 @@ fn background_sync_reloads_active_matrix_preserves_model_on_error_and_guards_acc
     session.set_bracket(Bracket::Divine);
     gate_tx.send(()).unwrap();
 
-    for _ in 0..100 {
-        session.poll_live_sources(None, None);
-        if !session.sync_in_flight {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    wait_for_sync_idle(&mut session);
     assert!(!session.sync_in_flight);
     assert_eq!(session.draft.bracket, Bracket::Divine);
     assert!(
@@ -326,13 +329,7 @@ fn background_sync_reloads_active_matrix_preserves_model_on_error_and_guards_acc
 
     // Failed refresh must preserve last valid model and report status clearly
     assert!(session.start_background_sync_with(true, |_, _| Err("network timeout".into())));
-    for _ in 0..100 {
-        session.poll_live_sources(None, None);
-        if !session.sync_in_flight {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    wait_for_sync_idle(&mut session);
     assert!(!session.sync_in_flight);
     assert!(session.matrix.hero(HeroId(1)).unwrap().role_winrates[0] > 0.62);
     assert!(
@@ -1478,13 +1475,7 @@ fn gsi_http_listener_reconciles_full_session_state_after_overflow_when_peer_stop
     );
 
     // Drain any auto-triggered player sync completion before verifying idle poll stability.
-    for _ in 0..100 {
-        if !session.sync_in_flight {
-            break;
-        }
-        let _ = session.poll_live_sources(None, None);
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    wait_for_sync_idle(&mut session);
 
     // 5. Polling again with no traffic must not falsely increment recovered_resyncs
     assert!(!session.poll_live_sources(Some(&mut listener), None));
@@ -1543,13 +1534,7 @@ fn sync_coordinator_serializes_generations_rejects_stale_writes_and_preserves_va
         Ok("Worker 2 newer cache".into())
     }));
 
-    for _ in 0..100 {
-        session.poll_live_sources(None, None);
-        if !session.sync_in_flight {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    wait_for_sync_idle(&mut session);
     assert!(!session.sync_in_flight);
     assert!(session.matrix.hero(HeroId(1)).unwrap().role_winrates[0] > 0.62);
     assert_eq!(session.matrix.hero(HeroId(2)).unwrap().personal_matches, 50);
@@ -2193,7 +2178,6 @@ fn player_account_link_auto_syncs_stale_player_cache_from_gsi_and_cli() {
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
-    use std::time::Duration;
     use truesight_adapters::sync::LocalCacheManager;
     use truesight_core::domain::HeroId;
     use truesight_core::ports::DraftEvent;
@@ -2250,13 +2234,7 @@ fn player_account_link_auto_syncs_stale_player_cache_from_gsi_and_cli() {
         "PlayerSteamIdDetected must start background sync when new account cache is stale"
     );
 
-    for _ in 0..100 {
-        session.poll_live_sources(None, None);
-        if !session.sync_in_flight {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    wait_for_sync_idle(&mut session);
     assert!(!session.sync_in_flight);
     assert_eq!(sync_calls.load(Ordering::SeqCst), 1);
     assert_eq!(
@@ -2289,13 +2267,7 @@ fn player_account_link_auto_syncs_stale_player_cache_from_gsi_and_cli() {
         session.sync_in_flight,
         "CLI account command must start background sync when player cache is stale"
     );
-    for _ in 0..100 {
-        session.poll_live_sources(None, None);
-        if !session.sync_in_flight {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    wait_for_sync_idle(&mut session);
     assert!(!session.sync_in_flight);
     assert_eq!(sync_calls.load(Ordering::SeqCst), 2);
     assert_eq!(session.matrix.hero(HeroId(1)).unwrap().personal_matches, 25);
@@ -2394,13 +2366,7 @@ fn reapplying_same_account_preserves_in_flight_sync_while_switching_cancels_it()
 
     // 3. Release the held first worker and confirm it completes without cancellation and populates Comfort v3.
     gate_tx.send(()).unwrap();
-    for _ in 0..100 {
-        session.poll_live_sources(None, None);
-        if !session.sync_in_flight {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    wait_for_sync_idle(&mut session);
     assert!(!session.sync_in_flight);
     assert!(!first_was_cancelled.load(Ordering::SeqCst));
     assert_eq!(sync_calls.load(Ordering::SeqCst), 1);
@@ -2538,13 +2504,7 @@ fn bracket_auto_selects_from_rank_tier_and_persists_manual_selection() {
         Ok("Synced player profile".to_string())
     });
     assert!(s_sync.start_background_sync(true));
-    for _ in 0..100 {
-        s_sync.poll_live_sources(None, None);
-        if !s_sync.sync_in_flight {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
+    wait_for_sync_idle(&mut s_sync);
     assert_eq!(s_sync.draft.bracket, Bracket::Ancient);
     assert_eq!(s_sync.bracket_config, BracketConfig::Auto);
 
@@ -2585,13 +2545,7 @@ fn bracket_auto_selects_from_rank_tier_and_persists_manual_selection() {
         Ok("Synced lower tier".to_string())
     });
     assert!(restarted.start_background_sync(true));
-    for _ in 0..100 {
-        restarted.poll_live_sources(None, None);
-        if !restarted.sync_in_flight {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
+    wait_for_sync_idle(&mut restarted);
     assert_eq!(restarted.draft.bracket, Bracket::Immortal);
 
     // 4. `bracket auto` CLI command clears explicit override and switches back to cached rank_tier.
@@ -3993,13 +3947,7 @@ fn item_build_refresh_triggers_on_gsi_entry_and_queues_while_sync_in_flight() {
         session.sync_in_flight,
         "GSI transition to PRE_GAME must trigger item refresh for uncached active build hero"
     );
-    for _ in 0..100 {
-        session.poll_live_sources(None, None);
-        if !session.sync_in_flight {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    wait_for_sync_idle(&mut session);
     assert!(!session.sync_in_flight);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert!(
@@ -4039,13 +3987,7 @@ fn item_build_refresh_triggers_on_gsi_entry_and_queues_while_sync_in_flight() {
     assert!(session.is_post_draft_build_view());
     gate_tx.send(()).unwrap();
 
-    for _ in 0..100 {
-        session.poll_live_sources(None, None);
-        if !session.sync_in_flight && calls.load(Ordering::SeqCst) >= 3 {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    wait_for_sync_until(&mut session, || calls.load(Ordering::SeqCst) >= 3);
     assert_eq!(
         calls.load(Ordering::SeqCst),
         3,
@@ -4078,13 +4020,7 @@ fn item_build_refresh_triggers_on_gsi_entry_and_queues_while_sync_in_flight() {
     assert!(session.is_post_draft_build_view());
     gate_tx.send(()).unwrap();
 
-    for _ in 0..100 {
-        session.poll_live_sources(None, None);
-        if !session.sync_in_flight && calls.load(Ordering::SeqCst) >= 5 {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    wait_for_sync_until(&mut session, || calls.load(Ordering::SeqCst) >= 5);
     assert!(!session.sync_in_flight);
     assert_eq!(
         calls.load(Ordering::SeqCst),
@@ -4308,13 +4244,7 @@ fn manual_slot_replacement_in_build_view_requests_or_queues_item_refresh() {
     session.toggle_post_draft_build_view();
     assert!(session.is_post_draft_build_view());
     assert!(session.sync_in_flight);
-    for _ in 0..100 {
-        session.poll_live_sources(None, None);
-        if !session.sync_in_flight {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    wait_for_sync_idle(&mut session);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
     // 1. Replace active slot while Build view is open -> immediate background refresh for Nyx (88).
@@ -4327,13 +4257,7 @@ fn manual_slot_replacement_in_build_view_requests_or_queues_item_refresh() {
         session.sync_in_flight,
         "replacing active build ally in Build view must start background refresh when uncached"
     );
-    for _ in 0..100 {
-        session.poll_live_sources(None, None);
-        if !session.sync_in_flight {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    wait_for_sync_idle(&mut session);
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     assert!(recorded_targets.lock().unwrap()[1].contains(&HeroId(88)));
     let nyx_stats = session
@@ -4365,13 +4289,7 @@ fn manual_slot_replacement_in_build_view_requests_or_queues_item_refresh() {
         "replacing active build ally during an in-flight sync must wait for active sync instead of spawning duplicate"
     );
     gate_tx.send(()).unwrap();
-    for _ in 0..100 {
-        session.poll_live_sources(None, None);
-        if !session.sync_in_flight && calls.load(Ordering::SeqCst) >= 4 {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    wait_for_sync_until(&mut session, || calls.load(Ordering::SeqCst) >= 4);
     assert_eq!(calls.load(Ordering::SeqCst), 4);
     assert!(recorded_targets.lock().unwrap()[3].contains(&HeroId(50)));
 
@@ -4387,13 +4305,7 @@ fn manual_slot_replacement_in_build_view_requests_or_queues_item_refresh() {
         session.sync_in_flight,
         "clearing active slot in Build view must refresh newly fallen-back uncached hero"
     );
-    for _ in 0..100 {
-        session.poll_live_sources(None, None);
-        if !session.sync_in_flight {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    wait_for_sync_idle(&mut session);
     assert_eq!(calls.load(Ordering::SeqCst), 5);
     assert!(recorded_targets.lock().unwrap()[4].contains(&HeroId(121)));
 
@@ -4529,7 +4441,6 @@ fn vision_populating_active_build_hero_in_build_view_triggers_item_refresh() {
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     };
-    use std::time::Duration;
     use truesight_adapters::sync::LocalCacheManager;
     use truesight_core::domain::{Bracket, HeroId, ItemId, Role, Side};
     use truesight_core::ports::{DraftEvent, ItemMetaRepository};
@@ -4595,13 +4506,7 @@ fn vision_populating_active_build_hero_in_build_view_triggers_item_refresh() {
         "vision populating active build hero in Build view must start item refresh"
     );
 
-    for _ in 0..100 {
-        session.poll_live_sources(None, None);
-        if !session.sync_in_flight {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    wait_for_sync_idle(&mut session);
     assert!(!session.sync_in_flight);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert!(recorded_targets.lock().unwrap()[0].contains(&HeroId(88)));
@@ -4705,13 +4610,7 @@ fn unlinking_steam_account_preserves_and_drains_queued_item_refresh() {
     // Open Build view and drain initial sync for Anti-Mage (call #1).
     session.toggle_post_draft_build_view();
     assert!(session.is_post_draft_build_view());
-    for _ in 0..100 {
-        session.poll_live_sources(None, None);
-        if !session.sync_in_flight {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    wait_for_sync_idle(&mut session);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
     // Start a blocked sync (call #2), then replace active ally with uncached Nyx (88) -> queues refresh.
@@ -4735,13 +4634,7 @@ fn unlinking_steam_account_preserves_and_drains_queued_item_refresh() {
 
     // Unblock cancelled sync #2 and wait for the fresh post-unlink sync #3 to complete.
     gate_tx.send(()).unwrap();
-    for _ in 0..100 {
-        session.poll_live_sources(None, None);
-        if !session.sync_in_flight && calls.load(Ordering::SeqCst) >= 3 {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    wait_for_sync_until(&mut session, || calls.load(Ordering::SeqCst) >= 3);
     assert!(!session.sync_in_flight);
     assert_eq!(calls.load(Ordering::SeqCst), 3);
     assert!(
@@ -5212,13 +5105,7 @@ fn sync_target_item_heroes_tracks_role_pairs_and_refreshes_on_role_change() {
     assert!(session.is_post_draft_build_view());
 
     // Wait for any initial background check to settle cleanly.
-    for _ in 0..50 {
-        session.poll_live_sources(None, None);
-        if !session.sync_in_flight {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(2));
-    }
+    wait_for_sync_idle(&mut session);
 
     // Swapping Riki from Pos 2 (Mid) -> Pos 1 (Carry) changes active_build_hero().role
     // and must trigger background refresh for uncached Role::Carry.
