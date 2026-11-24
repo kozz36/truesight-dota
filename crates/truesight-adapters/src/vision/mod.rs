@@ -199,6 +199,30 @@ pub(super) fn ingame_inner_core_rect(rect: TopBarSlotRect) -> TopBarSlotRect {
     }
 }
 
+/// Insets an `InGame` HUD slot rectangle to its badge-free upper portrait core, aligned with
+/// real `82x46 @ y=6` Dota 2 HUD portraits while staying within `rect` and excluding the top
+/// player-color strip and bottom Dota Plus tier emblems.
+pub(crate) fn ingame_upper_core_rect(rect: TopBarSlotRect) -> TopBarSlotRect {
+    let left = ((rect.width as f32) * (6.0 / 76.0)).round() as usize;
+    // Floor top inset so scaled resolutions (e.g. 1920x1080 where rect.y already rounds up)
+    // avoid double-rounding downward into the badge region.
+    let top = ((rect.height as f32) * (6.0 / 44.0)).floor() as usize;
+    let max_w = rect.width.saturating_sub(left);
+    let max_h = rect.height.saturating_sub(top);
+    let width = (((rect.width as f32) * (70.0 / 76.0)).round() as usize).min(max_w);
+    let height = (((rect.height as f32) * (26.0 / 44.0)).round() as usize).min(max_h);
+    if width >= DESC_COLS && height >= DESC_ROWS {
+        TopBarSlotRect {
+            x: rect.x + left,
+            y: rect.y + top,
+            width,
+            height,
+        }
+    } else {
+        rect
+    }
+}
+
 /// Computes In-Game HUD top-bar slot coordinates calibrated on real Dota 2 (`2560x1440` scaled).
 pub fn compute_ingame_topbar_slot_rects(
     frame_w: usize,
@@ -227,6 +251,10 @@ const DARK_INTENSITY_THRESHOLD: f32 = 12.0;
 const MATCH_L1_THRESHOLD: f32 = 14.5;
 const PICKPHASE_L1_THRESHOLD: f32 = 31.0;
 const INGAME_L1_THRESHOLD: f32 = 35.0;
+/// Stricter L1 ceiling for the partial upper-core `InGame` crop (`20/36` portrait height),
+/// aligned with `MAX_OVERWRITE_L1_DIFF` and `weak_cutoff` so shifted or half-obscured portraits
+/// abstain instead of locking a wrong hero on frame 2.
+const INGAME_UPPER_CORE_L1_THRESHOLD: f32 = 26.0;
 const MIN_DESCRIPTOR_SATURATION: f32 = 13.0;
 const MIN_OUTER_SATURATION: f32 = 9.0;
 const MIN_MATCH_NCC_8: f32 = 0.68;
@@ -320,86 +348,63 @@ fn descriptor_ncc(a: &[u8; DESC_LEN], b: &[u8; DESC_LEN]) -> f32 {
     if denom < 1e-6 { 0.0 } else { num / denom }
 }
 
-fn outer_column_stats(desc: &[u8; DESC_LEN]) -> (f32, f32) {
-    let mut r_sum = 0_f32;
-    let mut g_sum = 0_f32;
-    let mut b_sum = 0_f32;
-    let mut sat_sum = 0_f32;
-    let outer_cols = [0_usize, 1, 6, 7];
-    let n = (DESC_ROWS * outer_cols.len()) as f32;
-
-    for cy in 0..DESC_ROWS {
-        for &cx in &outer_cols {
+fn descriptor_region_stats(desc: &[u8; DESC_LEN], rows: &[usize], cols: &[usize]) -> (f32, f32) {
+    let n = (rows.len() * cols.len()) as f32;
+    let (mut r_sum, mut g_sum, mut b_sum, mut sat_sum) = (0_f32, 0_f32, 0_f32, 0_f32);
+    for &cy in rows {
+        for &cx in cols {
             let idx = (cy * DESC_COLS + cx) * 3;
-            let r = f32::from(desc[idx]);
-            let g = f32::from(desc[idx + 1]);
-            let b = f32::from(desc[idx + 2]);
+            let (r, g, b) = (
+                f32::from(desc[idx]),
+                f32::from(desc[idx + 1]),
+                f32::from(desc[idx + 2]),
+            );
             r_sum += r;
             g_sum += g;
             b_sum += b;
             sat_sum += r.max(g).max(b) - r.min(g).min(b);
         }
     }
-
-    let mr = r_sum / n;
-    let mg = g_sum / n;
-    let mb = b_sum / n;
+    let (mr, mg, mb) = (r_sum / n, g_sum / n, b_sum / n);
     let mut var_sum = 0_f32;
-    for cy in 0..DESC_ROWS {
-        for &cx in &outer_cols {
+    for &cy in rows {
+        for &cx in cols {
             let idx = (cy * DESC_COLS + cx) * 3;
             var_sum += (f32::from(desc[idx]) - mr).abs()
                 + (f32::from(desc[idx + 1]) - mg).abs()
                 + (f32::from(desc[idx + 2]) - mb).abs();
         }
     }
-
     (var_sum / (n * 3.0), sat_sum / n)
 }
 
-fn mean_descriptor_saturation(desc: &[u8; DESC_LEN]) -> f32 {
-    let mut sat_sum = 0_f32;
-    let total_cells = DESC_COLS * DESC_ROWS;
-    for cell in 0..total_cells {
-        let idx = cell * 3;
-        let r = f32::from(desc[idx]);
-        let g = f32::from(desc[idx + 1]);
-        let b = f32::from(desc[idx + 2]);
-        sat_sum += r.max(g).max(b) - r.min(g).min(b);
-    }
-    sat_sum / (total_cells as f32)
+/// Rejects half-obscured/partial `InGame` slots whose left, right, top, or bottom edge band is
+/// flat desaturated chrome/void. Across all 176 embedded hero/alt portraits, every edge band
+/// keeps `var >= 4.10` and `sat >= 10.88`.
+fn has_flat_occluded_border(desc: &[u8; DESC_LEN]) -> bool {
+    const ALL_ROWS: &[usize] = &[0, 1, 2, 3];
+    const ALL_COLS: &[usize] = &[0, 1, 2, 3, 4, 5, 6, 7];
+    [
+        (ALL_ROWS, &[0, 1][..]),
+        (ALL_ROWS, &[6, 7][..]),
+        (&[0, 1][..], ALL_COLS),
+        (&[2, 3][..], ALL_COLS),
+    ]
+    .into_iter()
+    .any(|(rows, cols)| {
+        let (var, sat) = descriptor_region_stats(desc, rows, cols);
+        var < 2.5 && sat < 5.0
+    })
 }
 
-fn descriptor_total_variance(desc: &[u8; DESC_LEN]) -> f32 {
-    let total_cells = DESC_COLS * DESC_ROWS;
-    let n = total_cells as f32;
-    let (mut r_sum, mut g_sum, mut b_sum) = (0_f32, 0_f32, 0_f32);
-    for cell in 0..total_cells {
-        let idx = cell * 3;
-        r_sum += f32::from(desc[idx]);
-        g_sum += f32::from(desc[idx + 1]);
-        b_sum += f32::from(desc[idx + 2]);
-    }
-    let (mr, mg, mb) = (r_sum / n, g_sum / n, b_sum / n);
-    let mut var_sum = 0_f32;
-    for cell in 0..total_cells {
-        let idx = cell * 3;
-        var_sum += (f32::from(desc[idx]) - mr).abs()
-            + (f32::from(desc[idx + 1]) - mg).abs()
-            + (f32::from(desc[idx + 2]) - mb).abs();
-    }
-    var_sum / (n * 3.0)
-}
-
-fn rank_descriptor_sets(
+fn accumulate_descriptor_matches(
     entry_sets: &[&[(HeroId, [u8; DESC_LEN])]],
     query_desc: &[u8; DESC_LEN],
+    query_saturation: f32,
     threshold: f32,
     min_ncc8: f32,
-    max_candidates: usize,
-) -> Vec<(HeroId, f32)> {
-    let mut best_by_hero: HashMap<HeroId, f32> = HashMap::new();
-
+    best_by_hero: &mut HashMap<HeroId, (f32, f32)>,
+) {
     for entries in entry_sets {
         for (hero_id, candidate_desc) in *entries {
             let mut sum_abs = 0_u32;
@@ -418,27 +423,32 @@ fn rank_descriptor_sets(
             best_by_hero
                 .entry(*hero_id)
                 .and_modify(|prev| {
-                    if mean_l1 < *prev {
-                        *prev = mean_l1;
+                    if mean_l1 < prev.0 {
+                        *prev = (mean_l1, query_saturation);
                     }
                 })
-                .or_insert(mean_l1);
+                .or_insert((mean_l1, query_saturation));
         }
     }
-
-    let mut ranked: Vec<(HeroId, f32)> = best_by_hero.into_iter().collect();
-    ranked.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.0.cmp(&b.0.0)));
-    ranked.truncate(max_candidates);
-    ranked
 }
 
 fn match_descriptor_sets(
     entry_sets: &[&[(HeroId, [u8; DESC_LEN])]],
     query_desc: &[u8; DESC_LEN],
 ) -> Option<(HeroId, f32)> {
-    rank_descriptor_sets(entry_sets, query_desc, f32::MAX, -1.0, 1)
+    let mut best_by_hero = HashMap::new();
+    accumulate_descriptor_matches(
+        entry_sets,
+        query_desc,
+        0.0,
+        f32::MAX,
+        -1.0,
+        &mut best_by_hero,
+    );
+    best_by_hero
         .into_iter()
-        .next()
+        .map(|(hero_id, (diff, _))| (hero_id, diff))
+        .min_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.0.cmp(&b.0.0)))
 }
 
 /// Precomputed 8x4 cell-averaged RGB portrait catalog for all 127 Dota 2 heroes.
@@ -448,80 +458,60 @@ pub struct HeroVisionCatalog {
     inner_entries: Vec<(HeroId, [u8; DESC_LEN])>,
     upper_entries: Vec<(HeroId, [u8; DESC_LEN])>,
     ingame_core_entries: Vec<(HeroId, [u8; DESC_LEN])>,
+    ingame_upper_core_entries: Vec<(HeroId, [u8; DESC_LEN])>,
 }
 
 impl HeroVisionCatalog {
     pub fn from_embedded() -> Option<Self> {
         let atlas = parse_hero_atlas()?;
-        let full_rect = TopBarSlotRect {
-            x: 0,
-            y: 0,
-            width: atlas.hero_width,
-            height: atlas.hero_height,
-        };
-        let inner_rect = TopBarSlotRect {
-            x: 4,
-            y: 2,
-            width: atlas.hero_width.saturating_sub(8),
-            height: atlas.hero_height.saturating_sub(4),
-        };
-        let upper_rect = TopBarSlotRect {
-            x: 4,
-            y: 2,
-            width: atlas.hero_width.saturating_sub(8),
-            height: 22.min(atlas.hero_height.saturating_sub(2)),
-        };
-        let ingame_core_rect = TopBarSlotRect {
-            x: 5,
-            y: 2,
-            width: atlas.hero_width.saturating_sub(13),
-            height: atlas.hero_height.saturating_sub(8),
-        };
+        let (hw, hh) = (atlas.hero_width, atlas.hero_height);
+        let rect_specs = [
+            (0, 0, hw, hh),
+            (4, 2, hw.saturating_sub(8), hh.saturating_sub(4)),
+            (4, 2, hw.saturating_sub(8), 22.min(hh.saturating_sub(2))),
+            (5, 2, hw.saturating_sub(13), hh.saturating_sub(8)),
+            (5, 2, hw.saturating_sub(10), 20.min(hh.saturating_sub(2))),
+        ];
 
         let alt_atlas = crate::hero_alt_atlas::parse_hero_alt_atlas()?;
-        if alt_atlas.width != atlas.hero_width || alt_atlas.height != atlas.hero_height {
+        if alt_atlas.width != hw || alt_atlas.height != hh {
             return None;
         }
         let total_entries = atlas.heroes.len() + alt_atlas.entries.len();
-
-        let mut full_entries = Vec::with_capacity(total_entries);
-        let mut inner_entries = Vec::with_capacity(total_entries);
-        let mut upper_entries = Vec::with_capacity(total_entries);
-        let mut ingame_core_entries = Vec::with_capacity(total_entries);
+        let mut buckets: [Vec<(HeroId, [u8; DESC_LEN])>; 5] =
+            std::array::from_fn(|_| Vec::with_capacity(total_entries));
 
         for (hero_id, rgb) in atlas.heroes.into_iter().chain(alt_atlas.entries) {
-            if let Some((desc, _)) =
-                compute_descriptor_8x4(&rgb, atlas.hero_width, atlas.hero_height, full_rect)
-            {
-                full_entries.push((hero_id, desc));
-            }
-            if let Some((desc, _)) =
-                compute_descriptor_8x4(&rgb, atlas.hero_width, atlas.hero_height, inner_rect)
-            {
-                inner_entries.push((hero_id, desc));
-            }
-            if let Some((desc, _)) =
-                compute_descriptor_8x4(&rgb, atlas.hero_width, atlas.hero_height, upper_rect)
-            {
-                upper_entries.push((hero_id, desc));
-            }
-            if let Some((desc, _)) =
-                compute_descriptor_8x4(&rgb, atlas.hero_width, atlas.hero_height, ingame_core_rect)
-            {
-                ingame_core_entries.push((hero_id, desc));
+            for ((x, y, width, height), entries) in rect_specs.into_iter().zip(&mut buckets) {
+                let rect = TopBarSlotRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                };
+                if let Some((desc, _)) = compute_descriptor_8x4(&rgb, hw, hh, rect) {
+                    entries.push((hero_id, desc));
+                }
             }
         }
 
-        full_entries.sort_by_key(|(id, _)| id.0);
-        inner_entries.sort_by_key(|(id, _)| id.0);
-        upper_entries.sort_by_key(|(id, _)| id.0);
-        ingame_core_entries.sort_by_key(|(id, _)| id.0);
+        for entries in &mut buckets {
+            entries.sort_by_key(|(id, _)| id.0);
+        }
+        let [
+            full_entries,
+            inner_entries,
+            upper_entries,
+            ingame_core_entries,
+            ingame_upper_core_entries,
+        ] = buckets;
 
         Some(Self {
             full_entries,
             inner_entries,
             upper_entries,
             ingame_core_entries,
+            ingame_upper_core_entries,
         })
     }
 
@@ -555,68 +545,66 @@ impl HeroVisionCatalog {
         layout: TopBarLayout,
         max_candidates: usize,
     ) -> Vec<(HeroId, f32, f32)> {
-        let query_rect = match layout {
-            TopBarLayout::InGame => ingame_inner_core_rect(rect),
-            TopBarLayout::SyntheticExact | TopBarLayout::PickPhase => rect,
-        };
-        let Some((query_desc, mean_intensity)) =
-            compute_descriptor_8x4(frame_rgb, frame_w, frame_h, query_rect)
-        else {
-            return Vec::new();
-        };
-        if mean_intensity < DARK_INTENSITY_THRESHOLD {
-            return Vec::new();
-        }
-
-        let (ov, os) = outer_column_stats(&query_desc);
-        let tv = descriptor_total_variance(&query_desc);
-        let ms = mean_descriptor_saturation(&query_desc);
-        if ms < MIN_DESCRIPTOR_SATURATION || os < MIN_OUTER_SATURATION {
-            return Vec::new();
-        }
-
         type DescriptorSets<'a> = &'a [&'a [(HeroId, [u8; DESC_LEN])]];
 
-        let saturated_dark_border = ov >= 12.0 && ms >= 28.0 && os >= 28.0;
-        let (entry_sets, threshold, has_portrait_detail): (DescriptorSets<'_>, f32, bool) =
-            match layout {
-                TopBarLayout::SyntheticExact => (
-                    &[&self.full_entries],
-                    MATCH_L1_THRESHOLD,
-                    tv >= 12.5 && ov >= 11.0,
-                ),
-                // PickPhase captures both nameplate-cropped upper cards and full/inner 16:9 slots.
-                TopBarLayout::PickPhase => (
+        let passes: [Option<(TopBarSlotRect, DescriptorSets<'_>, f32)>; 2] = match layout {
+            TopBarLayout::SyntheticExact => [
+                Some((rect, &[&self.full_entries], MATCH_L1_THRESHOLD)),
+                None,
+            ],
+            TopBarLayout::PickPhase => [
+                Some((
+                    rect,
                     &[&self.upper_entries, &self.inner_entries, &self.full_entries],
                     PICKPHASE_L1_THRESHOLD,
-                    tv >= 13.5
-                        && (ov >= 13.5
-                            || (ov >= 12.5 && tv >= 18.0 && os >= 20.0)
-                            || saturated_dark_border
-                            || (ov >= 7.5 && os >= 35.0)),
-                ),
-                TopBarLayout::InGame => (
+                )),
+                None,
+            ],
+            TopBarLayout::InGame => [
+                Some((
+                    ingame_inner_core_rect(rect),
                     &[&self.inner_entries, &self.ingame_core_entries],
                     INGAME_L1_THRESHOLD,
-                    tv >= 13.5
-                        && os >= 10.5
-                        && (ov >= 13.5
-                            || (ov >= 12.5 && tv >= 18.0 && os >= 20.0)
-                            || saturated_dark_border
-                            || (ov >= 9.5 && os >= 35.0)),
-                ),
+                )),
+                Some((
+                    ingame_upper_core_rect(rect),
+                    &[&self.ingame_upper_core_entries],
+                    INGAME_UPPER_CORE_L1_THRESHOLD,
+                )),
+            ],
+        };
+
+        let mut best_by_hero: HashMap<HeroId, (f32, f32)> = HashMap::new();
+        for (query_rect, entry_sets, threshold) in passes.into_iter().flatten() {
+            let Some((query_desc, mean_intensity)) =
+                compute_descriptor_8x4(frame_rgb, frame_w, frame_h, query_rect)
+            else {
+                continue;
             };
-        if !has_portrait_detail {
-            return Vec::new();
+            if mean_intensity < DARK_INTENSITY_THRESHOLD {
+                continue;
+            }
+
+            let Some(ms) = slot_portrait_saturation_if_detailed(layout, &query_desc) else {
+                continue;
+            };
+
+            accumulate_descriptor_matches(
+                entry_sets,
+                &query_desc,
+                ms,
+                threshold,
+                MIN_MATCH_NCC_8,
+                &mut best_by_hero,
+            );
         }
 
-        let ranked = rank_descriptor_sets(
-            entry_sets,
-            &query_desc,
-            threshold,
-            MIN_MATCH_NCC_8,
-            max_candidates,
-        );
+        let mut ranked: Vec<(HeroId, f32, f32)> = best_by_hero
+            .into_iter()
+            .map(|(hero_id, (diff, sat))| (hero_id, diff, sat))
+            .collect();
+        ranked.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.0.cmp(&b.0.0)));
+
         // A weak near-tie is not identity evidence: interior overlays or non-HUD chrome can shift
         // the nearest RGB template to an unrelated hero. Abstain before collision recovery can
         // promote indistinguishable alternatives, while keeping strong matches intact.
@@ -632,11 +620,36 @@ impl HeroVisionCatalog {
         {
             return Vec::new();
         }
+        ranked.truncate(max_candidates);
         ranked
-            .into_iter()
-            .map(|(hero_id, diff)| (hero_id, diff, ms))
-            .collect()
     }
+}
+
+fn slot_portrait_saturation_if_detailed(
+    layout: TopBarLayout,
+    query_desc: &[u8; DESC_LEN],
+) -> Option<f32> {
+    let (ov, os) = descriptor_region_stats(query_desc, &[0, 1, 2, 3], &[0, 1, 6, 7]);
+    let (tv, ms) = descriptor_region_stats(query_desc, &[0, 1, 2, 3], &[0, 1, 2, 3, 4, 5, 6, 7]);
+    if ms < MIN_DESCRIPTOR_SATURATION || os < MIN_OUTER_SATURATION {
+        return None;
+    }
+
+    let common_edge = ov >= 13.5
+        || (ov >= 12.5 && tv >= 18.0 && os >= 20.0)
+        || (ov >= 12.0 && ms >= 28.0 && os >= 28.0);
+    let has_detail = match layout {
+        TopBarLayout::SyntheticExact => tv >= 12.5 && ov >= 11.0,
+        // PickPhase captures both nameplate-cropped upper cards and full/inner 16:9 slots.
+        TopBarLayout::PickPhase => tv >= 13.5 && (common_edge || (ov >= 7.5 && os >= 35.0)),
+        TopBarLayout::InGame => {
+            !has_flat_occluded_border(query_desc)
+                && tv >= 13.5
+                && os >= 10.5
+                && (common_edge || (ov >= 9.5 && os >= 35.0))
+        }
+    };
+    has_detail.then_some(ms)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
