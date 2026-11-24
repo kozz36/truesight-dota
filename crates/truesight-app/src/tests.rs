@@ -5172,3 +5172,74 @@ fn gsi_overflow_reconcile_emits_hero_identity_before_fresh_inventory() {
         session.active_build_owned_items()
     );
 }
+
+#[test]
+fn sync_target_item_heroes_tracks_role_pairs_and_refreshes_on_role_change() {
+    use truesight_adapters::sync::LocalCacheManager;
+    use truesight_core::domain::{HeroId, Role, Side};
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_role_swap_refresh_test_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    std::fs::write(
+        tmp_dir.join("hero_item_stats.json"),
+        r#"[{"heroId":32,"role":"Mid","bracket":"LEGEND_ANCIENT","itemStartingPurchase":[],"itemFullPurchase":[{"itemId":174,"timeSecs":900,"instance":0,"matchCount":1000,"winCount":550}]}]"#,
+    )
+    .unwrap();
+
+    let mut mgr = LocalCacheManager::with_optional_account(tmp_dir.clone(), None);
+    mgr.stratz_api_token = Some("eyJhbGciOinone.eyJleHAiOjQxMDI0NDQ4MDB9.sig".to_string());
+    let mut session =
+        AppSession::with_cache_and_config(mgr, Some(tmp_dir.join("config.toml"))).unwrap();
+
+    assert!(execute_command(&mut session, "ally 2 riki").unwrap());
+    assert!(
+        session
+            .cache_mgr
+            .target_item_hero_roles
+            .contains(&(HeroId(32), Role::Mid)),
+        "ally 2 Riki must track (HeroId(32), Role::Mid) in cache_mgr: {:?}",
+        session.cache_mgr.target_item_hero_roles
+    );
+    assert!(session.cache_mgr.target_item_hero_ids.contains(&HeroId(32)));
+
+    session.toggle_post_draft_build_view();
+    assert!(session.is_post_draft_build_view());
+
+    // Wait for any initial background check to settle cleanly.
+    for _ in 0..50 {
+        session.poll_live_sources(None, None);
+        if !session.sync_in_flight {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+
+    // Swapping Riki from Pos 2 (Mid) -> Pos 1 (Carry) changes active_build_hero().role
+    // and must trigger background refresh for uncached Role::Carry.
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls_bg = std::sync::Arc::clone(&calls);
+    session.set_background_sync_runner(move |_mgr, _force| {
+        calls_bg.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok("ok".into())
+    });
+
+    session.swap_slots(Side::Allies, 1, 0);
+    assert!(
+        session
+            .cache_mgr
+            .target_item_hero_roles
+            .contains(&(HeroId(32), Role::Carry)),
+        "swap_slots must update target_item_hero_roles to Carry: {:?}",
+        session.cache_mgr.target_item_hero_roles
+    );
+    assert!(
+        calls.load(std::sync::atomic::Ordering::SeqCst) >= 1 || session.sync_in_flight,
+        "changing active build hero role from Mid -> Carry must trigger uncached item refresh"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}

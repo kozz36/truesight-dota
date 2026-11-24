@@ -799,7 +799,7 @@ impl AppSession {
         if slot_a >= TEAM_SIZE || slot_b >= TEAM_SIZE || slot_a == slot_b {
             return;
         }
-        let prev_active_hero = self.active_build_hero().map(|(h, _)| h);
+        let prev_active_hero = self.active_build_hero();
         let (pick_a, pick_b) = {
             let picks = self.side_picks_mut(side);
             picks.swap(slot_a, slot_b);
@@ -851,7 +851,7 @@ impl AppSession {
         if slot >= TEAM_SIZE {
             return;
         }
-        let prev_active_hero = self.active_build_hero().map(|(h, _)| h);
+        let prev_active_hero = self.active_build_hero();
         self.manually_dismissed.retain(|&id| id != hero_id);
         if let Some(existing_slot) = self
             .side_picks(side)
@@ -893,7 +893,7 @@ impl AppSession {
         if slot >= TEAM_SIZE {
             return;
         }
-        let prev_active_hero = self.active_build_hero().map(|(h, _)| h);
+        let prev_active_hero = self.active_build_hero();
         let old = self.side_picks_mut(side)[slot].take();
         self.side_locked_mut(side)[slot] = false;
         if let Some(pick) = old {
@@ -1062,7 +1062,7 @@ impl AppSession {
     // physical portrait in the same batch, including when all role slots are full.
     // Missing events are not removals (death/occlusion grace belongs to the adapter).
     pub(crate) fn apply_vision_events(&mut self, events: Vec<DraftEvent>) {
-        let prev_active_hero = self.active_build_hero().map(|(h, _)| h);
+        let prev_active_hero = self.active_build_hero();
         // Cached observations support retirement only; replaying them as additions
         // would undo manual replacements and subsequent GSI side corrections.
         let mut fresh_slots = [[None; TEAM_SIZE]; 2];
@@ -1327,10 +1327,8 @@ impl AppSession {
         }
     }
 
-    fn refresh_item_build_if_hero_changed(&mut self, prev_active_hero: Option<HeroId>) {
-        if self.is_post_draft_build_view()
-            && self.active_build_hero().map(|(h, _)| h) != prev_active_hero
-        {
+    fn refresh_item_build_if_hero_changed(&mut self, prev_active: Option<(HeroId, Role)>) {
+        if self.is_post_draft_build_view() && self.active_build_hero() != prev_active {
             let _ = self.request_item_build_refresh_if_uncached();
         }
     }
@@ -1575,18 +1573,21 @@ impl AppSession {
         }
     }
 
-    /// Synchronizes `cache_mgr` target item hero IDs with the active build hero and picked allies.
+    /// Synchronizes `cache_mgr` target item `(hero, role)` pairs with the active build hero and picked allies.
     pub fn sync_target_item_heroes_to_cache(&mut self) {
-        let mut heroes = Vec::new();
-        if let Some((active_hero, _)) = self.active_build_hero() {
-            heroes.push(active_hero);
+        let mut hero_roles = Vec::new();
+        if let Some((active_hero, active_role)) = self.active_build_hero() {
+            hero_roles.push((active_hero, active_role));
         }
-        for pick in self.draft.allies.iter().flatten() {
-            if !heroes.contains(&pick.hero_id) {
-                heroes.push(pick.hero_id);
+        for (idx, pick) in self.draft.allies.iter().enumerate() {
+            if let Some(p) = pick {
+                let role = p.role.unwrap_or(Role::ALL[idx]);
+                if !hero_roles.contains(&(p.hero_id, role)) {
+                    hero_roles.push((p.hero_id, role));
+                }
             }
         }
-        self.cache_mgr.set_target_item_heroes(heroes);
+        self.cache_mgr.set_target_item_hero_roles(hero_roles);
     }
 
     /// Sets the active monitor desktop bounds used for live overlay clamping.
