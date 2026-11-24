@@ -181,7 +181,11 @@ pub(crate) fn is_valid_timed_progression_item_for_phase(
     phase: ItemPhase,
 ) -> bool {
     // Exclude basic raw stats/ingredients (`Ogre Axe`, `Blade of Alacrity`, `Oblivion Staff`,
-    // `Perseverance`, `Cornucopia`), consumables, wards, smokes, and detection items.
+    // `Perseverance`, `Cornucopia`), consumables, wards, smokes, detection items, and cheap
+    // early aura sub-components (`Buckler`, `Ring of Basilius`, `Headdress`) in Core/Late.
+    if matches!(phase, ItemPhase::Core | ItemPhase::Late) && matches!(item_id.0, 86 | 88 | 94) {
+        return false;
+    }
     if matches!(
         item_id.0,
         2..=10

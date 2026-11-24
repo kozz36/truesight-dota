@@ -108,7 +108,11 @@ pub fn recommend_item_build(
                     }
                     continue;
                 }
-                if !owned && is_excluded_basic_subcomponent(stat.item_id) {
+                if !owned
+                    && (is_excluded_basic_subcomponent(stat.item_id)
+                        || (matches!(stat.phase, ItemPhase::Core | ItemPhase::Late)
+                            && is_early_only_aura_component(stat.item_id)))
+                {
                     continue;
                 }
                 timed_core_stats.push(stat);
@@ -124,7 +128,7 @@ pub fn recommend_item_build(
     });
     let starting_items: Vec<ItemId> = starting.into_iter().take(5).map(|s| s.item_id).collect();
 
-    // Suppress unowned stepping-stone sub-components when a parent upgrade exists in the
+    // Suppress unowned stepping-stone sub-components when a viable parent upgrade exists in the
     // same phase or within SUBCOMPONENT_SEPARATION_MINS; preserve valuable stepping stones
     // (e.g. Yasha / Crystalys / Ultimate Orb) bought >= 4m before a later-phase parent.
     let timed_snapshot: Vec<HeroItemStat> = timed_core_stats.clone();
@@ -132,7 +136,10 @@ pub fn recommend_item_build(
         if owned_items.contains(&stat.item_id) {
             return true;
         }
-        if is_excluded_basic_subcomponent(stat.item_id) {
+        if is_excluded_basic_subcomponent(stat.item_id)
+            || (matches!(stat.phase, ItemPhase::Core | ItemPhase::Late)
+                && is_early_only_aura_component(stat.item_id))
+        {
             return false;
         }
         if !is_valuable_stepping_stone_id(stat.item_id) {
@@ -140,6 +147,8 @@ pub fn recommend_item_build(
         }
         !timed_snapshot.iter().any(|parent| {
             parent.item_id != stat.item_id
+                && (owned_items.contains(&parent.item_id)
+                    || parent.match_count.saturating_mul(4) >= stat.match_count)
                 && (parent.phase == stat.phase
                     || (parent.avg_time_mins - stat.avg_time_mins) < SUBCOMPONENT_SEPARATION_MINS)
                 && repo
@@ -150,7 +159,7 @@ pub fn recommend_item_build(
 
     // Apply a tiny-sample noise floor when sufficient match volume exists so rare 100%-WR
     // late luxuries do not displace high-sample core builds, while protecting explicit Late
-    // upgrade chains (e.g. Skull Basher -> Abyssal Blade).
+    // upgrade chains (e.g. Skull Basher -> Abyssal Blade, Eul's -> Wind Waker).
     let mut protected_upgrade_ids: Vec<ItemId> = Vec::new();
     let max_mc = timed_core_stats
         .iter()
@@ -167,12 +176,15 @@ pub fn recommend_item_build(
             .collect();
         for stat in &timed_core_stats {
             if stat.phase == ItemPhase::Late
+                && stat.item_id.0 != 271
                 && stat.match_count >= upgrade_floor
                 && repo.item_catalog(stat.item_id).is_some_and(|entry| {
-                    entry
-                        .components
-                        .iter()
-                        .any(|comp| viable_parent_bases.contains(comp) && *comp != stat.item_id)
+                    entry.components.iter().any(|comp| {
+                        viable_parent_bases.contains(comp)
+                            && *comp != stat.item_id
+                            && !is_early_boots(*comp)
+                            && comp.0 != 29
+                    })
                 })
             {
                 protected_upgrade_ids.push(stat.item_id);
@@ -197,11 +209,14 @@ pub fn recommend_item_build(
         let all_timed_ids: Vec<ItemId> = timed_core_stats.iter().map(|s| s.item_id).collect();
         for stat in &timed_core_stats {
             if stat.phase == ItemPhase::Late
+                && stat.item_id.0 != 271
                 && repo.item_catalog(stat.item_id).is_some_and(|entry| {
-                    entry
-                        .components
-                        .iter()
-                        .any(|comp| all_timed_ids.contains(comp) && *comp != stat.item_id)
+                    entry.components.iter().any(|comp| {
+                        all_timed_ids.contains(comp)
+                            && *comp != stat.item_id
+                            && !is_early_boots(*comp)
+                            && comp.0 != 29
+                    })
                 })
             {
                 protected_upgrade_ids.push(stat.item_id);
@@ -318,12 +333,35 @@ pub fn recommend_item_build(
             && is_phase_filler(cand.step.phase, cand.match_count, phase_max_mc[slot]);
         let existing_in_phase = clustered
             .iter()
-            .filter(|c| c.step.phase == cand.step.phase)
+            .filter(|c| {
+                c.step.phase == cand.step.phase
+                    && (c.step.owned
+                        || c.is_protected_upgrade
+                        || !is_phase_filler(
+                            c.step.phase,
+                            c.match_count,
+                            phase_max_mc[phase_slot(c.step.phase)],
+                        ))
+            })
             .count();
         let phase_cap = phase_primary_cap(cand.step.phase);
 
-        let matched = if is_early_boots(cand.step.item_id) && clustered.iter().any(matches_boot) {
+        let cand_is_early_boot = is_early_boots(cand.step.item_id)
+            || (cand.step.phase == ItemPhase::Early && is_any_boots(cand.step.item_id));
+
+        let matched = if cand_is_early_boot && clustered.iter().any(matches_boot) {
             clustered.iter_mut().find(|c| matches_boot(c))
+        } else if cand.step.phase == ItemPhase::Late
+            && is_late_boots(cand.step.item_id)
+            && clustered
+                .iter()
+                .any(|c| c.step.phase == ItemPhase::Late && is_late_boots(c.step.item_id))
+        {
+            clustered
+                .iter_mut()
+                .find(|c| c.step.phase == ItemPhase::Late && is_late_boots(c.step.item_id))
+        } else if cand.step.item_id.0 == 271 && clustered.iter().any(|c| c.step.item_id.0 == 108) {
+            clustered.iter_mut().find(|c| c.step.item_id.0 == 108)
         } else if cand_is_filler
             || (cand.step.phase == ItemPhase::Late
                 && late_nonfiller_total >= 3
@@ -381,28 +419,6 @@ pub fn recommend_item_build(
         let slot = phase_slot(cand.step.phase);
         let cap = phase_primary_cap(cand.step.phase);
         if phase_counts[slot] >= cap {
-            continue;
-        }
-        if phase_counts[slot] >= 1
-            && !cand.is_protected_upgrade
-            && is_phase_filler(cand.step.phase, cand.match_count, phase_max_mc[slot])
-        {
-            continue;
-        }
-        is_primary[idx] = true;
-        primary_count += 1;
-        phase_counts[slot] += 1;
-    }
-    for (idx, cand) in clustered.iter().enumerate() {
-        if primary_count >= MAX_PRIMARY_BUILD_STEPS {
-            break;
-        }
-        if is_primary[idx] {
-            continue;
-        }
-        let slot = phase_slot(cand.step.phase);
-        let overflow_cap = phase_overflow_cap(cand.step.phase);
-        if phase_counts[slot] >= overflow_cap {
             continue;
         }
         if phase_counts[slot] >= 1
@@ -690,8 +706,13 @@ const fn is_early_boots(item_id: ItemId) -> bool {
 }
 
 #[inline]
+const fn is_late_boots(item_id: ItemId) -> bool {
+    matches!(item_id.0, 48 | 220 | 231 | 931)
+}
+
+#[inline]
 const fn is_any_boots(item_id: ItemId) -> bool {
-    matches!(item_id.0, 48 | 50 | 63 | 180 | 214 | 220 | 231 | 931)
+    is_early_boots(item_id) || is_late_boots(item_id)
 }
 
 #[inline]
@@ -708,15 +729,6 @@ const fn phase_slot(phase: ItemPhase) -> usize {
 #[inline]
 const fn phase_primary_cap(phase: ItemPhase) -> usize {
     match phase {
-        ItemPhase::Late => 4,
-        _ => 2,
-    }
-}
-
-#[inline]
-const fn phase_overflow_cap(phase: ItemPhase) -> usize {
-    match phase {
-        ItemPhase::Core => 3,
         ItemPhase::Late => 4,
         _ => 2,
     }
@@ -740,6 +752,11 @@ fn is_phase_filler(phase: ItemPhase, match_count: u32, phase_max_mc: u32) -> boo
         _ => EARLY_CORE_LEADER_MIN_SHARE,
     };
     (match_count as f32) < (phase_max_mc as f32) * min_share
+}
+
+#[inline]
+const fn is_early_only_aura_component(item_id: ItemId) -> bool {
+    matches!(item_id.0, 86 | 88 | 94)
 }
 
 #[inline]
@@ -771,6 +788,6 @@ const fn is_excluded_basic_subcomponent(item_id: ItemId) -> bool {
 const fn is_valuable_stepping_stone_id(item_id: ItemId) -> bool {
     matches!(
         item_id.0,
-        24 | 51 | 52 | 53 | 54 | 55 | 58 | 149 | 162 | 170 | 259
+        24 | 51 | 52 | 53 | 54 | 55 | 58 | 79 | 129 | 149 | 162 | 170 | 185 | 236 | 259
     )
 }

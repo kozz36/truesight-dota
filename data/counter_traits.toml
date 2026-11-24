@@ -19,8 +19,8 @@ critical_passives = [249]
 illusions_summons = [158, 145, 119]
 # Dust of Appearance (40), Gem of True Sight (30), Sentry Ward (43)
 invisibility = [40, 30, 43]
-# Assault Cuirass (112), Shiva's Guard (119), Crimson Guard (242), Heaven's Halberd (210)
-high_physical_burst = [112, 119, 242, 210]
+# Assault Cuirass (112), Shiva's Guard (119), Crimson Guard (242), Heaven's Halberd (210), Ghost Scepter (37)
+high_physical_burst = [112, 119, 242, 210, 37]
 
 [heroes]
 # Phantom Assassin: Blur evasion, Coup de Grace/Blur passives, high physical crit burst.

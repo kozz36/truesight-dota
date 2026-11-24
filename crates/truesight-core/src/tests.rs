@@ -1890,3 +1890,257 @@ fn recommend_item_build_protects_late_upgrade_chains_and_blocks_low_share_phase_
         build.steps
     );
 }
+
+#[test]
+fn recommend_item_build_keeps_core_capped_at_two_on_sparse_build() {
+    use crate::domain::{Bracket, ItemId, ItemPhase};
+    use crate::math::recommend_item_build;
+
+    let repo = MockItemRepo {
+        catalog: vec![
+            catalog_entry(63, "Power Treads", 1400, &[], false, false),
+            catalog_entry(145, "Battle Fury", 3900, &[], false, false),
+            catalog_entry(147, "Manta Style", 4550, &[], false, false),
+            catalog_entry(116, "Black King Bar", 4050, &[], false, false),
+        ],
+        stats: vec![
+            item_stat(63, ItemPhase::Early, 8.0, 1200, 620),
+            item_stat(145, ItemPhase::Core, 12.0, 1100, 610),
+            item_stat(147, ItemPhase::Core, 18.2, 950, 520),
+            item_stat(116, ItemPhase::Core, 24.5, 820, 445),
+        ],
+    };
+
+    let enemies = [None; 5];
+    let build = recommend_item_build(
+        &repo,
+        HeroId(1),
+        Role::Carry,
+        Bracket::Ancient,
+        &enemies,
+        &[],
+        600,
+    )
+    .expect("build should succeed");
+
+    let core_steps: Vec<_> = build
+        .steps
+        .iter()
+        .filter(|s| s.phase == ItemPhase::Core)
+        .collect();
+    assert_eq!(
+        core_steps.len(),
+        2,
+        "Core primary steps must stay capped at 2 even when Early/Late are sparse: {:?}",
+        build.steps
+    );
+    assert!(
+        core_steps.iter().any(
+            |s| s.item_id == ItemId(116) || s.variants.iter().any(|v| v.item_id == ItemId(116))
+        ) || build.steps.iter().all(|s| s.item_id != ItemId(116)),
+        "3rd Core candidate must never take a 3rd Core primary slot: {:?}",
+        build.steps
+    );
+}
+
+#[test]
+fn recommend_item_build_collapses_late_boots_and_surfaces_support_late_utility_and_ghost_scepter() {
+    use crate::domain::{
+        Bracket, CounterTrait, ItemId, ItemPhase, is_counter_item_eligible_for_role,
+    };
+    use crate::math::recommend_item_build;
+
+    assert!(
+        is_counter_item_eligible_for_role(ItemId(37), Role::SoftSupport)
+            && is_counter_item_eligible_for_role(ItemId(37), Role::HardSupport)
+            && !is_counter_item_eligible_for_role(ItemId(37), Role::Carry),
+        "Ghost Scepter (37) counter eligibility must target supports only"
+    );
+
+    let support_catalog = vec![
+        catalog_entry(36, "Magic Wand", 460, &[], false, false),
+        catalog_entry(180, "Arcane Boots", 1500, &[], false, false),
+        catalog_entry(214, "Tranquil Boots", 900, &[], false, false),
+        catalog_entry(1, "Blink Dagger", 2250, &[], false, false),
+        catalog_entry(254, "Glimmer Cape", 2150, &[], false, false),
+        catalog_entry(94, "Headdress", 425, &[], false, false),
+        catalog_entry(79, "Mekansm", 1775, &[94], false, false),
+        catalog_entry(931, "Boots of Bearing", 4225, &[214], false, false),
+        catalog_entry(231, "Guardian Greaves", 4350, &[180, 79], false, false),
+        catalog_entry(48, "Boots of Travel", 2500, &[], false, false),
+        catalog_entry(108, "Aghanim's Scepter", 4200, &[], false, false),
+        catalog_entry(271, "Aghanim's Blessing", 5800, &[108], false, false),
+        catalog_entry(100, "Eul's Scepter of Divinity", 2600, &[], false, false),
+        catalog_entry(610, "Wind Waker", 6800, &[100, 58], false, false),
+        catalog_entry(37, "Ghost Scepter", 1500, &[], false, false),
+        catalog_entry(256, "Aeon Disk", 3000, &[], false, false),
+        catalog_entry(96, "Scythe of Vyse", 5200, &[], false, false),
+        catalog_entry(223, "Meteor Hammer", 2850, &[], false, false),
+    ];
+
+    let repo = MockItemRepo {
+        catalog: support_catalog.clone(),
+        stats: vec![
+            item_stat(36, ItemPhase::Early, 6.0, 22000, 11400),
+            item_stat(214, ItemPhase::Early, 8.2, 28000, 14500),
+            item_stat(180, ItemPhase::Early, 11.4, 9500, 4800),
+            item_stat(1, ItemPhase::Core, 23.0, 26000, 14500),
+            item_stat(254, ItemPhase::Core, 24.5, 22000, 11800),
+            // Late candidates: 3 Late boots, cheap aura Headdress (94), same-phase subcomponent Mekansm (79),
+            // Aghs + Blessing upgrade, low-share Meteor Hammer filler, Aeon Disk, Eul's + Wind Waker, Ghost Scepter, Vyse
+            item_stat(108, ItemPhase::Late, 37.5, 16000, 10800),
+            item_stat(271, ItemPhase::Late, 54.0, 900, 580),
+            item_stat(931, ItemPhase::Late, 40.5, 3200, 2200),
+            item_stat(231, ItemPhase::Late, 39.5, 2100, 1380),
+            item_stat(48, ItemPhase::Late, 49.0, 1000, 670),
+            item_stat(94, ItemPhase::Late, 30.0, 5700, 3600),
+            item_stat(79, ItemPhase::Late, 34.0, 1200, 780),
+            item_stat(256, ItemPhase::Late, 41.5, 3100, 1950),
+            item_stat(100, ItemPhase::Late, 31.0, 2600, 1550),
+            item_stat(610, ItemPhase::Late, 49.5, 380, 265),
+            item_stat(37, ItemPhase::Late, 33.5, 2400, 1350),
+            item_stat(96, ItemPhase::Late, 45.0, 950, 620),
+            item_stat(223, ItemPhase::Late, 32.0, 500, 380),
+        ],
+    };
+
+    let pa_enemies = [Some(HeroId(44)), None, None, None, None];
+    for role in [Role::SoftSupport, Role::HardSupport] {
+        let build = recommend_item_build(
+            &repo,
+            HeroId(5),
+            role,
+            Bracket::Ancient,
+            &pa_enemies,
+            &[],
+            1800,
+        )
+        .expect("support build should succeed");
+
+        let late_steps: Vec<_> = build
+            .steps
+            .iter()
+            .filter(|s| s.phase == ItemPhase::Late)
+            .collect();
+        assert_eq!(
+            late_steps.len(),
+            4,
+            "{role:?} must fill 4 Late primaries: {late_steps:?}"
+        );
+
+        let late_boot_primaries: Vec<_> = late_steps
+            .iter()
+            .filter(|s| matches!(s.item_id.0, 48 | 220 | 231 | 931))
+            .collect();
+        assert_eq!(
+            late_boot_primaries.len(),
+            1,
+            "{role:?} must have at most 1 Late boot primary, got: {late_boot_primaries:?}"
+        );
+        assert!(
+            late_boot_primaries[0]
+                .variants
+                .iter()
+                .any(|v| matches!(v.item_id.0, 48 | 231)),
+            "{role:?} competing Late boots must attach as variants of {}: {:?}",
+            late_boot_primaries[0].item_id.0,
+            late_boot_primaries[0].variants
+        );
+
+        assert!(
+            build.steps.iter().all(|s| {
+                s.item_id != ItemId(94) && s.variants.iter().all(|v| v.item_id != ItemId(94))
+            }),
+            "{role:?} cheap Headdress (94) must be excluded in Late: {:?}",
+            build.steps
+        );
+        assert!(
+            build.steps.iter().all(|s| {
+                s.item_id != ItemId(79) && s.variants.iter().all(|v| v.item_id != ItemId(79))
+            }),
+            "{role:?} same-phase Mekansm (79) under Greaves (231) must be suppressed: {:?}",
+            build.steps
+        );
+        assert!(
+            late_steps.iter().all(|s| s.item_id != ItemId(271)),
+            "{role:?} Aghanim's Blessing (271) must collapse under Aghanim's Scepter (108), not steal a primary Late slot: {late_steps:?}"
+        );
+        assert!(
+            late_steps
+                .iter()
+                .any(|s| s.item_id == ItemId(108)
+                    && s.variants.iter().any(|v| v.item_id == ItemId(271))),
+            "{role:?} Aghanim's Blessing (271) should attach as variant of Aghs (108): {late_steps:?}"
+        );
+        assert!(
+            late_steps.iter().all(|s| s.item_id != ItemId(223)),
+            "{role:?} low-share Meteor Hammer (223) must not block high-volume support Late items: {late_steps:?}"
+        );
+
+        let ghost_step = late_steps
+            .iter()
+            .find(|s| s.item_id == ItemId(37))
+            .expect("Ghost Scepter (37) must surface in support Late against PA");
+        assert_eq!(
+            ghost_step.counter_trait,
+            Some(CounterTrait::HighPhysicalBurst)
+        );
+        assert!(
+            build
+                .steps
+                .iter()
+                .any(|s| s.item_id == ItemId(610)
+                    || s.variants.iter().any(|v| v.item_id == ItemId(610))),
+            "{role:?} Wind Waker (610) upgrade of Eul's (100) must be preserved: {:?}",
+            build.steps
+        );
+    }
+
+    // When Ghost Scepter (37) is only a Situational candidate against PA, it appears in Optional on Pos 5, never Carry.
+    let sparse_support_repo = MockItemRepo {
+        catalog: support_catalog,
+        stats: vec![
+            item_stat(214, ItemPhase::Early, 8.2, 28000, 14500),
+            item_stat(254, ItemPhase::Core, 24.5, 22000, 11800),
+            item_stat(108, ItemPhase::Late, 37.5, 16000, 10800),
+            item_stat(37, ItemPhase::Situational, 32.0, 220, 114),
+        ],
+    };
+    let pos5_opt = recommend_item_build(
+        &sparse_support_repo,
+        HeroId(5),
+        Role::HardSupport,
+        Bracket::Ancient,
+        &pa_enemies,
+        &[],
+        1500,
+    )
+    .unwrap();
+    assert!(
+        pos5_opt
+            .optional_items
+            .iter()
+            .any(|o| o.item_id == ItemId(37)
+                && o.counter_trait == Some(CounterTrait::HighPhysicalBurst)),
+        "Ghost Scepter (37) should promote into Optional against PA on HardSupport: {:?}",
+        pos5_opt.optional_items
+    );
+    let carry_opt = recommend_item_build(
+        &sparse_support_repo,
+        HeroId(41),
+        Role::Carry,
+        Bracket::Ancient,
+        &pa_enemies,
+        &[],
+        1500,
+    )
+    .unwrap();
+    assert!(
+        carry_opt
+            .optional_items
+            .iter()
+            .all(|o| o.item_id != ItemId(37)),
+        "Ghost Scepter (37) must stay excluded from Optional on Carry: {:?}",
+        carry_opt.optional_items
+    );
+}

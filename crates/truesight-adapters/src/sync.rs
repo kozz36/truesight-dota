@@ -560,9 +560,24 @@ impl LocalCacheManager {
             let has_token = self.effective_stratz_token().is_some();
             return self.target_item_hero_roles.iter().any(|&(hid, role)| {
                 if has_token {
-                    !parsed.iter().any(|(c_hid, c_role, c_bucket, _)| {
+                    let has_all_buckets = StratzBracketBucket::ALL.iter().all(|&bucket| {
+                        parsed.iter().any(|(c_hid, c_role, c_bucket, _)| {
+                            *c_hid == hid && *c_role == Some(role) && *c_bucket == Some(bucket)
+                        })
+                    });
+                    let has_role_unbracketed = parsed.iter().any(|(c_hid, c_role, c_bucket, _)| {
+                        *c_hid == hid && *c_role == Some(role) && c_bucket.is_none()
+                    });
+                    let has_any_role_bucket = parsed.iter().any(|(c_hid, c_role, c_bucket, _)| {
                         *c_hid == hid && *c_role == Some(role) && c_bucket.is_some()
-                    })
+                    });
+                    let has_hero_unbracketed_fallback =
+                        parsed.iter().any(|(c_hid, c_role, c_bucket, _)| {
+                            *c_hid == hid && c_role.is_none() && c_bucket.is_none()
+                        });
+                    !(has_all_buckets
+                        || has_role_unbracketed
+                        || (has_any_role_bucket && has_hero_unbracketed_fallback))
                 } else {
                     !parsed.iter().any(|(c_hid, c_role, _, _)| {
                         *c_hid == hid && (*c_role == Some(role) || c_role.is_none())
@@ -1056,7 +1071,8 @@ impl LocalCacheManager {
                 if self.is_cancelled() {
                     break;
                 }
-                let mut fetched_for_hero = false;
+                let mut covered_buckets_mask: u8 = 0;
+                let mut covered_unbracketed = false;
                 if let Some(ref token) = stratz_token {
                     if let Ok(sb) = fetch_stratz_items(token, hero_id.0, role_opt) {
                         let parsed_entries =
@@ -1072,6 +1088,11 @@ impl LocalCacheManager {
                                     )
                             });
                             if !stats.is_empty() {
+                                if let Some(bucket) = bucket_opt {
+                                    covered_buckets_mask |= 1_u8 << bucket.index();
+                                } else {
+                                    covered_unbracketed = true;
+                                }
                                 merged_entries.insert(
                                     (
                                         entry_hid.0,
@@ -1081,12 +1102,12 @@ impl LocalCacheManager {
                                     stats,
                                 );
                                 any_item_stats_fetched = true;
-                                fetched_for_hero = true;
                             }
                         }
                     }
                 }
-                if !fetched_for_hero {
+                let all_buckets_covered = covered_unbracketed || covered_buckets_mask == 0b1111;
+                if !all_buckets_covered {
                     let url = format!(
                         "https://api.opendota.com/api/scenarios/itemTimings?hero_id={}",
                         hero_id.0
@@ -1851,7 +1872,7 @@ pub(crate) fn stratz_hero_item_purchases_graphql_payload_for_role(
             "{p}Boot: itemBootPurchase(heroId: {hero_id}{pos_arg}, bracketBasicIds: [{b}]) {{ itemId time matchCount winCount }}"
         ));
         parts.push(format!(
-            "{p}Full: itemFullPurchase(heroId: {hero_id}{pos_arg}, bracketBasicIds: [{b}]) {{ itemId time instance matchCount winCount }}"
+            "{p}Full: itemFullPurchase(heroId: {hero_id}{pos_arg}, bracketBasicIds: [{b}], matchLimit: 5) {{ itemId time instance matchCount winCount }}"
         ));
     }
     format!(r#"{{"query":"{{ heroStats {{ {} }} }}"}}"#, parts.join(" "))
@@ -1958,6 +1979,42 @@ fn phase_from_avg_mins(avg_mins: f32) -> ItemPhase {
         ItemPhase::Core
     } else {
         ItemPhase::Late
+    }
+}
+
+fn phase_from_avg_mins_for_role(avg_mins: f32, role: Option<Role>) -> ItemPhase {
+    match role {
+        Some(Role::SoftSupport | Role::HardSupport) => {
+            if avg_mins < 13.0 {
+                ItemPhase::Early
+            } else if avg_mins <= 28.5 {
+                ItemPhase::Core
+            } else {
+                ItemPhase::Late
+            }
+        }
+        _ => phase_from_avg_mins(avg_mins),
+    }
+}
+
+const fn phase_to_cache_key(phase: ItemPhase) -> &'static str {
+    match phase {
+        ItemPhase::Starting => "Starting",
+        ItemPhase::Early => "Early",
+        ItemPhase::Core => "Core",
+        ItemPhase::Late => "Late",
+        ItemPhase::Situational => "Situational",
+    }
+}
+
+fn phase_from_cache_key(raw: &str) -> Option<ItemPhase> {
+    match raw.trim() {
+        "Starting" => Some(ItemPhase::Starting),
+        "Early" => Some(ItemPhase::Early),
+        "Core" => Some(ItemPhase::Core),
+        "Late" => Some(ItemPhase::Late),
+        "Situational" => Some(ItemPhase::Situational),
+        _ => None,
     }
 }
 
@@ -2249,6 +2306,7 @@ fn parse_stratz_purchase_arrays(
     boot_arr: Option<&str>,
     full_arr: Option<&str>,
     force_full_minutes: bool,
+    role: Option<Role>,
 ) -> Vec<HeroItemStat> {
     let mut buckets: Vec<(ItemId, ItemPhase, f64, u64, u64)> = Vec::new();
 
@@ -2311,14 +2369,15 @@ fn parse_stratz_purchase_arrays(
             let phase = if avg_mins_f32 <= 16.0 {
                 ItemPhase::Early
             } else {
-                phase_from_avg_mins(avg_mins_f32)
+                phase_from_avg_mins_for_role(avg_mins_f32, role)
             };
             upsert_item_stat_bucket(&mut buckets, ItemId(id_val), phase, avg_mins, matches, wins);
         }
     }
 
     if let Some(arr_slice) = full_arr {
-        // Aggregate per itemId across minute buckets so weighted average time cleanly maps to one phase.
+        // Aggregate per itemId across minute buckets so weighted average time cleanly maps to one phase,
+        // while preserving explicit persisted `phase` fields from v2 cache entries.
         let mut full_agg: std::collections::BTreeMap<u16, (f64, u64, u64)> =
             std::collections::BTreeMap::new();
         for obj_chunk in arr_slice.split('{').skip(1) {
@@ -2348,15 +2407,28 @@ fn parse_stratz_purchase_arrays(
                     raw_time as f64
                 }
             };
-            let slot = full_agg.entry(id_val).or_insert((0.0, 0, 0));
-            slot.0 += avg_mins * matches as f64;
-            slot.1 += matches;
-            slot.2 += wins;
+            if let Some(explicit_phase) =
+                extract_str_field(block, "\"phase\"").and_then(phase_from_cache_key)
+            {
+                upsert_item_stat_bucket(
+                    &mut buckets,
+                    ItemId(id_val),
+                    explicit_phase,
+                    avg_mins,
+                    matches,
+                    wins,
+                );
+            } else {
+                let slot = full_agg.entry(id_val).or_insert((0.0, 0, 0));
+                slot.0 += avg_mins * matches as f64;
+                slot.1 += matches;
+                slot.2 += wins;
+            }
         }
         for (raw_id, (weighted_mins, matches, wins)) in full_agg {
             if matches > 0 {
                 let avg_mins = weighted_mins / matches as f64;
-                let phase = phase_from_avg_mins(avg_mins as f32);
+                let phase = phase_from_avg_mins_for_role(avg_mins as f32, role);
                 upsert_item_stat_bucket(
                     &mut buckets,
                     ItemId(raw_id),
@@ -2390,6 +2462,13 @@ fn parse_stratz_purchase_arrays(
 /// Parses STRATZ `itemStartingPurchase` + `itemBootPurchase` + `itemFullPurchase` JSON arrays
 /// (or cached `timeSecs` payloads) into aggregated `HeroItemStat` rows.
 pub fn parse_stratz_hero_item_purchase_json(json: &str) -> Vec<HeroItemStat> {
+    parse_stratz_hero_item_purchase_json_for_role(json, None)
+}
+
+pub(crate) fn parse_stratz_hero_item_purchase_json_for_role(
+    json: &str,
+    role: Option<Role>,
+) -> Vec<HeroItemStat> {
     if has_nonempty_graphql_errors(json) {
         return Vec::new();
     }
@@ -2398,6 +2477,7 @@ pub fn parse_stratz_hero_item_purchase_json(json: &str) -> Vec<HeroItemStat> {
         extract_json_array_for_key(json, "\"itemBootPurchase\""),
         extract_json_array_for_key(json, "\"itemFullPurchase\""),
         false,
+        role,
     )
 }
 
@@ -2427,6 +2507,7 @@ pub(crate) fn parse_stratz_live_bracketed_item_purchases_json(
                 extract_json_array_for_key(json, &boot_key),
                 extract_json_array_for_key(json, &full_key),
                 true,
+                role,
             );
             if !stats.is_empty() {
                 out.push((hero_id, role, Some(bucket), stats));
@@ -2435,7 +2516,7 @@ pub(crate) fn parse_stratz_live_bracketed_item_purchases_json(
         return out;
     }
 
-    let stats = parse_stratz_hero_item_purchase_json(json);
+    let stats = parse_stratz_hero_item_purchase_json_for_role(json, role);
     if stats.is_empty() {
         Vec::new()
     } else {
@@ -2625,7 +2706,8 @@ fn parse_cached_hero_item_stats_entries(
                                 .and_then(role_from_cache_key);
                             let bucket_opt = extract_str_field(obj_slice, "\"bracket\"")
                                 .and_then(StratzBracketBucket::from_cache_key);
-                            let stats = parse_stratz_hero_item_purchase_json(obj_slice);
+                            let stats =
+                                parse_stratz_hero_item_purchase_json_for_role(obj_slice, role_opt);
                             if !stats.is_empty() {
                                 entries.push((HeroId(hid), role_opt, bucket_opt, stats));
                             }
@@ -2639,7 +2721,7 @@ fn parse_cached_hero_item_stats_entries(
             let role_opt = extract_str_field(trimmed, "\"role\"").and_then(role_from_cache_key);
             let bucket_opt = extract_str_field(trimmed, "\"bracket\"")
                 .and_then(StratzBracketBucket::from_cache_key);
-            let stats = parse_stratz_hero_item_purchase_json(json);
+            let stats = parse_stratz_hero_item_purchase_json_for_role(json, role_opt);
             if !stats.is_empty() {
                 if let Some(hid) = extract_u64_field(json, "\"heroId\"")
                     .or_else(|| extract_u64_field(json, "\"hero_id\""))
@@ -2747,8 +2829,12 @@ fn serialize_cached_hero_item_stats_v2(entries_map: &CachedHeroItemStatsMap) -> 
             } else {
                 let time_secs = (stat.avg_time_mins * 60.0).round().max(0.0) as i64;
                 full.push(format!(
-                    r#"{{"itemId":{},"timeSecs":{},"instance":0,"matchCount":{},"winCount":{}}}"#,
-                    stat.item_id.0, time_secs, stat.match_count, stat.win_count
+                    r#"{{"itemId":{},"phase":"{}","timeSecs":{},"instance":0,"matchCount":{},"winCount":{}}}"#,
+                    stat.item_id.0,
+                    phase_to_cache_key(stat.phase),
+                    time_secs,
+                    stat.match_count,
+                    stat.win_count
                 ));
             }
         }

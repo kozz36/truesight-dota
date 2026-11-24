@@ -5186,14 +5186,16 @@ fn sync_target_item_heroes_tracks_role_pairs_and_refreshes_on_role_change() {
     std::fs::create_dir_all(&tmp_dir).unwrap();
     std::fs::write(
         tmp_dir.join("hero_item_stats.json"),
-        r#"[{"heroId":32,"role":"Mid","bracket":"LEGEND_ANCIENT","itemStartingPurchase":[],"itemFullPurchase":[{"itemId":174,"timeSecs":900,"instance":0,"matchCount":1000,"winCount":550}]}]"#,
+        r#"[{"heroId":32,"role":"Mid","bracket":"HERALD_GUARDIAN","itemStartingPurchase":[],"itemFullPurchase":[{"itemId":174,"phase":"Core","timeSecs":1080,"instance":0,"matchCount":1000,"winCount":520}]},{"heroId":32,"role":"Mid","bracket":"CRUSADER_ARCHON","itemStartingPurchase":[],"itemFullPurchase":[{"itemId":174,"phase":"Core","timeSecs":960,"instance":0,"matchCount":1000,"winCount":540}]},{"heroId":32,"role":"Mid","bracket":"LEGEND_ANCIENT","itemStartingPurchase":[],"itemFullPurchase":[{"itemId":174,"phase":"Core","timeSecs":900,"instance":0,"matchCount":1000,"winCount":550}]},{"heroId":32,"role":"Mid","bracket":"DIVINE_IMMORTAL","itemStartingPurchase":[],"itemFullPurchase":[{"itemId":174,"phase":"Core","timeSecs":840,"instance":0,"matchCount":1000,"winCount":570}]}]"#,
     )
     .unwrap();
 
+    let token = "eyJhbGciOinone.eyJleHAiOjQxMDI0NDQ4MDB9.sig".to_string();
     let mut mgr = LocalCacheManager::with_optional_account(tmp_dir.clone(), None);
-    mgr.stratz_api_token = Some("eyJhbGciOinone.eyJleHAiOjQxMDI0NDQ4MDB9.sig".to_string());
+    mgr.stratz_api_token = Some(token.clone());
     let mut session =
         AppSession::with_cache_and_config(mgr, Some(tmp_dir.join("config.toml"))).unwrap();
+    session.cache_mgr.stratz_api_token = Some(token);
 
     assert!(execute_command(&mut session, "ally 2 riki").unwrap());
     assert!(
