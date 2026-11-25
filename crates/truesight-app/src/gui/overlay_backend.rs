@@ -190,6 +190,25 @@ pub(super) fn compute_drag_margin_step(
     }
 }
 
+/// Computes `(pointer_desktop, desired_overlay_top_left_desktop)` from a frozen grab-anchor
+/// surface origin, initial grab offset, and live anchor-relative pointer coordinates.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(super) fn compute_anchored_drag_desktop_pos(
+    anchor_desktop_origin: (i32, i32),
+    grab_local: (f32, f32),
+    pointer_local: (f32, f32),
+) -> ((i32, i32), (i32, i32)) {
+    let ptr_x = anchor_desktop_origin
+        .0
+        .saturating_add(pointer_local.0.round() as i32);
+    let ptr_y = anchor_desktop_origin
+        .1
+        .saturating_add(pointer_local.1.round() as i32);
+    let des_x = ptr_x.saturating_sub(grab_local.0.round() as i32);
+    let des_y = ptr_y.saturating_sub(grab_local.1.round() as i32);
+    ((ptr_x, ptr_y), (des_x, des_y))
+}
+
 /// Applies a south-east corner resize delta and clamps dimensions to overlay min/max bounds.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(super) fn compute_resize_step(

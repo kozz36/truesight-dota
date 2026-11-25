@@ -1,8 +1,8 @@
 use super::TrueSightGuiApp;
 use super::overlay_backend::{
     LogicalOutputBounds, OverlayBackendKind, OverlayHostMode, OverlayRect,
-    compute_drag_margin_step, compute_next_monitor_geometry, compute_resize_step,
-    resolve_cross_monitor_drag_target, resolve_overlay_backend,
+    compute_anchored_drag_desktop_pos, compute_drag_margin_step, compute_next_monitor_geometry,
+    compute_resize_step, resolve_cross_monitor_drag_target, resolve_overlay_backend,
 };
 use super::overlay_raster::OverlayRasterizer;
 use crate::AppSession;
@@ -489,4 +489,57 @@ fn next_monitor_geometry_cycles_cleanly_between_outputs() {
         .expect("should cycle back to first monitor");
     assert_eq!(cycled_back.x, 24.0);
     assert_eq!(cycled_back.y, 112.0);
+}
+
+#[test]
+fn anchored_continuous_drag_tracks_global_pointer_across_monitors() {
+    let outputs = [
+        LogicalOutputBounds {
+            id: 2,
+            x: 0,
+            y: 0,
+            width: 1440,
+            height: 2560,
+        },
+        LogicalOutputBounds {
+            id: 1,
+            x: 1440,
+            y: 560,
+            width: 2560,
+            height: 1440,
+        },
+    ];
+    let anchor_origin = (1060, 938);
+    let grab_local = (40.0, 12.0);
+
+    // Moving far right on DP-1 while still grabbing the frozen HDMI-A-1 anchor surface
+    let (ptr_dp1, des_dp1) =
+        compute_anchored_drag_desktop_pos(anchor_origin, grab_local, (1740.0, -238.0));
+    assert_eq!(ptr_dp1, (2800, 700));
+    assert_eq!(des_dp1, (2760, 688));
+    let dp1_margin = compute_drag_margin_step(
+        (des_dp1.0 - 1440, des_dp1.1 - 560),
+        (0.0, 0.0),
+        (380, 230),
+        Some((2560, 1440)),
+    );
+    assert_eq!(dp1_margin, (1320, 128));
+
+    // Dragging back left onto HDMI-A-1 resolves HDMI-A-1 as the new target
+    let (ptr_hdmi, des_hdmi) =
+        compute_anchored_drag_desktop_pos(anchor_origin, grab_local, (-200.0, -100.0));
+    assert_eq!(ptr_hdmi, (860, 838));
+    assert_eq!(des_hdmi, (820, 826));
+    let back = resolve_cross_monitor_drag_target(
+        Some(1),
+        (1440, 560),
+        (2560, 1440),
+        des_hdmi,
+        ptr_hdmi,
+        (380, 230),
+        &outputs,
+    )
+    .expect("continuing drag back onto HDMI-A-1 must migrate back");
+    assert_eq!(back.output_id, 2);
+    assert_eq!(back.margin, (820, 826));
 }

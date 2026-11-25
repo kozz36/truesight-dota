@@ -1,3 +1,4 @@
+mod handlers;
 mod output;
 mod pointer;
 
@@ -5,33 +6,25 @@ use super::overlay_backend::{
     CrossMonitorTarget, LayerCommand, LayerEvent, OverlayRect, compute_drag_margin_step,
 };
 use eframe::egui;
-
-use pointer::map_egui_cursor;
-use smithay_client_toolkit::compositor::{CompositorHandler, CompositorState, Region};
-use smithay_client_toolkit::output::{OutputHandler, OutputState};
+use smithay_client_toolkit::compositor::{CompositorState, Region};
+use smithay_client_toolkit::output::OutputState;
 use smithay_client_toolkit::reexports::calloop::channel::Event as ChannelEvent;
 use smithay_client_toolkit::reexports::calloop::{self, EventLoop, LoopSignal};
 use smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource;
 use smithay_client_toolkit::reexports::client::globals::{GlobalListContents, registry_queue_init};
 use smithay_client_toolkit::reexports::client::protocol::{
-    wl_output, wl_pointer, wl_registry, wl_seat, wl_shm, wl_surface,
+    wl_output, wl_pointer, wl_registry, wl_shm, wl_surface,
 };
 use smithay_client_toolkit::reexports::client::{Connection, Dispatch, QueueHandle};
-use smithay_client_toolkit::registry::{ProvidesRegistryState, RegistryState};
-use smithay_client_toolkit::seat::pointer::{ThemeSpec, ThemedPointer};
-use smithay_client_toolkit::seat::{Capability, SeatHandler, SeatState};
+use smithay_client_toolkit::registry::RegistryState;
+use smithay_client_toolkit::seat::SeatState;
+use smithay_client_toolkit::seat::pointer::ThemedPointer;
 use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::shell::wlr_layer::{
-    Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
-    LayerSurfaceConfigure,
+    Anchor, KeyboardInteractivity, Layer, LayerShell, LayerSurface,
 };
+use smithay_client_toolkit::shm::Shm;
 use smithay_client_toolkit::shm::slot::SlotPool;
-use smithay_client_toolkit::shm::{Shm, ShmHandler};
-use smithay_client_toolkit::{
-    delegate_compositor, delegate_layer, delegate_output, delegate_pointer, delegate_registry,
-    delegate_seat, delegate_shm, registry_handlers,
-};
-use std::num::NonZeroU32;
 use std::sync::mpsc;
 
 const BTN_LEFT: u32 = 0x110;
@@ -171,6 +164,12 @@ enum InteractionMode {
     },
 }
 
+pub(super) struct DragAnchor {
+    pub(super) layer: LayerSurface,
+    pub(super) desktop_origin: (i32, i32),
+    pub(super) grab_local: (f32, f32),
+}
+
 struct WaylandLayerState {
     conn: Connection,
     qh: QueueHandle<Self>,
@@ -188,6 +187,7 @@ struct WaylandLayerState {
     plain_pointer: Option<wl_pointer::WlPointer>,
     current_cursor: egui::CursorIcon,
     last_frame: Option<PendingShmFrame>,
+    drag_anchor: Option<DragAnchor>,
     active_surface: Option<ActiveLayerSurface>,
 }
 
@@ -257,6 +257,95 @@ impl WaylandLayerState {
         }
     }
 
+    fn attach_transparent_buffer(
+        &mut self,
+        wl_surface: &wl_surface::WlSurface,
+        width: u32,
+        height: u32,
+        scale: i32,
+    ) {
+        let s = scale.max(1) as u32;
+        let w_px = width.max(1).saturating_mul(s);
+        let h_px = height.max(1).saturating_mul(s);
+        let stride = (w_px as i32).saturating_mul(4);
+        let Ok((buffer, canvas)) =
+            self.pool
+                .create_buffer(w_px as i32, h_px as i32, stride, wl_shm::Format::Argb8888)
+        else {
+            return;
+        };
+        canvas.fill(0);
+        wl_surface.set_buffer_scale(scale.max(1));
+        wl_surface.damage_buffer(0, 0, w_px as i32, h_px as i32);
+        if buffer.attach_to(wl_surface).is_ok() {
+            wl_surface.commit();
+        }
+    }
+
+    #[expect(clippy::too_many_arguments)]
+    fn create_active_surface_on_output(
+        &self,
+        wl_output: Option<&wl_output::WlOutput>,
+        output_id: Option<u32>,
+        origin: (i32, i32),
+        size: Option<(i32, i32)>,
+        scale: i32,
+        margin: (i32, i32),
+        dims: (u32, u32, u32, u32),
+        click_through: bool,
+        hit_regions: (Option<OverlayRect>, Option<OverlayRect>),
+        seed_last_frame: bool,
+    ) -> ActiveLayerSurface {
+        let (width, height, min_w, min_h) = dims;
+        let surface = self.compositor_state.create_surface(&self.qh);
+        let layer = self.layer_shell.create_layer_surface(
+            &self.qh,
+            surface,
+            Layer::Overlay,
+            Some("truesight-overlay"),
+            wl_output,
+        );
+        layer.set_anchor(Anchor::TOP | Anchor::LEFT);
+        layer.set_exclusive_zone(0);
+        layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+        layer.set_size(width, height);
+        layer.set_margin(margin.1, 0, 0, margin.0);
+
+        let empty_region = Region::new(&self.compositor_state).ok();
+        let pending_frame = if seed_last_frame {
+            self.last_frame.clone().filter(|f| {
+                f.width_px == width.saturating_mul(scale.max(1) as u32)
+                    && f.height_px == height.saturating_mul(scale.max(1) as u32)
+                    && f.scale == scale.max(1)
+            })
+        } else {
+            None
+        };
+        let active = ActiveLayerSurface {
+            layer,
+            empty_region,
+            configured: false,
+            output_id,
+            scale: scale.max(1),
+            output_origin: origin,
+            output_size: size,
+            margin_x: margin.0,
+            margin_y: margin.1,
+            width,
+            height,
+            min_w,
+            min_h,
+            click_through,
+            drag_rect: hit_regions.0,
+            resize_rect: hit_regions.1,
+            interaction: InteractionMode::None,
+            pending_frame,
+        };
+        Self::apply_input_region(&active);
+        active.layer.commit();
+        active
+    }
+
     pub(super) fn migrate_to_output(
         &mut self,
         target: CrossMonitorTarget,
@@ -269,64 +358,118 @@ impl WaylandLayerState {
         let Some(prev) = self.active_surface.take() else {
             return;
         };
-        let (width, height, min_w, min_h) =
-            resize.unwrap_or((prev.width, prev.height, prev.min_w, prev.min_h));
-        let surface = self.compositor_state.create_surface(&self.qh);
-        let layer = self.layer_shell.create_layer_surface(
-            &self.qh,
-            surface,
-            Layer::Overlay,
-            Some("truesight-overlay"),
+        let dims = resize.unwrap_or((prev.width, prev.height, prev.min_w, prev.min_h));
+        let active = self.create_active_surface_on_output(
             Some(&wl_output),
-        );
-        layer.set_anchor(Anchor::TOP | Anchor::LEFT);
-        layer.set_exclusive_zone(0);
-        layer.set_keyboard_interactivity(KeyboardInteractivity::None);
-        layer.set_size(width, height);
-        layer.set_margin(target.margin.1, 0, 0, target.margin.0);
-
-        let empty_region = Region::new(&self.compositor_state).ok();
-        let pending_frame = self.last_frame.clone().filter(|f| {
-            f.width_px == width.saturating_mul(scale as u32)
-                && f.height_px == height.saturating_mul(scale as u32)
-                && f.scale == scale
-        });
-        let active = ActiveLayerSurface {
-            layer,
-            empty_region,
-            configured: false,
-            output_id: Some(target.output_id),
+            Some(target.output_id),
+            target.origin,
+            Some(target.size),
             scale,
-            output_origin: target.origin,
-            output_size: Some(target.size),
-            margin_x: target.margin.0,
-            margin_y: target.margin.1,
-            width,
-            height,
-            min_w,
-            min_h,
-            click_through: prev.click_through,
-            drag_rect: prev.drag_rect,
-            resize_rect: prev.resize_rect,
-            interaction: InteractionMode::None,
-            pending_frame,
-        };
-        Self::apply_input_region(&active);
-        active.layer.commit();
+            target.margin,
+            dims,
+            prev.click_through,
+            (prev.drag_rect, prev.resize_rect),
+            true,
+        );
         self.active_surface = Some(active);
 
         self.emit(LayerEvent::GeometryChanged {
             x: target.origin.0 + target.margin.0,
             y: target.origin.1 + target.margin.1,
-            width,
-            height,
+            width: dims.0,
+            height: dims.1,
             persist,
         });
         self.emit(LayerEvent::Configured {
-            width,
-            height,
+            width: dims.0,
+            height: dims.1,
             scale,
         });
+    }
+
+    pub(super) fn begin_anchored_cross_monitor_drag(
+        &mut self,
+        target: CrossMonitorTarget,
+        grab_local: (f32, f32),
+    ) {
+        if self.drag_anchor.is_some() {
+            self.migrate_to_output(target, None, false);
+            return;
+        }
+        let Some((wl_output, scale)) = self.output_by_id(target.output_id) else {
+            return;
+        };
+        let Some(prev) = self.active_surface.take() else {
+            return;
+        };
+        let anchor_origin = (
+            prev.output_origin.0 + prev.margin_x,
+            prev.output_origin.1 + prev.margin_y,
+        );
+        self.attach_transparent_buffer(
+            prev.layer.wl_surface(),
+            prev.width,
+            prev.height,
+            prev.scale,
+        );
+        let dims = (prev.width, prev.height, prev.min_w, prev.min_h);
+        let hit_regions = (prev.drag_rect, prev.resize_rect);
+        let click_through = prev.click_through;
+        self.drag_anchor = Some(DragAnchor {
+            layer: prev.layer,
+            desktop_origin: anchor_origin,
+            grab_local,
+        });
+        let active = self.create_active_surface_on_output(
+            Some(&wl_output),
+            Some(target.output_id),
+            target.origin,
+            Some(target.size),
+            scale,
+            target.margin,
+            dims,
+            click_through,
+            hit_regions,
+            true,
+        );
+        self.active_surface = Some(active);
+        if let Some(pointer) = &self.themed_pointer {
+            let _ = pointer.set_cursor(
+                &self.conn,
+                pointer::map_egui_cursor(egui::CursorIcon::Grabbing),
+            );
+        }
+
+        self.emit(LayerEvent::GeometryChanged {
+            x: target.origin.0 + target.margin.0,
+            y: target.origin.1 + target.margin.1,
+            width: dims.0,
+            height: dims.1,
+            persist: false,
+        });
+        self.emit(LayerEvent::Configured {
+            width: dims.0,
+            height: dims.1,
+            scale,
+        });
+    }
+
+    pub(super) fn finish_anchored_drag(&mut self) {
+        if self.drag_anchor.take().is_none() {
+            return;
+        }
+        if let Some(pointer) = &self.themed_pointer {
+            let _ = pointer.set_cursor(&self.conn, pointer::map_egui_cursor(self.current_cursor));
+        }
+        if let Some(active) = &self.active_surface {
+            self.emit(LayerEvent::GeometryChanged {
+                x: active.output_origin.0 + active.margin_x,
+                y: active.output_origin.1 + active.margin_y,
+                width: active.width,
+                height: active.height,
+                persist: true,
+            });
+        }
     }
 
     fn handle_command(&mut self, cmd: LayerCommand) {
@@ -340,58 +483,35 @@ impl WaylandLayerState {
                 min_h,
                 click_through,
             } => {
+                self.drag_anchor = None;
                 self.active_surface = None;
                 let target = self.resolve_target_output(x, y, width, height);
                 let init_w = width.max(min_w).min(MAX_OVERLAY_W);
                 let init_h = height.max(min_h).min(MAX_OVERLAY_H);
                 let raw_margin_x = x.saturating_sub(target.origin.0).max(0);
                 let raw_margin_y = y.saturating_sub(target.origin.1).max(0);
-                let (margin_x, margin_y) = compute_drag_margin_step(
+                let margin = compute_drag_margin_step(
                     (raw_margin_x, raw_margin_y),
                     (0.0, 0.0),
                     (init_w, init_h),
                     target.size,
                 );
-                let surface = self.compositor_state.create_surface(&self.qh);
-                let layer = self.layer_shell.create_layer_surface(
-                    &self.qh,
-                    surface,
-                    Layer::Overlay,
-                    Some("truesight-overlay"),
+                let active = self.create_active_surface_on_output(
                     target.output.as_ref(),
-                );
-                layer.set_anchor(Anchor::TOP | Anchor::LEFT);
-                layer.set_exclusive_zone(0);
-                layer.set_keyboard_interactivity(KeyboardInteractivity::None);
-                layer.set_size(init_w, init_h);
-                layer.set_margin(margin_y, 0, 0, margin_x);
-
-                let empty_region = Region::new(&self.compositor_state).ok();
-                let active = ActiveLayerSurface {
-                    layer,
-                    empty_region,
-                    configured: false,
-                    output_id: target.id,
-                    scale: target.scale,
-                    output_origin: target.origin,
-                    output_size: target.size,
-                    margin_x,
-                    margin_y,
-                    width: init_w,
-                    height: init_h,
-                    min_w,
-                    min_h,
+                    target.id,
+                    target.origin,
+                    target.size,
+                    target.scale,
+                    margin,
+                    (init_w, init_h, min_w, min_h),
                     click_through,
-                    drag_rect: None,
-                    resize_rect: None,
-                    interaction: InteractionMode::None,
-                    pending_frame: None,
-                };
-                Self::apply_input_region(&active);
-                active.layer.commit();
+                    (None, None),
+                    false,
+                );
                 self.active_surface = Some(active);
             }
             LayerCommand::Hide => {
+                self.drag_anchor = None;
                 self.active_surface = None;
             }
             LayerCommand::SetGeometry {
@@ -453,6 +573,9 @@ impl WaylandLayerState {
                 }
             }
             LayerCommand::SetClickThrough(click_through) => {
+                if click_through {
+                    self.drag_anchor = None;
+                }
                 if let Some(active) = self.active_surface.as_mut()
                     && active.click_through != click_through
                 {
@@ -476,7 +599,7 @@ impl WaylandLayerState {
             LayerCommand::SetCursor(icon) => {
                 self.current_cursor = icon;
                 if let Some(pointer) = &self.themed_pointer {
-                    let _ = pointer.set_cursor(&self.conn, map_egui_cursor(icon));
+                    let _ = pointer.set_cursor(&self.conn, pointer::map_egui_cursor(icon));
                 }
             }
             LayerCommand::PresentFrame {
@@ -496,6 +619,7 @@ impl WaylandLayerState {
                 }
             }
             LayerCommand::Shutdown => {
+                self.drag_anchor = None;
                 self.active_surface = None;
                 self.loop_signal.stop();
             }
@@ -579,6 +703,7 @@ fn run_presenter_thread(
         plain_pointer: None,
         current_cursor: egui::CursorIcon::Default,
         last_frame: None,
+        drag_anchor: None,
         active_surface: None,
     };
 
@@ -608,261 +733,4 @@ fn run_presenter_thread(
 
     let _ = ready_tx.send(Ok(()));
     let _ = event_loop.run(None, &mut state, |_| {});
-}
-
-impl CompositorHandler for WaylandLayerState {
-    fn scale_factor_changed(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        surface: &wl_surface::WlSurface,
-        new_factor: i32,
-    ) {
-        let scale = new_factor.max(1);
-        let configured_info = if let Some(active) = self.active_surface.as_mut()
-            && active.layer.wl_surface() == surface
-        {
-            active.scale = scale;
-            active
-                .configured
-                .then_some((active.width, active.height, active.scale))
-        } else {
-            None
-        };
-        if let Some((width, height, scale)) = configured_info {
-            self.emit(LayerEvent::Configured {
-                width,
-                height,
-                scale,
-            });
-        }
-    }
-
-    fn transform_changed(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
-        _new_transform: wl_output::Transform,
-    ) {
-    }
-
-    fn frame(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        surface: &wl_surface::WlSurface,
-        _time: u32,
-    ) {
-        if let Some(active) = self.active_surface.as_mut()
-            && active.layer.wl_surface() == surface
-            && let InteractionMode::Dragging {
-                ref mut frame_pending,
-                ..
-            } = active.interaction
-        {
-            *frame_pending = false;
-        }
-    }
-
-    fn surface_enter(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        surface: &wl_surface::WlSurface,
-        output: &wl_output::WlOutput,
-    ) {
-        let info = self.output_state.info(output);
-        let configured_info = if let Some(active) = self.active_surface.as_mut()
-            && active.layer.wl_surface() == surface
-            && let Some(info) = info
-        {
-            active.output_id = Some(info.id);
-            active.output_origin = info.logical_position.unwrap_or(active.output_origin);
-            if let Some(sz) = info.logical_size.filter(|&(w, h)| w > 0 && h > 0) {
-                active.output_size = Some(sz);
-            }
-            let sf = info.scale_factor.max(1);
-            let scale_changed = sf != active.scale;
-            active.scale = sf;
-            (active.configured && scale_changed).then_some((
-                active.width,
-                active.height,
-                active.scale,
-            ))
-        } else {
-            None
-        };
-        if let Some((width, height, scale)) = configured_info {
-            self.emit(LayerEvent::Configured {
-                width,
-                height,
-                scale,
-            });
-        }
-    }
-
-    fn surface_leave(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
-        _output: &wl_output::WlOutput,
-    ) {
-    }
-}
-
-impl OutputHandler for WaylandLayerState {
-    fn output_state(&mut self) -> &mut OutputState {
-        &mut self.output_state
-    }
-
-    fn new_output(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _output: wl_output::WlOutput,
-    ) {
-        self.emit_monitors();
-    }
-
-    fn update_output(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _output: wl_output::WlOutput,
-    ) {
-        self.emit_monitors();
-    }
-
-    fn output_destroyed(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _output: wl_output::WlOutput,
-    ) {
-        self.emit_monitors();
-    }
-}
-
-impl LayerShellHandler for WaylandLayerState {
-    fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, layer: &LayerSurface) {
-        if self
-            .active_surface
-            .as_ref()
-            .is_some_and(|a| &a.layer == layer)
-        {
-            self.active_surface = None;
-            self.emit(LayerEvent::Closed);
-        }
-    }
-
-    fn configure(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        layer: &LayerSurface,
-        configure: LayerSurfaceConfigure,
-        _serial: u32,
-    ) {
-        let configured_info = if let Some(active) = self.active_surface.as_mut()
-            && &active.layer == layer
-        {
-            active.width = NonZeroU32::new(configure.new_size.0)
-                .map_or(active.width, NonZeroU32::get)
-                .max(active.min_w)
-                .min(MAX_OVERLAY_W);
-            active.height = NonZeroU32::new(configure.new_size.1)
-                .map_or(active.height, NonZeroU32::get)
-                .max(active.min_h)
-                .min(MAX_OVERLAY_H);
-            active.configured = true;
-            Some((active.width, active.height, active.scale))
-        } else {
-            None
-        };
-
-        if let Some((width, height, scale)) = configured_info {
-            self.emit(LayerEvent::Configured {
-                width,
-                height,
-                scale,
-            });
-            self.commit_pending_frame();
-        }
-    }
-}
-
-impl SeatHandler for WaylandLayerState {
-    fn seat_state(&mut self) -> &mut SeatState {
-        &mut self.seat_state
-    }
-
-    fn new_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
-
-    fn new_capability(
-        &mut self,
-        _conn: &Connection,
-        qh: &QueueHandle<Self>,
-        seat: wl_seat::WlSeat,
-        capability: Capability,
-    ) {
-        if capability == Capability::Pointer
-            && self.themed_pointer.is_none()
-            && self.plain_pointer.is_none()
-        {
-            let cursor_surface = self.compositor_state.create_surface(qh);
-            if let Ok(themed) = self.seat_state.get_pointer_with_theme(
-                qh,
-                &seat,
-                self.shm.wl_shm(),
-                cursor_surface,
-                ThemeSpec::default(),
-            ) {
-                self.themed_pointer = Some(themed);
-            } else if let Ok(ptr) = self.seat_state.get_pointer(qh, &seat) {
-                self.plain_pointer = Some(ptr);
-            }
-        }
-    }
-
-    fn remove_capability(
-        &mut self,
-        _conn: &Connection,
-        _: &QueueHandle<Self>,
-        _: wl_seat::WlSeat,
-        capability: Capability,
-    ) {
-        if capability == Capability::Pointer {
-            if let Some(themed) = self.themed_pointer.take() {
-                themed.pointer().release();
-            }
-            if let Some(ptr) = self.plain_pointer.take() {
-                ptr.release();
-            }
-        }
-    }
-
-    fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
-}
-
-impl ShmHandler for WaylandLayerState {
-    fn shm_state(&mut self) -> &mut Shm {
-        &mut self.shm
-    }
-}
-
-delegate_compositor!(WaylandLayerState);
-delegate_output!(WaylandLayerState);
-delegate_shm!(WaylandLayerState);
-delegate_seat!(WaylandLayerState);
-delegate_pointer!(WaylandLayerState);
-delegate_layer!(WaylandLayerState);
-delegate_registry!(WaylandLayerState);
-
-impl ProvidesRegistryState for WaylandLayerState {
-    fn registry(&mut self) -> &mut RegistryState {
-        &mut self.registry_state
-    }
-    registry_handlers![OutputState, SeatState];
 }

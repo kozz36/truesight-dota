@@ -1,5 +1,6 @@
 use super::super::overlay_backend::{
-    LayerEvent, compute_drag_margin_step, compute_resize_step, resolve_cross_monitor_drag_target,
+    LayerEvent, compute_anchored_drag_desktop_pos, compute_drag_margin_step, compute_resize_step,
+    resolve_cross_monitor_drag_target,
 };
 use super::{
     BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, InteractionMode, MAX_OVERLAY_H, MAX_OVERLAY_W,
@@ -34,6 +35,97 @@ pub(super) fn map_wayland_button(button: u32) -> Option<egui::PointerButton> {
     }
 }
 
+impl WaylandLayerState {
+    fn handle_anchored_pointer_events(
+        &mut self,
+        events: &[PointerEvent],
+        outputs: &[super::super::overlay_backend::LogicalOutputBounds],
+    ) {
+        let Some((anchor_surface, anchor_origin, grab_local)) = self
+            .drag_anchor
+            .as_ref()
+            .map(|a| (a.layer.wl_surface().clone(), a.desktop_origin, a.grab_local))
+        else {
+            return;
+        };
+
+        for event in events {
+            if event.surface != anchor_surface {
+                continue;
+            }
+            let px = event.position.0 as f32;
+            let py = event.position.1 as f32;
+            match event.kind {
+                PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
+                    let (ptr_desktop, desired_desktop) =
+                        compute_anchored_drag_desktop_pos(anchor_origin, grab_local, (px, py));
+                    let migrate_target = self.active_surface.as_ref().and_then(|active| {
+                        let cur_size = active.output_size?;
+                        resolve_cross_monitor_drag_target(
+                            active.output_id,
+                            active.output_origin,
+                            cur_size,
+                            desired_desktop,
+                            ptr_desktop,
+                            (active.width, active.height),
+                            outputs,
+                        )
+                    });
+                    if let Some(target) = migrate_target {
+                        self.migrate_to_output(target, None, false);
+                        continue;
+                    }
+                    let moved_geom = if let Some(active) = self.active_surface.as_mut() {
+                        let raw_mx = desired_desktop.0.saturating_sub(active.output_origin.0);
+                        let raw_my = desired_desktop.1.saturating_sub(active.output_origin.1);
+                        let (mx, my) = compute_drag_margin_step(
+                            (raw_mx, raw_my),
+                            (0.0, 0.0),
+                            (active.width, active.height),
+                            active.output_size,
+                        );
+                        if (mx, my) != (active.margin_x, active.margin_y) {
+                            active.margin_x = mx;
+                            active.margin_y = my;
+                            active.layer.set_margin(my, 0, 0, mx);
+                            active.layer.commit();
+                            Some((
+                                active.output_origin.0 + mx,
+                                active.output_origin.1 + my,
+                                active.width,
+                                active.height,
+                            ))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some((x, y, width, height)) = moved_geom {
+                        self.emit(LayerEvent::GeometryChanged {
+                            x,
+                            y,
+                            width,
+                            height,
+                            persist: false,
+                        });
+                    }
+                }
+                PointerEventKind::Release {
+                    button: BTN_LEFT, ..
+                }
+                | PointerEventKind::Leave { .. } => {
+                    self.finish_anchored_drag();
+                    let _ = self.conn.flush();
+                    return;
+                }
+                _ => {}
+            }
+        }
+        let _ = self.conn.flush();
+    }
+}
+
 impl PointerHandler for WaylandLayerState {
     fn pointer_frame(
         &mut self,
@@ -43,9 +135,17 @@ impl PointerHandler for WaylandLayerState {
         events: &[PointerEvent],
     ) {
         let outputs = self.logical_outputs();
+        if self.drag_anchor.is_some() {
+            self.handle_anchored_pointer_events(events, &outputs);
+            return;
+        }
+
         let mut pending_events = Vec::new();
         let mut enter_seen = false;
-        let mut migrate_target = None;
+        let mut migrate_target: Option<(
+            super::super::overlay_backend::CrossMonitorTarget,
+            (f32, f32),
+        )> = None;
         {
             let Some(active) = self.active_surface.as_mut() else {
                 return;
@@ -93,7 +193,7 @@ impl PointerHandler for WaylandLayerState {
                                             (active.width, active.height),
                                             &outputs,
                                         ) {
-                                            migrate_target = Some(target);
+                                            migrate_target = Some((target, grab_local));
                                             break;
                                         }
                                     }
@@ -247,8 +347,8 @@ impl PointerHandler for WaylandLayerState {
             let _ = pointer.set_cursor(&self.conn, map_egui_cursor(self.current_cursor));
         }
 
-        if let Some(target) = migrate_target {
-            self.migrate_to_output(target, None, true);
+        if let Some((target, grab_local)) = migrate_target {
+            self.begin_anchored_cross_monitor_drag(target, grab_local);
             let _ = self.conn.flush();
             return;
         }
