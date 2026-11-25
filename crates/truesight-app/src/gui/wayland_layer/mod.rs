@@ -120,12 +120,25 @@ impl WaylandLayerHandle {
         }
         out
     }
+
+    #[cfg(test)]
+    pub(super) fn from_test_channels(
+        cmd_tx: calloop::channel::Sender<LayerCommand>,
+        event_rx: mpsc::Receiver<LayerEvent>,
+    ) -> Self {
+        Self {
+            cmd_tx,
+            event_rx,
+            worker: None,
+        }
+    }
 }
 
 struct ActiveLayerSurface {
     layer: LayerSurface,
     empty_region: Option<Region>,
     configured: bool,
+    is_post_draft: bool,
     output_id: Option<u32>,
     scale: i32,
     output_origin: (i32, i32),
@@ -292,6 +305,7 @@ impl WaylandLayerState {
         scale: i32,
         margin: (i32, i32),
         dims: (u32, u32, u32, u32),
+        is_post_draft: bool,
         click_through: bool,
         hit_regions: (Option<OverlayRect>, Option<OverlayRect>),
         seed_last_frame: bool,
@@ -325,6 +339,7 @@ impl WaylandLayerState {
             layer,
             empty_region,
             configured: false,
+            is_post_draft,
             output_id,
             scale: scale.max(1),
             output_origin: origin,
@@ -350,6 +365,7 @@ impl WaylandLayerState {
         &mut self,
         target: CrossMonitorTarget,
         resize: Option<(u32, u32, u32, u32)>,
+        is_post_draft_override: Option<bool>,
         persist: bool,
     ) {
         let Some((wl_output, scale)) = self.output_by_id(target.output_id) else {
@@ -358,6 +374,7 @@ impl WaylandLayerState {
         let Some(prev) = self.active_surface.take() else {
             return;
         };
+        let view = is_post_draft_override.unwrap_or(prev.is_post_draft);
         let dims = resize.unwrap_or((prev.width, prev.height, prev.min_w, prev.min_h));
         let active = self.create_active_surface_on_output(
             Some(&wl_output),
@@ -367,6 +384,7 @@ impl WaylandLayerState {
             scale,
             target.margin,
             dims,
+            view,
             prev.click_through,
             (prev.drag_rect, prev.resize_rect),
             true,
@@ -374,6 +392,7 @@ impl WaylandLayerState {
         self.active_surface = Some(active);
 
         self.emit(LayerEvent::GeometryChanged {
+            is_post_draft: view,
             x: target.origin.0 + target.margin.0,
             y: target.origin.1 + target.margin.1,
             width: dims.0,
@@ -393,7 +412,7 @@ impl WaylandLayerState {
         grab_local: (f32, f32),
     ) {
         if self.drag_anchor.is_some() {
-            self.migrate_to_output(target, None, false);
+            self.migrate_to_output(target, None, None, false);
             return;
         }
         let Some((wl_output, scale)) = self.output_by_id(target.output_id) else {
@@ -413,6 +432,7 @@ impl WaylandLayerState {
             prev.scale,
         );
         let dims = (prev.width, prev.height, prev.min_w, prev.min_h);
+        let view = prev.is_post_draft;
         let hit_regions = (prev.drag_rect, prev.resize_rect);
         let click_through = prev.click_through;
         self.drag_anchor = Some(DragAnchor {
@@ -428,6 +448,7 @@ impl WaylandLayerState {
             scale,
             target.margin,
             dims,
+            view,
             click_through,
             hit_regions,
             true,
@@ -441,6 +462,7 @@ impl WaylandLayerState {
         }
 
         self.emit(LayerEvent::GeometryChanged {
+            is_post_draft: view,
             x: target.origin.0 + target.margin.0,
             y: target.origin.1 + target.margin.1,
             width: dims.0,
@@ -463,6 +485,7 @@ impl WaylandLayerState {
         }
         if let Some(active) = &self.active_surface {
             self.emit(LayerEvent::GeometryChanged {
+                is_post_draft: active.is_post_draft,
                 x: active.output_origin.0 + active.margin_x,
                 y: active.output_origin.1 + active.margin_y,
                 width: active.width,
@@ -475,6 +498,7 @@ impl WaylandLayerState {
     fn handle_command(&mut self, cmd: LayerCommand) {
         match cmd {
             LayerCommand::Show {
+                is_post_draft,
                 x,
                 y,
                 width,
@@ -504,6 +528,7 @@ impl WaylandLayerState {
                     target.scale,
                     margin,
                     (init_w, init_h, min_w, min_h),
+                    is_post_draft,
                     click_through,
                     (None, None),
                     false,
@@ -515,6 +540,7 @@ impl WaylandLayerState {
                 self.active_surface = None;
             }
             LayerCommand::SetGeometry {
+                is_post_draft,
                 x,
                 y,
                 width,
@@ -546,12 +572,14 @@ impl WaylandLayerState {
                             margin,
                         },
                         Some((w, h, min_w, min_h)),
+                        Some(is_post_draft),
                         false,
                     );
                 } else if let Some(active) = self.active_surface.as_mut() {
                     active.min_w = min_w;
                     active.min_h = min_h;
                     if matches!(active.interaction, InteractionMode::None) {
+                        active.is_post_draft = is_post_draft;
                         let raw_mx = x.saturating_sub(active.output_origin.0).max(0);
                         let raw_my = y.saturating_sub(active.output_origin.1).max(0);
                         let (mx, my) = compute_drag_margin_step(

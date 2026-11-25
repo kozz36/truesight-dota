@@ -72,7 +72,7 @@ impl WaylandLayerState {
                         )
                     });
                     if let Some(target) = migrate_target {
-                        self.migrate_to_output(target, None, false);
+                        self.migrate_to_output(target, None, None, false);
                         continue;
                     }
                     let moved_geom = if let Some(active) = self.active_surface.as_mut() {
@@ -90,6 +90,7 @@ impl WaylandLayerState {
                             active.layer.set_margin(my, 0, 0, mx);
                             active.layer.commit();
                             Some((
+                                active.is_post_draft,
                                 active.output_origin.0 + mx,
                                 active.output_origin.1 + my,
                                 active.width,
@@ -101,8 +102,9 @@ impl WaylandLayerState {
                     } else {
                         None
                     };
-                    if let Some((x, y, width, height)) = moved_geom {
+                    if let Some((is_post_draft, x, y, width, height)) = moved_geom {
                         self.emit(LayerEvent::GeometryChanged {
+                            is_post_draft,
                             x,
                             y,
                             width,
@@ -216,6 +218,7 @@ impl PointerHandler for WaylandLayerState {
                                         active.layer.commit();
                                         *frame_pending = true;
                                         pending_events.push(LayerEvent::GeometryChanged {
+                                            is_post_draft: active.is_post_draft,
                                             x: active.output_origin.0 + active.margin_x,
                                             y: active.output_origin.1 + active.margin_y,
                                             width: active.width,
@@ -242,6 +245,7 @@ impl PointerHandler for WaylandLayerState {
                                     active.layer.set_size(active.width, active.height);
                                     active.layer.commit();
                                     pending_events.push(LayerEvent::GeometryChanged {
+                                        is_post_draft: active.is_post_draft,
                                         x: active.output_origin.0 + active.margin_x,
                                         y: active.output_origin.1 + active.margin_y,
                                         width: active.width,
@@ -259,6 +263,7 @@ impl PointerHandler for WaylandLayerState {
                         if !matches!(active.interaction, InteractionMode::None) {
                             active.interaction = InteractionMode::None;
                             pending_events.push(LayerEvent::GeometryChanged {
+                                is_post_draft: active.is_post_draft,
                                 x: active.output_origin.0 + active.margin_x,
                                 y: active.output_origin.1 + active.margin_y,
                                 width: active.width,
@@ -303,6 +308,7 @@ impl PointerHandler for WaylandLayerState {
                         {
                             active.interaction = InteractionMode::None;
                             pending_events.push(LayerEvent::GeometryChanged {
+                                is_post_draft: active.is_post_draft,
                                 x: active.output_origin.0 + active.margin_x,
                                 y: active.output_origin.1 + active.margin_y,
                                 width: active.width,

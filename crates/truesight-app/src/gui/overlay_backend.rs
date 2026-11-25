@@ -51,6 +51,7 @@ impl From<egui::Rect> for OverlayRect {
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(super) enum LayerCommand {
     Show {
+        is_post_draft: bool,
         x: i32,
         y: i32,
         width: u32,
@@ -61,6 +62,7 @@ pub(super) enum LayerCommand {
     },
     Hide,
     SetGeometry {
+        is_post_draft: bool,
         x: i32,
         y: i32,
         width: u32,
@@ -93,6 +95,7 @@ pub(super) enum LayerEvent {
         scale: i32,
     },
     GeometryChanged {
+        is_post_draft: bool,
         x: i32,
         y: i32,
         width: u32,
@@ -524,6 +527,7 @@ impl super::TrueSightGuiApp {
                 (280, 160)
             };
             handle.send(LayerCommand::SetGeometry {
+                is_post_draft,
                 x: next.x.round() as i32,
                 y: next.y.round() as i32,
                 width: (next.width.round() as u32).clamp(min_w, 840),
@@ -565,13 +569,16 @@ impl super::TrueSightGuiApp {
                     self.overlay_rasterizer.invalidate();
                 }
                 LayerEvent::GeometryChanged {
+                    is_post_draft: ev_is_post_draft,
                     x,
                     y,
                     width,
                     height,
                     persist,
                 } => {
-                    self.wayland_layer_size = (width.max(1), height.max(1));
+                    if ev_is_post_draft == self.session.is_post_draft_build_view() {
+                        self.wayland_layer_size = (width.max(1), height.max(1));
+                    }
                     let geom = crate::session::OverlayGeometry {
                         x: x as f32,
                         y: y as f32,
@@ -580,8 +587,9 @@ impl super::TrueSightGuiApp {
                         click_through: self.session.overlay_geometry.click_through,
                     };
                     if persist {
-                        self.session.set_active_overlay_geometry(geom);
-                    } else if self.session.is_post_draft_build_view() {
+                        self.session
+                            .set_overlay_geometry_for_view(ev_is_post_draft, geom);
+                    } else if ev_is_post_draft {
                         self.session.build_overlay_geometry = geom;
                     } else {
                         self.session.overlay_geometry = geom;
@@ -655,6 +663,7 @@ impl super::TrueSightGuiApp {
             self.overlay_rasterizer.invalidate();
             if let Some(handle) = self.wayland_layer.as_ref() {
                 handle.send(LayerCommand::Show {
+                    is_post_draft,
                     x: target_x,
                     y: target_y,
                     width: target_w,
@@ -672,6 +681,7 @@ impl super::TrueSightGuiApp {
             self.wayland_layer_size = (target_w, target_h);
             if let Some(handle) = self.wayland_layer.as_ref() {
                 handle.send(LayerCommand::SetGeometry {
+                    is_post_draft,
                     x: target_x,
                     y: target_y,
                     width: target_w,

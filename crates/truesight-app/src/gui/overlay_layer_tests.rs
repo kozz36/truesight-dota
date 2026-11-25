@@ -685,3 +685,115 @@ fn rasterizer_textured_semi_transparent_quad_has_no_diagonal_seam() {
         }
     }
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn queued_picks_geometry_event_does_not_overwrite_build_geometry_on_gsi_transition() {
+    use super::overlay_backend::{LayerCommand, LayerEvent};
+    use super::wayland_layer::WaylandLayerHandle;
+    use truesight_core::ports::DraftEvent;
+
+    let mut session = AppSession::new().unwrap();
+    session.overlay_mode = true;
+    session.overlay_geometry = OverlayGeometry {
+        x: 24.0,
+        y: 96.0,
+        width: 380.0,
+        height: 230.0,
+        click_through: false,
+    };
+    session.build_overlay_geometry = OverlayGeometry {
+        x: 600.0,
+        y: 450.0,
+        width: 420.0,
+        height: 168.0,
+        click_through: false,
+    };
+
+    let (cmd_tx, cmd_rx) =
+        smithay_client_toolkit::reexports::calloop::channel::channel::<LayerCommand>();
+    let (event_tx, event_rx) = std::sync::mpsc::channel::<LayerEvent>();
+
+    let mut app = TrueSightGuiApp::new(session, None, None);
+    app.wayland_layer = Some(WaylandLayerHandle::from_test_channels(cmd_tx, event_rx));
+    app.wayland_layer_visible = true;
+    app.last_overlay_is_post_draft = Some(false);
+    app.wayland_layer_size = (380, 230);
+
+    // GSI transitions from Hero Selection (Picks) to Game In Progress (Build).
+    app.session.apply_event(DraftEvent::GameRulesStateChanged {
+        state_name: "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS".into(),
+        game_time_secs: 0,
+    });
+    assert!(app.session.is_post_draft_build_view());
+
+    // A final Picks drag/resize event from the compositor was still queued in event_rx.
+    event_tx
+        .send(LayerEvent::GeometryChanged {
+            is_post_draft: false,
+            x: 120,
+            y: 230,
+            width: 380,
+            height: 230,
+            persist: true,
+        })
+        .unwrap();
+
+    let main_ctx = egui::Context::default();
+    app.step_wayland_layer_overlay(&main_ctx);
+
+    assert_eq!(app.session.overlay_geometry.x, 120.0);
+    assert_eq!(app.session.overlay_geometry.y, 230.0);
+    assert_eq!(app.session.overlay_geometry.width, 380.0);
+    assert_eq!(app.session.overlay_geometry.height, 230.0);
+
+    assert_eq!(app.session.build_overlay_geometry.x, 600.0);
+    assert_eq!(app.session.build_overlay_geometry.y, 450.0);
+    assert_eq!(app.session.build_overlay_geometry.width, 420.0);
+    assert_eq!(app.session.build_overlay_geometry.height, 168.0);
+    assert_eq!(app.wayland_layer_size, (420, 168));
+
+    let mut saw_build_set_geometry = false;
+    while let Ok(cmd) = cmd_rx.try_recv() {
+        if let LayerCommand::SetGeometry {
+            is_post_draft,
+            x,
+            y,
+            width,
+            height,
+            min_w,
+            min_h,
+        } = cmd
+        {
+            assert!(is_post_draft);
+            assert_eq!(
+                (x, y, width, height, min_w, min_h),
+                (600, 450, 420, 168, 220, 104)
+            );
+            saw_build_set_geometry = true;
+        }
+    }
+    assert!(
+        saw_build_set_geometry,
+        "transition to Build must send Build's saved geometry to the presenter"
+    );
+
+    // Even a late in-flight non-persisted Picks drag arriving one frame later must not clobber Build.
+    event_tx
+        .send(LayerEvent::GeometryChanged {
+            is_post_draft: false,
+            x: 140,
+            y: 250,
+            width: 380,
+            height: 230,
+            persist: false,
+        })
+        .unwrap();
+    app.step_wayland_layer_overlay(&main_ctx);
+
+    assert_eq!(app.session.overlay_geometry.x, 140.0);
+    assert_eq!(app.session.overlay_geometry.y, 250.0);
+    assert_eq!(app.session.build_overlay_geometry.x, 600.0);
+    assert_eq!(app.session.build_overlay_geometry.y, 450.0);
+    assert_eq!(app.wayland_layer_size, (420, 168));
+}
