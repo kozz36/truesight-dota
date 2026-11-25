@@ -668,12 +668,14 @@ impl TrueSightGuiApp {
 
         let panel_rect = panel_resp.response.rect;
         let grain_id = super::surfaces::gem_grain_texture_id(ui.ctx());
+        let glow_id = super::surfaces::gem_glow_texture_id(ui.ctx());
         ui.painter().set(
             bg_idx,
             super::surfaces::build_overlay_glass_background(
                 panel_rect,
                 self.session.overlay_opacity,
                 grain_id,
+                glow_id,
             ),
         );
         super::surfaces::paint_overlay_glass_frame(ui.painter(), panel_rect);

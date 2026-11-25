@@ -1,14 +1,18 @@
 use super::theme::{P_GEM, P_GEM_DEEP, P_INDIGO_1, P_VOID, paint_hud_corner_ticks};
 use crate::session::AppSession;
 use eframe::egui::{
-    self, Color32, ColorImage, CornerRadius, Mesh, Pos2, Rect, Shape, Stroke, TextureFilter,
-    TextureId, TextureOptions, TextureWrapMode, epaint::Vertex, pos2,
+    self, Color32, ColorImage, CornerRadius, Mesh, Rect, Shape, Stroke, TextureFilter, TextureId,
+    TextureOptions, TextureWrapMode, epaint::Vertex, pos2,
 };
 
 /// Pixel width and height of the procedural tileable gemstone micro-grain texture.
 pub(super) const MICRO_GRAIN_SIZE: usize = 128;
 
+/// Pixel width and height of the continuous radial gemstone glow falloff texture.
+pub(super) const RADIAL_GLOW_SIZE: usize = 64;
+
 const GRAIN_CTX_DATA_KEY: &str = "truesight_gem_micro_grain_tex_id";
+const GLOW_CTX_DATA_KEY: &str = "truesight_gem_radial_glow_tex_id";
 
 /// Stores the uploaded micro-grain `TextureId` inside `egui::Context` temporary state so stateless
 /// surface helpers (`hud_card`, `hud_card_fill`) can composite the texture without changing call signatures.
@@ -23,12 +27,34 @@ pub(super) fn gem_grain_texture_id(ctx: &egui::Context) -> Option<TextureId> {
     ctx.data(|d| d.get_temp::<TextureId>(egui::Id::new(GRAIN_CTX_DATA_KEY)))
 }
 
+/// Stores the uploaded continuous radial glow `TextureId` inside `egui::Context` temporary state.
+pub(super) fn store_gem_glow_texture_id(ctx: &egui::Context, id: TextureId) {
+    ctx.data_mut(|d| {
+        d.insert_temp(egui::Id::new(GLOW_CTX_DATA_KEY), id);
+    });
+}
+
+/// Retrieves the uploaded continuous radial glow `TextureId` from `egui::Context` when initialized.
+pub(super) fn gem_glow_texture_id(ctx: &egui::Context) -> Option<TextureId> {
+    ctx.data(|d| d.get_temp::<TextureId>(egui::Id::new(GLOW_CTX_DATA_KEY)))
+}
+
 /// Returns seamless `Repeat`-wrapped linear sampling options for the procedural micro-grain texture.
 pub(super) fn micro_grain_texture_options() -> TextureOptions {
     TextureOptions {
         magnification: TextureFilter::Linear,
         minification: TextureFilter::Linear,
         wrap_mode: TextureWrapMode::Repeat,
+        mipmap_mode: None,
+    }
+}
+
+/// Returns bilinear `ClampToEdge` sampling options for the continuous radial gemstone glow texture.
+pub(super) fn radial_glow_texture_options() -> TextureOptions {
+    TextureOptions {
+        magnification: TextureFilter::Linear,
+        minification: TextureFilter::Linear,
+        wrap_mode: TextureWrapMode::ClampToEdge,
         mipmap_mode: None,
     }
 }
@@ -44,7 +70,6 @@ fn hash_lattice_2d(x: usize, y: usize, seed: u64) -> f32 {
     v ^= v >> 27;
     v = v.wrapping_mul(0x94D0_49BB_1331_11EB);
     v ^= v >> 31;
-    // Map upper 24 bits into [-1.0, 1.0].
     let unit = ((v >> 40) as f32) / ((1u32 << 24) - 1) as f32;
     unit * 2.0 - 1.0
 }
@@ -75,18 +100,92 @@ pub(super) fn generate_micro_grain_image() -> ColorImage {
     let mut rgba = Vec::with_capacity(MICRO_GRAIN_SIZE * MICRO_GRAIN_SIZE * 4);
     for y in 0..MICRO_GRAIN_SIZE {
         for x in 0..MICRO_GRAIN_SIZE {
-            // Subtle directional crystalline striation + multi-octave periodic grain.
             let diag = hash_lattice_2d(x, y, 0x517C_C1B7_2722_0A95) * 0.42;
             let mid = smooth_periodic_sample(x, y, 8, 0x2545_F491_4F6C_DD1D) * 0.38;
             let broad = smooth_periodic_sample(x, y, 32, 0x8F4C_A113_B7D2_901B) * 0.20;
             let n = (diag + mid + broad).clamp(-1.0, 1.0);
             let lum = (132.0 + n * 44.0).round().clamp(64.0, 208.0) as u8;
-            // Subtle crisp variance in alpha keeps grain feather-light under white vertex tint.
             let alpha = (232.0 + n * 18.0).round().clamp(205.0, 255.0) as u8;
             rgba.extend_from_slice(&[lum, lum, lum, alpha]);
         }
     }
     ColorImage::from_rgba_unmultiplied([MICRO_GRAIN_SIZE, MICRO_GRAIN_SIZE], &rgba)
+}
+
+/// Generates a continuous `64x64` smooth radial falloff texture anchored at UV `(0, 0)` that
+/// decays smoothly to `0` before reaching the opposite edges so GPU and `wl_shm` rasterization
+/// render true optical light without stepped polygon bands.
+pub(super) fn generate_radial_glow_image() -> ColorImage {
+    let mut rgba = Vec::with_capacity(RADIAL_GLOW_SIZE * RADIAL_GLOW_SIZE * 4);
+    for y in 0..RADIAL_GLOW_SIZE {
+        let v = (y as f32 + 0.5) / RADIAL_GLOW_SIZE as f32;
+        for x in 0..RADIAL_GLOW_SIZE {
+            let u = (x as f32 + 0.5) / RADIAL_GLOW_SIZE as f32;
+            let r = ((u / 0.92).powi(2) + (v / 0.92).powi(2))
+                .sqrt()
+                .clamp(0.0, 1.0);
+            let t = 1.0 - r;
+            let weight = t * t * (3.0 - 2.0 * t) * t;
+            let alpha = (weight * 255.0).round().clamp(0.0, 255.0) as u8;
+            rgba.extend_from_slice(&[255, 255, 255, alpha]);
+        }
+    }
+    ColorImage::from_rgba_unmultiplied([RADIAL_GLOW_SIZE, RADIAL_GLOW_SIZE], &rgba)
+}
+
+fn push_radial_glow_mesh(
+    shapes: &mut Vec<Shape>,
+    rect: Rect,
+    glow_tex: Option<TextureId>,
+    tint: Color32,
+    flip_br: bool,
+) {
+    let Some(tex_id) = glow_tex else {
+        return;
+    };
+    if tint.a() == 0 || rect.width() <= 0.0 || rect.height() <= 0.0 {
+        return;
+    }
+    let (uv_lt, uv_rt, uv_rb, uv_lb) = if flip_br {
+        (
+            pos2(1.0, 1.0),
+            pos2(0.0, 1.0),
+            pos2(0.0, 0.0),
+            pos2(1.0, 0.0),
+        )
+    } else {
+        (
+            pos2(0.0, 0.0),
+            pos2(1.0, 0.0),
+            pos2(1.0, 1.0),
+            pos2(0.0, 1.0),
+        )
+    };
+    let mut mesh = Mesh::with_texture(tex_id);
+    mesh.vertices.extend_from_slice(&[
+        Vertex {
+            pos: rect.left_top(),
+            uv: uv_lt,
+            color: tint,
+        },
+        Vertex {
+            pos: rect.right_top(),
+            uv: uv_rt,
+            color: tint,
+        },
+        Vertex {
+            pos: rect.right_bottom(),
+            uv: uv_rb,
+            color: tint,
+        },
+        Vertex {
+            pos: rect.left_bottom(),
+            uv: uv_lb,
+            color: tint,
+        },
+    ]);
+    mesh.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
+    shapes.push(Shape::mesh(mesh));
 }
 
 fn push_tiled_grain_mesh(
@@ -131,228 +230,91 @@ fn push_tiled_grain_mesh(
     shapes.push(Shape::mesh(mesh));
 }
 
-/// Clips a convex polygon strictly inside axis-aligned `rect` (Sutherland-Hodgman, 4 half-planes).
-fn clip_polygon_to_rect(mut poly: Vec<Pos2>, rect: Rect) -> Vec<Pos2> {
-    let clip_edge = |pts: Vec<Pos2>,
-                     inside: &dyn Fn(Pos2) -> bool,
-                     intersect: &dyn Fn(Pos2, Pos2) -> Pos2|
-     -> Vec<Pos2> {
-        if pts.is_empty() {
-            return pts;
-        }
-        let mut out = Vec::with_capacity(pts.len() + 2);
-        let mut prev = *pts.last().unwrap();
-        let mut prev_in = inside(prev);
-        for &curr in &pts {
-            let curr_in = inside(curr);
-            if curr_in {
-                if !prev_in {
-                    out.push(intersect(prev, curr));
-                }
-                out.push(curr);
-            } else if prev_in {
-                out.push(intersect(prev, curr));
-            }
-            prev = curr;
-            prev_in = curr_in;
-        }
-        out
-    };
-
-    let lerp_x = |a: Pos2, b: Pos2, x: f32| -> Pos2 {
-        let dx = b.x - a.x;
-        let t = if dx.abs() < 1e-6 { 0.5 } else { (x - a.x) / dx };
-        pos2(x, a.y + t * (b.y - a.y))
-    };
-    let lerp_y = |a: Pos2, b: Pos2, y: f32| -> Pos2 {
-        let dy = b.y - a.y;
-        let t = if dy.abs() < 1e-6 { 0.5 } else { (y - a.y) / dy };
-        pos2(a.x + t * (b.x - a.x), y)
-    };
-
-    poly = clip_edge(poly, &|p| p.x >= rect.min.x, &|a, b| {
-        lerp_x(a, b, rect.min.x)
-    });
-    poly = clip_edge(poly, &|p| p.x <= rect.max.x, &|a, b| {
-        lerp_x(a, b, rect.max.x)
-    });
-    poly = clip_edge(poly, &|p| p.y >= rect.min.y, &|a, b| {
-        lerp_y(a, b, rect.min.y)
-    });
-    poly = clip_edge(poly, &|p| p.y <= rect.max.y, &|a, b| {
-        lerp_y(a, b, rect.max.y)
-    });
-    poly
-}
-
-fn build_radial_disc_clipped(center: Pos2, rx: f32, ry: f32, rect: Rect) -> Option<Vec<Pos2>> {
-    const SEGMENTS: usize = 24;
-    let mut ring = Vec::with_capacity(SEGMENTS);
-    for i in 0..SEGMENTS {
-        let theta = (i as f32 / SEGMENTS as f32) * std::f32::consts::TAU;
-        ring.push(pos2(
-            center.x + rx * theta.cos(),
-            center.y + ry * theta.sin(),
-        ));
-    }
-    let clipped = clip_polygon_to_rect(ring, rect);
-    (clipped.len() >= 3).then_some(clipped)
-}
-
-/// Builds a multi-layer Gem of True Sight cabochon radial glow card background intended
-/// to be inserted behind card content.
+/// Builds a multi-layer Gem of True Sight dark-crystal card surface background using smooth
+/// continuous radial falloff textures + subtle tiled micro-grain behind card content.
 pub(super) fn build_gemstone_card_background(
     rect: Rect,
     grain_tex: Option<TextureId>,
+    glow_tex: Option<TextureId>,
     corner_radius: CornerRadius,
 ) -> Shape {
-    let w = rect.width().max(1.0);
     let h = rect.height().max(1.0);
     let tl = rect.min;
     let tr = rect.right_top();
-    let br = rect.max;
     let bl = rect.left_bottom();
 
-    let mut shapes = Vec::with_capacity(9);
+    let mut shapes = Vec::with_capacity(6);
     shapes.push(Shape::rect_filled(rect, corner_radius, P_INDIGO_1));
 
-    // Radial cabochon emerald aura anchored toward upper-left corner
-    let aura_center = pos2(tl.x + w * 0.14, tl.y + h * 0.08);
-    if let Some(poly) = build_radial_disc_clipped(aura_center, w * 0.72, h * 0.78, rect) {
-        shapes.push(Shape::convex_polygon(
-            poly,
-            Color32::from_rgba_unmultiplied(P_GEM.r(), P_GEM.g(), P_GEM.b(), 8),
-            Stroke::NONE,
-        ));
-    }
-    if let Some(poly) = build_radial_disc_clipped(aura_center, w * 0.44, h * 0.48, rect) {
-        shapes.push(Shape::convex_polygon(
-            poly,
-            Color32::from_rgba_unmultiplied(P_GEM.r(), P_GEM.g(), P_GEM.b(), 10),
-            Stroke::NONE,
-        ));
-    }
-    if let Some(poly) = build_radial_disc_clipped(aura_center, w * 0.22, h * 0.26, rect) {
-        shapes.push(Shape::convex_polygon(
-            poly,
-            Color32::from_rgba_unmultiplied(76, 232, 162, 11),
-            Stroke::NONE,
-        ));
-    }
-    // Soft cabochon specular dome near top-left crest
-    if let Some(poly) = build_radial_disc_clipped(
-        pos2(tl.x + w * 0.10, tl.y + h * 0.03),
-        w * 0.16,
-        h * 0.11,
+    // Smooth upper-left emerald optical radiance + lower-right deep obsidian depth vignette
+    push_radial_glow_mesh(
+        &mut shapes,
         rect,
-    ) {
-        shapes.push(Shape::convex_polygon(
-            poly,
-            Color32::from_rgba_unmultiplied(244, 250, 252, 12),
-            Stroke::NONE,
-        ));
-    }
-    // Soft radial obsidian vignette in lower-right corner
-    if let Some(poly) = build_radial_disc_clipped(
-        pos2(br.x - w * 0.08, br.y - h * 0.06),
-        w * 0.56,
-        h * 0.60,
+        glow_tex,
+        Color32::from_rgba_unmultiplied(P_GEM.r(), P_GEM.g(), P_GEM.b(), 24),
+        false,
+    );
+    push_radial_glow_mesh(
+        &mut shapes,
         rect,
-    ) {
-        shapes.push(Shape::convex_polygon(
-            poly,
-            Color32::from_rgba_unmultiplied(6, 5, 16, 44),
-            Stroke::NONE,
-        ));
-    }
+        glow_tex,
+        Color32::from_rgba_unmultiplied(6, 5, 16, 46),
+        true,
+    );
 
-    push_tiled_grain_mesh(&mut shapes, rect, grain_tex, 14);
+    push_tiled_grain_mesh(&mut shapes, rect, grain_tex, 12);
 
     // Subtle crystal edge glint along top and left rim
     shapes.push(Shape::line_segment(
         [pos2(tl.x + 3.0, tl.y + 1.0), pos2(tr.x - 3.0, tr.y + 1.0)],
-        Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(244, 250, 252, 24)),
+        Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(244, 250, 252, 22)),
     ));
     shapes.push(Shape::line_segment(
         [
             pos2(tl.x + 1.0, tl.y + 3.0),
             pos2(bl.x + 1.0, tl.y + h * 0.50),
         ],
-        Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(46, 230, 122, 30)),
+        Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(46, 230, 122, 26)),
     ));
 
     Shape::Vec(shapes)
 }
 
 /// Builds a translucent radial cabochon emerald glass background for the compact overlay backed by
-/// true per-pixel alpha (`ARGB8888`) scaled by user-configurable `opacity`.
+/// true per-pixel alpha (`ARGB8888`) and continuous smooth falloff scaled by `opacity`.
 pub(super) fn build_overlay_glass_background(
     rect: Rect,
     opacity: f32,
     grain_tex: Option<TextureId>,
+    glow_tex: Option<TextureId>,
 ) -> Shape {
     let op = AppSession::sanitize_overlay_opacity(opacity);
-    let w = rect.width().max(1.0);
-    let h = rect.height().max(1.0);
-    let tl = rect.min;
-    let br = rect.max;
-
     let base_alpha = (255.0 * op).round().clamp(40.0, 245.0) as u8;
-    let obsidian_alpha = (24.0 * op).round().clamp(5.0, 42.0) as u8;
-    let emerald_outer_alpha = (16.0 * op + 4.0).round().clamp(6.0, 28.0) as u8;
-    let emerald_core_alpha = (18.0 * op + 4.0).round().clamp(6.0, 32.0) as u8;
-    let glint_dome_alpha = (14.0 * op + 3.0).round().clamp(5.0, 24.0) as u8;
-    let grain_alpha = (11.0 * op).round().clamp(3.0, 18.0) as u8;
+    let emerald_alpha = (26.0 * op + 6.0).round().clamp(8.0, 38.0) as u8;
+    let obsidian_alpha = (26.0 * op).round().clamp(6.0, 40.0) as u8;
+    let grain_alpha = (10.0 * op).round().clamp(3.0, 16.0) as u8;
 
-    let mut shapes = Vec::with_capacity(7);
+    let mut shapes = Vec::with_capacity(4);
     shapes.push(Shape::rect_filled(
         rect,
         CornerRadius::same(6),
         Color32::from_rgba_unmultiplied(P_VOID.r(), P_VOID.g(), P_VOID.b(), base_alpha),
     ));
 
-    // Soft obsidian radial vignette toward bottom-right corner
-    if let Some(poly) = build_radial_disc_clipped(
-        pos2(br.x - w * 0.12, br.y - h * 0.10),
-        w * 0.58,
-        h * 0.62,
+    push_radial_glow_mesh(
+        &mut shapes,
         rect,
-    ) {
-        shapes.push(Shape::convex_polygon(
-            poly,
-            Color32::from_rgba_unmultiplied(6, 5, 16, obsidian_alpha),
-            Stroke::NONE,
-        ));
-    }
-
-    // Concentric radial Gem of True Sight cabochon glow anchored near top-left header
-    let gem_focus = pos2(tl.x + w * 0.15, tl.y + h * 0.14);
-    if let Some(poly) = build_radial_disc_clipped(gem_focus, w * 0.62, h * 0.68, rect) {
-        shapes.push(Shape::convex_polygon(
-            poly,
-            Color32::from_rgba_unmultiplied(P_GEM.r(), P_GEM.g(), P_GEM.b(), emerald_outer_alpha),
-            Stroke::NONE,
-        ));
-    }
-    if let Some(poly) = build_radial_disc_clipped(gem_focus, w * 0.34, h * 0.38, rect) {
-        shapes.push(Shape::convex_polygon(
-            poly,
-            Color32::from_rgba_unmultiplied(76, 232, 162, emerald_core_alpha),
-            Stroke::NONE,
-        ));
-    }
-    if let Some(poly) = build_radial_disc_clipped(
-        pos2(tl.x + w * 0.12, tl.y + h * 0.05),
-        w * 0.22,
-        h * 0.15,
+        glow_tex,
+        Color32::from_rgba_unmultiplied(P_GEM.r(), P_GEM.g(), P_GEM.b(), emerald_alpha),
+        false,
+    );
+    push_radial_glow_mesh(
+        &mut shapes,
         rect,
-    ) {
-        shapes.push(Shape::convex_polygon(
-            poly,
-            Color32::from_rgba_unmultiplied(244, 250, 252, glint_dome_alpha),
-            Stroke::NONE,
-        ));
-    }
+        glow_tex,
+        Color32::from_rgba_unmultiplied(6, 5, 16, obsidian_alpha),
+        true,
+    );
 
     push_tiled_grain_mesh(&mut shapes, rect, grain_tex, grain_alpha);
 

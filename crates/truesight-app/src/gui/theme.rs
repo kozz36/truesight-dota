@@ -94,6 +94,7 @@ pub(super) struct GuiTextureCache {
     pub(super) initialized: bool,
     pub(super) gem: Option<TextureHandle>,
     pub(super) grain: Option<TextureHandle>,
+    pub(super) glow: Option<TextureHandle>,
     pub(super) heroes: HashMap<HeroId, HeroTextureSet>,
     pub(super) items: HashMap<ItemId, TextureHandle>,
 }
@@ -112,6 +113,15 @@ impl GuiTextureCache {
         );
         super::surfaces::store_gem_grain_texture_id(ctx, grain_tex.id());
         self.grain = Some(grain_tex);
+
+        let glow_img = super::surfaces::generate_radial_glow_image();
+        let glow_tex = ctx.load_texture(
+            "truesight_gem_glow",
+            glow_img,
+            super::surfaces::radial_glow_texture_options(),
+        );
+        super::surfaces::store_gem_glow_texture_id(ctx, glow_tex.id());
+        self.glow = Some(glow_tex);
 
         if let Some(atlas) = parse_hero_atlas() {
             let gem_img =
@@ -227,9 +237,10 @@ fn hud_card_with_mode(
         });
     let rect = prepared.response.rect;
     let grain_id = super::surfaces::gem_grain_texture_id(ui.ctx());
+    let glow_id = super::surfaces::gem_glow_texture_id(ui.ctx());
     ui.painter().set(
         bg_idx,
-        super::surfaces::build_gemstone_card_background(rect, grain_id, radius),
+        super::surfaces::build_gemstone_card_background(rect, grain_id, glow_id, radius),
     );
     ui.painter().rect_stroke(
         rect,

@@ -4296,6 +4296,36 @@ fn gemstone_micro_grain_texture_is_deterministic_tileable_and_subtle() {
 }
 
 #[test]
+fn gemstone_radial_glow_texture_decays_smoothly_without_hard_edges() {
+    let img = super::surfaces::generate_radial_glow_image();
+    let sz = super::surfaces::RADIAL_GLOW_SIZE;
+    assert_eq!(img.size, [sz, sz]);
+    let origin_alpha = img.pixels[0].to_srgba_unmultiplied()[3];
+    let mid_alpha = img.pixels[(sz / 3) * sz + (sz / 3)].to_srgba_unmultiplied()[3];
+    let right_edge_alpha = img.pixels[sz - 1].to_srgba_unmultiplied()[3];
+    let bottom_edge_alpha = img.pixels[(sz - 1) * sz].to_srgba_unmultiplied()[3];
+    let corner_alpha = img.pixels[sz * sz - 1].to_srgba_unmultiplied()[3];
+
+    assert!(
+        origin_alpha >= 240,
+        "glow center near UV origin must stay luminous, got {origin_alpha}"
+    );
+    assert!(
+        mid_alpha > 0 && mid_alpha < origin_alpha,
+        "mid-card glow alpha must fall off monotonically ({origin_alpha} -> {mid_alpha})"
+    );
+    assert_eq!(
+        right_edge_alpha, 0,
+        "right edge must reach zero alpha before rect boundary"
+    );
+    assert_eq!(
+        bottom_edge_alpha, 0,
+        "bottom edge must reach zero alpha before rect boundary"
+    );
+    assert_eq!(corner_alpha, 0);
+}
+
+#[test]
 fn hud_card_renders_gemstone_facets_behind_content_with_corner_ticks() {
     let mut app = TrueSightGuiApp::new(make_5v5_gui_session(), None, None);
     let ctx = egui::Context::default();
@@ -4308,7 +4338,7 @@ fn hud_card_renders_gemstone_facets_behind_content_with_corner_ticks() {
             app.textures.ensure_loaded(ctx);
             egui::CentralPanel::default().show(ctx, |ui| {
                 super::theme::hud_card(ui, |ui| {
-                    ui.label("Gemstone Facet Test");
+                    ui.label("Gemstone Smooth Glow Test");
                 });
             });
         },
@@ -4340,17 +4370,17 @@ fn hud_card_renders_gemstone_facets_behind_content_with_corner_ticks() {
     for clipped in &full_output.shapes {
         count_card_shapes(&clipped.shape, &mut polygons, &mut lines, &mut meshes);
     }
-    assert!(
-        polygons >= 3,
-        "hud_card must paint >= 3 subtle gemstone facet polygons, got {polygons}"
+    assert_eq!(
+        polygons, 0,
+        "hud_card must use smooth textured gradients instead of stepped polygon discs, got {polygons}"
     );
     assert!(
         lines >= 6,
         "hud_card must paint specular bevels + corner ticks, got {lines}"
     );
     assert!(
-        meshes >= 1,
-        "hud_card must composite procedural grain mesh when textures are loaded, got {meshes}"
+        meshes >= 3,
+        "hud_card must composite radial emerald glow, obsidian vignette, and grain meshes, got {meshes}"
     );
 }
 
