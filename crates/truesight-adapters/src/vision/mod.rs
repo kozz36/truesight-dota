@@ -581,7 +581,7 @@ impl HeroVisionCatalog {
                 )),
                 Some((
                     pickphase_upper_core_rect(rect),
-                    &[&self.upper_entries],
+                    &[&self.upper_entries, &self.inner_entries, &self.full_entries],
                     PICKPHASE_UPPER_CORE_L1_THRESHOLD,
                 )),
             ],
