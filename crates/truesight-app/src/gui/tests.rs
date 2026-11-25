@@ -4264,3 +4264,130 @@ fn direct_upgrade_chip_in_build_bar_and_overlay_is_informational_and_preserves_o
         after_alt_click.steps
     );
 }
+
+#[test]
+fn gemstone_micro_grain_texture_is_deterministic_tileable_and_subtle() {
+    let img_a = super::surfaces::generate_micro_grain_image();
+    let img_b = super::surfaces::generate_micro_grain_image();
+    assert_eq!(
+        img_a.size,
+        [
+            super::surfaces::MICRO_GRAIN_SIZE,
+            super::surfaces::MICRO_GRAIN_SIZE
+        ]
+    );
+    assert_eq!(img_a.pixels, img_b.pixels);
+
+    let mut min_lum = u8::MAX;
+    let mut max_lum = 0_u8;
+    for px in &img_a.pixels {
+        let [r, g, b, a] = px.to_srgba_unmultiplied();
+        min_lum = min_lum.min(r).min(g).min(b);
+        max_lum = max_lum.max(r).max(g).max(b);
+        assert!(
+            a >= 200,
+            "tileable grain texture alpha should stay high and subtle via tint: {a}"
+        );
+    }
+    assert!(
+        max_lum > min_lum && (max_lum - min_lum) >= 18,
+        "grain texture must have crystalline variance: min={min_lum}, max={max_lum}"
+    );
+}
+
+#[test]
+fn hud_card_renders_gemstone_facets_behind_content_with_corner_ticks() {
+    let mut app = TrueSightGuiApp::new(make_5v5_gui_session(), None, None);
+    let ctx = egui::Context::default();
+    let full_output = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(420.0, 260.0))),
+            ..Default::default()
+        },
+        |ctx| {
+            app.textures.ensure_loaded(ctx);
+            egui::CentralPanel::default().show(ctx, |ui| {
+                super::theme::hud_card(ui, |ui| {
+                    ui.label("Gemstone Facet Test");
+                });
+            });
+        },
+    );
+
+    fn count_card_shapes(
+        shape: &egui::Shape,
+        polygons: &mut usize,
+        lines: &mut usize,
+        meshes: &mut usize,
+    ) {
+        match shape {
+            egui::Shape::Vec(items) => {
+                for s in items {
+                    count_card_shapes(s, polygons, lines, meshes);
+                }
+            }
+            egui::Shape::Path(path) if path.closed && path.fill != egui::Color32::TRANSPARENT => {
+                *polygons += 1
+            }
+            egui::Shape::LineSegment { .. } | egui::Shape::Path(_) => *lines += 1,
+            egui::Shape::Mesh(_) => *meshes += 1,
+            _ => {}
+        }
+    }
+    let mut polygons = 0;
+    let mut lines = 0;
+    let mut meshes = 0;
+    for clipped in &full_output.shapes {
+        count_card_shapes(&clipped.shape, &mut polygons, &mut lines, &mut meshes);
+    }
+    assert!(
+        polygons >= 3,
+        "hud_card must paint >= 3 subtle gemstone facet polygons, got {polygons}"
+    );
+    assert!(
+        lines >= 6,
+        "hud_card must paint specular bevels + corner ticks, got {lines}"
+    );
+    assert!(
+        meshes >= 1,
+        "hud_card must composite procedural grain mesh when textures are loaded, got {meshes}"
+    );
+}
+
+#[test]
+fn options_window_exposes_overlay_opacity_control_and_updates_session() {
+    let mut app = TrueSightGuiApp::new(make_5v5_gui_session(), None, None);
+    app.onboarding_open = false;
+    app.options_open = true;
+    app.session.set_overlay_opacity(0.58);
+    let ctx = egui::Context::default();
+
+    let mut out = None;
+    for _ in 0..2 {
+        out = Some(ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, 800.0))),
+                ..Default::default()
+            },
+            |ctx| {
+                let _ = app.render_options_window(ctx, 48.0);
+            },
+        ));
+    }
+    let out = out.expect("second pass options window output");
+
+    let mut texts = Vec::new();
+    for clipped in &out.shapes {
+        collect_painted_texts(&clipped.shape, &mut texts);
+    }
+    let tr = super::i18n::strings(app.session.ui_language);
+    assert!(
+        texts.iter().any(|t| t.contains(tr.overlay_opacity_label)),
+        "options drawer must show '{}' control; painted texts: {texts:?}",
+        tr.overlay_opacity_label
+    );
+    assert!(
+        texts.iter().any(|t| t.contains("58%")),
+        "options drawer must show live overlay glass percentage '58%'; painted texts: {texts:?}"
+    );
+}

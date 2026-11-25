@@ -31,7 +31,7 @@ fn overlay_icon_button(
     let bg = if active || resp.hovered() {
         P_INDIGO_3
     } else {
-        P_INDIGO_2
+        Color32::from_rgba_unmultiplied(P_INDIGO_2.r(), P_INDIGO_2.g(), P_INDIGO_2.b(), 190)
     };
     let border = if active || resp.hovered() {
         accent
@@ -247,9 +247,10 @@ impl TrueSightGuiApp {
         let mut drag_hit_rect = Rect::NOTHING;
         let mut reset_button = Rect::NOTHING;
 
+        let bg_idx = ui.painter().add(egui::Shape::Noop);
         let panel_resp = egui::Frame::NONE
-            .fill(P_VOID.gamma_multiply(0.92))
-            .stroke(Stroke::new(1.5_f32, P_GEM_DEEP))
+            .fill(Color32::TRANSPARENT)
+            .stroke(Stroke::NONE)
             .inner_margin(Margin::same(8))
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
@@ -655,6 +656,16 @@ impl TrueSightGuiApp {
             });
 
         let panel_rect = panel_resp.response.rect;
+        let grain_id = super::surfaces::gem_grain_texture_id(ui.ctx());
+        ui.painter().set(
+            bg_idx,
+            super::surfaces::build_overlay_glass_background(
+                panel_rect,
+                self.session.overlay_opacity,
+                grain_id,
+            ),
+        );
+        super::surfaces::paint_overlay_glass_frame(ui.painter(), panel_rect);
         let visible_rect = ui.ctx().screen_rect();
         let clamped_panel = visible_rect.intersect(panel_rect);
         let handle_anchor = if clamped_panel.width() >= 20.0 && clamped_panel.height() >= 20.0 {

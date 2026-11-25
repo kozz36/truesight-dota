@@ -696,6 +696,38 @@ impl TrueSightGuiApp {
                 });
 
                 ui.horizontal(|ui| {
+                    let mut opacity_pct = (self.session.overlay_opacity * 100.0).round() as i32;
+                    ui.label(
+                        RichText::new(tr.overlay_opacity_label)
+                            .size(9.5)
+                            .strong()
+                            .color(P_MUTED),
+                    );
+                    let slider_resp = ui
+                        .add(
+                            egui::Slider::new(&mut opacity_pct, 35..=95)
+                                .show_value(false)
+                                .trailing_fill(true),
+                        )
+                        .on_hover_text(tr.overlay_opacity_hover);
+                    ui.label(
+                        RichText::new(format!("{opacity_pct}%"))
+                            .size(9.5)
+                            .strong()
+                            .color(P_GEM),
+                    );
+                    if slider_resp.changed() {
+                        self.session.set_overlay_opacity(opacity_pct as f32 / 100.0);
+                        #[cfg(target_os = "linux")]
+                        self.overlay_rasterizer.invalidate();
+                        ctx.request_repaint();
+                        ctx.request_repaint_of(egui::ViewportId::from_hash_of(
+                            "truesight_compact_overlay",
+                        ));
+                    }
+                });
+
+                ui.horizontal(|ui| {
                     let demo_resp = ui.add(
                         egui::Button::new(
                             RichText::new(tr.demo_5v5_btn)
@@ -731,7 +763,7 @@ impl TrueSightGuiApp {
         let win_rect = resp.as_ref().map(|r| r.response.rect);
         if let Some(r) = &resp {
             let painter = ctx.layer_painter(r.response.layer_id);
-            paint_hud_corner_ticks(&painter, r.response.rect, P_GEM);
+            super::surfaces::paint_modal_gemstone_accents(&painter, r.response.rect);
         }
         (win_rect, demo_btn_rect, lang_btn_rects)
     }

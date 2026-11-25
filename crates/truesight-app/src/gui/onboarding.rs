@@ -1,7 +1,7 @@
 use super::TrueSightGuiApp;
 use super::theme::{
     P_GEM, P_GEM_DEEP, P_GLINT, P_INDIGO_1, P_INDIGO_2, P_LINE, P_MUTED, P_SILVER, P_VOID,
-    hud_modal_frame, paint_hud_corner_ticks,
+    hud_modal_frame,
 };
 use eframe::egui::{self, Align, Align2, Layout, Margin, Rect, RichText, Stroke, vec2};
 use std::io::Read;
@@ -574,7 +574,7 @@ impl TrueSightGuiApp {
         }
         if let Some(r) = &resp {
             let painter = ctx.layer_painter(r.response.layer_id);
-            paint_hud_corner_ticks(&painter, r.response.rect, P_GEM);
+            super::surfaces::paint_modal_gemstone_accents(&painter, r.response.rect);
         }
         (resp.map(|r| r.response.rect), lang_btn_rects)
     }
