@@ -9,6 +9,7 @@ mod overlay_backend;
 mod overlay_build;
 #[cfg(test)]
 mod overlay_layer_tests;
+#[cfg(any(target_os = "linux", test))]
 mod overlay_raster;
 mod suggested_table;
 mod team_card;
@@ -103,7 +104,7 @@ pub struct TrueSightGuiApp {
     overlay_ctx: egui::Context,
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     overlay_ctx_style_configured: bool,
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg(target_os = "linux")]
     overlay_rasterizer: overlay_raster::OverlayRasterizer,
     #[cfg(target_os = "linux")]
     wayland_layer: Option<wayland_layer::WaylandLayerHandle>,
@@ -193,6 +194,7 @@ impl TrueSightGuiApp {
             overlay_backend: overlay_backend::OverlayBackendKind::EframeViewport,
             overlay_ctx: egui::Context::default(),
             overlay_ctx_style_configured: false,
+            #[cfg(target_os = "linux")]
             overlay_rasterizer: overlay_raster::OverlayRasterizer::new(),
             #[cfg(target_os = "linux")]
             wayland_layer: None,
