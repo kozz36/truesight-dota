@@ -18,7 +18,7 @@ required-features = ["gui"]
 
 [features]
 default = ["gui"]
-gui = ["dep:eframe", "dep:global-hotkey", "dep:zbus"]
+gui = ["dep:eframe", "dep:global-hotkey", "dep:smithay-client-toolkit", "dep:zbus"]
 
 [dependencies]
 truesight-core = { path = "../truesight-core" }
@@ -27,6 +27,7 @@ eframe = { version = "0.32", optional = true }
 global-hotkey = { version = "0.10", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+smithay-client-toolkit = { version = "0.20", default-features = false, features = ["calloop"], optional = true }
 zbus = { version = "4", optional = true }
 
 [lints]

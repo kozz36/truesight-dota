@@ -1,4 +1,5 @@
 use super::TrueSightGuiApp;
+use super::overlay_backend::OverlayHostMode;
 use super::theme::*;
 use super::viewmodel::compute_overlay_summary;
 use crate::session::OverlayGeometry;
@@ -48,6 +49,8 @@ fn overlay_icon_button(
 #[cfg_attr(not(test), allow(dead_code))]
 pub(super) struct OverlayPanelOutput {
     pub(super) rect: Rect,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(super) drag_hit_rect: Rect,
     pub(super) drag_handle: Rect,
     pub(super) resize_handle: Rect,
     pub(super) reset_button: Rect,
@@ -201,7 +204,25 @@ impl TrueSightGuiApp {
 
     /// Renders the compact overlay panel for both draft-phase and post-draft item build views.
     pub(super) fn render_overlay_panel(&mut self, ui: &mut egui::Ui) -> OverlayPanelOutput {
-        self.textures.ensure_loaded(ui.ctx());
+        self.render_overlay_panel_with_host(ui, OverlayHostMode::Viewport)
+    }
+
+    /// Renders the compact overlay panel using either the primary `eframe` viewport texture atlas
+    /// (`OverlayHostMode::Viewport`) or the dedicated Wayland layer-shell `egui::Context` atlas
+    /// (`OverlayHostMode::LayerShell`), delegating drag/resize appropriately.
+    pub(super) fn render_overlay_panel_with_host(
+        &mut self,
+        ui: &mut egui::Ui,
+        host_mode: OverlayHostMode,
+    ) -> OverlayPanelOutput {
+        match host_mode {
+            OverlayHostMode::Viewport => self.textures.ensure_loaded(ui.ctx()),
+            OverlayHostMode::LayerShell => self.overlay_textures.ensure_loaded(ui.ctx()),
+        }
+        let textures = match host_mode {
+            OverlayHostMode::Viewport => &self.textures,
+            OverlayHostMode::LayerShell => &self.overlay_textures,
+        };
         let tr = super::i18n::strings(self.session.ui_language);
         let summary = compute_overlay_summary(&self.session);
         let interactive = !self.session.overlay_geometry.click_through;
@@ -435,7 +456,7 @@ impl TrueSightGuiApp {
                                         summary.top_suggestions.iter().take(max_picks).enumerate()
                                     {
                                         let col = if *win_pct >= 50.0 { P_GEM } else { P_DIRE };
-                                        let htex = self.textures.heroes.get(hid).map(|s| &s.color);
+                                        let htex = textures.heroes.get(hid).map(|s| &s.color);
                                         ui.horizontal(|ui| {
                                             ui.spacing_mut().item_spacing.x = 4.0;
                                             paint_portrait_16_9(
@@ -478,11 +499,18 @@ impl TrueSightGuiApp {
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = grid_gap;
                                 ui.allocate_exact_size(cell_sz, Sense::hover());
-                                for col in 0..TEAM_SIZE {
+                                for (col, enemy) in self
+                                    .session
+                                    .draft
+                                    .enemies
+                                    .iter()
+                                    .enumerate()
+                                    .take(TEAM_SIZE)
+                                {
                                     let (r, _) = ui.allocate_exact_size(cell_sz, Sense::hover());
-                                    if let Some(ep) = self.session.draft.enemies[col] {
+                                    if let Some(ep) = enemy {
                                         if let Some(t) =
-                                            self.textures.heroes.get(&ep.hero_id).map(|s| &s.color)
+                                            textures.heroes.get(&ep.hero_id).map(|s| &s.color)
                                         {
                                             ui.painter().image(
                                                 t.id(),
@@ -522,7 +550,7 @@ impl TrueSightGuiApp {
                                     let (rh, _) = ui.allocate_exact_size(cell_sz, Sense::hover());
                                     if let Some(ap) = self.session.draft.allies[row] {
                                         if let Some(t) =
-                                            self.textures.heroes.get(&ap.hero_id).map(|s| &s.color)
+                                            textures.heroes.get(&ap.hero_id).map(|s| &s.color)
                                         {
                                             ui.painter().image(
                                                 t.id(),
@@ -556,7 +584,7 @@ impl TrueSightGuiApp {
                                     for col in 0..TEAM_SIZE {
                                         if let Some(delta) = summary.counter_grid[row][col] {
                                             let enemy_toned = self.session.draft.enemies[col]
-                                                .and_then(|p| self.textures.heroes.get(&p.hero_id))
+                                                .and_then(|p| textures.heroes.get(&p.hero_id))
                                                 .map(|s| &s.toned);
                                             let cell_resp = paint_tinted_cell(
                                                 ui,
@@ -595,7 +623,7 @@ impl TrueSightGuiApp {
                         });
                     });
                 } else {
-                    if let Some(pair) = self.render_overlay_build_panel(ui, &summary) {
+                    if let Some(pair) = self.render_overlay_build_panel(ui, &summary, textures) {
                         clicked_variant = Some(pair);
                     }
                 }
@@ -660,72 +688,78 @@ impl TrueSightGuiApp {
 
             // Hold-only state machine for WM drag & resize with explicit Wayland pointer reset
             // so releasing outside the compositor grab (`emilk/egui#7959`) never leaves drag stuck.
-            let (
-                primary_pressed,
-                primary_released,
-                primary_down,
-                latest_pos,
-                press_origin,
-                pointer_gone,
-                focused,
-            ) = ui.ctx().input(|i| {
-                let gone = i
-                    .events
-                    .iter()
-                    .any(|e| matches!(e, egui::Event::PointerGone));
-                (
-                    i.pointer.primary_pressed(),
-                    i.pointer.primary_released(),
-                    i.pointer.primary_down(),
-                    i.pointer.latest_pos(),
-                    i.pointer.press_origin(),
-                    gone,
-                    i.viewport().focused.unwrap_or(true),
-                )
-            });
+            // In LayerShell mode the native Wayland presenter handles drag/resize directly via margins.
+            if host_mode == OverlayHostMode::Viewport {
+                let (
+                    primary_pressed,
+                    primary_released,
+                    primary_down,
+                    latest_pos,
+                    press_origin,
+                    pointer_gone,
+                    focused,
+                ) = ui.ctx().input(|i| {
+                    let gone = i
+                        .events
+                        .iter()
+                        .any(|e| matches!(e, egui::Event::PointerGone));
+                    (
+                        i.pointer.primary_pressed(),
+                        i.pointer.primary_released(),
+                        i.pointer.primary_down(),
+                        i.pointer.latest_pos(),
+                        i.pointer.press_origin(),
+                        gone,
+                        i.viewport().focused.unwrap_or(true),
+                    )
+                });
 
-            if primary_released || pointer_gone || !focused {
+                if primary_released || pointer_gone || !focused {
+                    self.overlay_drag_armed = None;
+                    self.overlay_resize_armed = None;
+                } else {
+                    if primary_pressed && let Some(pos) = press_origin.or(latest_pos) {
+                        if resize_handle.contains(pos) {
+                            self.overlay_resize_armed = Some(pos);
+                            self.overlay_drag_armed = None;
+                        } else if drag_hit_rect.contains(pos) {
+                            self.overlay_drag_armed = Some(pos);
+                            self.overlay_resize_armed = None;
+                        }
+                    }
+
+                    if primary_down {
+                        if let Some(origin) = self.overlay_drag_armed
+                            && let Some(pos) = latest_pos
+                            && (pos - origin).length() >= 3.0
+                        {
+                            drag_started = true;
+                            self.overlay_drag_armed = None;
+                            self.overlay_wm_gesture_cooldown = 2;
+                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                            ui.ctx().stop_dragging();
+                            ui.ctx()
+                                .input_mut(|i| i.pointer = egui::PointerState::default());
+                        } else if let Some(origin) = self.overlay_resize_armed
+                            && let Some(pos) = latest_pos
+                            && (pos - origin).length() >= 3.0
+                        {
+                            resize_started = true;
+                            self.overlay_resize_armed = None;
+                            self.overlay_wm_gesture_cooldown = 2;
+                            ui.ctx()
+                                .send_viewport_cmd(egui::ViewportCommand::BeginResize(
+                                    egui::ResizeDirection::SouthEast,
+                                ));
+                            ui.ctx().stop_dragging();
+                            ui.ctx()
+                                .input_mut(|i| i.pointer = egui::PointerState::default());
+                        }
+                    }
+                }
+            } else {
                 self.overlay_drag_armed = None;
                 self.overlay_resize_armed = None;
-            } else {
-                if primary_pressed && let Some(pos) = press_origin.or(latest_pos) {
-                    if resize_handle.contains(pos) {
-                        self.overlay_resize_armed = Some(pos);
-                        self.overlay_drag_armed = None;
-                    } else if drag_hit_rect.contains(pos) {
-                        self.overlay_drag_armed = Some(pos);
-                        self.overlay_resize_armed = None;
-                    }
-                }
-
-                if primary_down {
-                    if let Some(origin) = self.overlay_drag_armed
-                        && let Some(pos) = latest_pos
-                        && (pos - origin).length() >= 3.0
-                    {
-                        drag_started = true;
-                        self.overlay_drag_armed = None;
-                        self.overlay_wm_gesture_cooldown = 2;
-                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
-                        ui.ctx().stop_dragging();
-                        ui.ctx()
-                            .input_mut(|i| i.pointer = egui::PointerState::default());
-                    } else if let Some(origin) = self.overlay_resize_armed
-                        && let Some(pos) = latest_pos
-                        && (pos - origin).length() >= 3.0
-                    {
-                        resize_started = true;
-                        self.overlay_resize_armed = None;
-                        self.overlay_wm_gesture_cooldown = 2;
-                        ui.ctx()
-                            .send_viewport_cmd(egui::ViewportCommand::BeginResize(
-                                egui::ResizeDirection::SouthEast,
-                            ));
-                        ui.ctx().stop_dragging();
-                        ui.ctx()
-                            .input_mut(|i| i.pointer = egui::PointerState::default());
-                    }
-                }
             }
         } else {
             self.overlay_drag_armed = None;
@@ -756,6 +790,7 @@ impl TrueSightGuiApp {
 
         OverlayPanelOutput {
             rect: panel_rect,
+            drag_hit_rect,
             drag_handle,
             resize_handle,
             reset_button,
