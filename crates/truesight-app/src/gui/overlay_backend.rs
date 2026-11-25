@@ -99,7 +99,7 @@ pub(super) enum LayerEvent {
         height: u32,
         persist: bool,
     },
-    MonitorsUpdated(Vec<crate::session::MonitorRect>),
+    MonitorsUpdated(Vec<LogicalOutputBounds>),
     PointerMoved {
         x: f32,
         y: f32,
@@ -365,22 +365,10 @@ pub(super) fn resolve_cross_monitor_drag_target(
     best.map(|(_, b)| landing_on_output(b, des_x, des_y, ov_w, ov_h))
 }
 
-/// Computes the next monitor's logical `OverlayGeometry` when cycling monitors, preserving
-/// relative coordinates clamped safely within the destination display.
-pub(super) fn compute_next_monitor_geometry(
+fn compute_next_rect_geometry(
     current: crate::session::OverlayGeometry,
-    monitors: &[crate::session::MonitorRect],
-    pixels_per_point: f32,
+    logical: &[(f32, f32, f32, f32)],
 ) -> Option<crate::session::OverlayGeometry> {
-    if monitors.len() < 2 {
-        return None;
-    }
-    let ppp = pixels_per_point.max(0.5);
-    let logical: Vec<(f32, f32, f32, f32)> = monitors
-        .iter()
-        .filter(|m| m.width > 0.0 && m.height > 0.0)
-        .map(|m| (m.x / ppp, m.y / ppp, m.width / ppp, m.height / ppp))
-        .collect();
     if logical.len() < 2 {
         return None;
     }
@@ -420,7 +408,77 @@ pub(super) fn compute_next_monitor_geometry(
     })
 }
 
+/// Computes the next monitor's logical `OverlayGeometry` when cycling monitors, preserving
+/// relative coordinates clamped safely within the destination display.
+pub(super) fn compute_next_monitor_geometry(
+    current: crate::session::OverlayGeometry,
+    monitors: &[crate::session::MonitorRect],
+    pixels_per_point: f32,
+) -> Option<crate::session::OverlayGeometry> {
+    let ppp = pixels_per_point.max(0.5);
+    let logical: Vec<(f32, f32, f32, f32)> = monitors
+        .iter()
+        .filter(|m| m.width > 0.0 && m.height > 0.0)
+        .map(|m| (m.x / ppp, m.y / ppp, m.width / ppp, m.height / ppp))
+        .collect();
+    compute_next_rect_geometry(current, &logical)
+}
+
+/// Computes the next Wayland output's logical `OverlayGeometry` directly inside the compositor's
+/// shared logical coordinate space so mixed-DPI monitors (`2x` / `1x`) cycle accurately.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(super) fn compute_next_logical_output_geometry(
+    current: crate::session::OverlayGeometry,
+    outputs: &[LogicalOutputBounds],
+) -> Option<crate::session::OverlayGeometry> {
+    let logical: Vec<(f32, f32, f32, f32)> = outputs
+        .iter()
+        .filter(|o| o.width > 0 && o.height > 0)
+        .map(|o| (o.x as f32, o.y as f32, o.width as f32, o.height as f32))
+        .collect();
+    compute_next_rect_geometry(current, &logical)
+}
+
+/// Builds the dedicated `egui::RawInput` for the Wayland overlay context so `egui` adopts the
+/// output's `native_pixels_per_point` directly without frame-lagged `zoom_factor` oscillation.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(super) fn build_wayland_overlay_raw_input(
+    logical_size: (u32, u32),
+    scale: i32,
+    time: Option<f64>,
+    events: Vec<egui::Event>,
+    focused: bool,
+) -> egui::RawInput {
+    let ppp = scale.max(1) as f32;
+    let mut raw = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(logical_size.0.max(1) as f32, logical_size.1.max(1) as f32),
+        )),
+        time,
+        events,
+        focused,
+        ..Default::default()
+    };
+    raw.viewports
+        .entry(raw.viewport_id)
+        .or_default()
+        .native_pixels_per_point = Some(ppp);
+    raw
+}
+
 impl super::TrueSightGuiApp {
+    /// Returns whether the active overlay backend sees more than one display output.
+    pub(super) fn has_multiple_overlay_monitors(&self, host_mode: OverlayHostMode) -> bool {
+        #[cfg(target_os = "linux")]
+        if host_mode == OverlayHostMode::LayerShell && !self.wayland_logical_outputs.is_empty() {
+            return self.wayland_logical_outputs.len() > 1;
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = host_mode;
+        self.session.known_monitors.len() > 1
+    }
+
     /// Moves the active overlay window to the next detected monitor while preserving its size
     /// and relative corner offset.
     pub(super) fn cycle_overlay_monitor(
@@ -440,8 +498,17 @@ impl super::TrueSightGuiApp {
         };
 
         let cur = self.session.active_overlay_geometry();
-        let Some(next) = compute_next_monitor_geometry(cur, &self.session.known_monitors, ppp)
-        else {
+        #[cfg(target_os = "linux")]
+        let next = if host_mode == OverlayHostMode::LayerShell
+            && !self.wayland_logical_outputs.is_empty()
+        {
+            compute_next_logical_output_geometry(cur, &self.wayland_logical_outputs)
+        } else {
+            compute_next_monitor_geometry(cur, &self.session.known_monitors, ppp)
+        };
+        #[cfg(not(target_os = "linux"))]
+        let next = compute_next_monitor_geometry(cur, &self.session.known_monitors, ppp);
+        let Some(next) = next else {
             return;
         };
         self.session.set_active_overlay_geometry(next);
@@ -520,8 +587,8 @@ impl super::TrueSightGuiApp {
                         self.session.overlay_geometry = geom;
                     }
                 }
-                LayerEvent::MonitorsUpdated(monitors) => {
-                    self.session.set_known_monitors(monitors);
+                LayerEvent::MonitorsUpdated(outputs) => {
+                    self.wayland_logical_outputs = outputs;
                 }
                 LayerEvent::PointerMoved { x, y } => {
                     egui_events.push(egui::Event::PointerMoved(egui::pos2(x, y)));
@@ -618,23 +685,15 @@ impl super::TrueSightGuiApp {
         let (logical_w, logical_h) = self.wayland_layer_size;
         let scale = self.wayland_layer_scale.max(1);
         let ppp = scale as f32;
-        let mut raw = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(logical_w as f32, logical_h as f32),
-            )),
-            time: main_ctx.input(|i| Some(i.time)),
-            events: egui_events,
-            focused: !self.session.overlay_geometry.click_through,
-            ..Default::default()
-        };
-        raw.viewports
-            .entry(raw.viewport_id)
-            .or_default()
-            .native_pixels_per_point = Some(ppp);
+        let raw = build_wayland_overlay_raw_input(
+            (logical_w, logical_h),
+            scale,
+            main_ctx.input(|i| Some(i.time)),
+            egui_events,
+            !self.session.overlay_geometry.click_through,
+        );
 
         let overlay_ctx = self.overlay_ctx.clone();
-        overlay_ctx.set_pixels_per_point(ppp);
         let mut panel_out = None;
         let full_output = overlay_ctx.run(raw, |ctx| {
             if !self.overlay_ctx_style_configured {

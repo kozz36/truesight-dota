@@ -1,8 +1,9 @@
 use super::TrueSightGuiApp;
 use super::overlay_backend::{
     LogicalOutputBounds, OverlayBackendKind, OverlayHostMode, OverlayRect,
-    compute_anchored_drag_desktop_pos, compute_drag_margin_step, compute_next_monitor_geometry,
-    compute_resize_step, resolve_cross_monitor_drag_target, resolve_overlay_backend,
+    build_wayland_overlay_raw_input, compute_anchored_drag_desktop_pos, compute_drag_margin_step,
+    compute_next_logical_output_geometry, compute_next_monitor_geometry, compute_resize_step,
+    resolve_cross_monitor_drag_target, resolve_overlay_backend,
 };
 use super::overlay_raster::OverlayRasterizer;
 use crate::AppSession;
@@ -542,4 +543,145 @@ fn anchored_continuous_drag_tracks_global_pointer_across_monitors() {
     .expect("continuing drag back onto HDMI-A-1 must migrate back");
     assert_eq!(back.output_id, 2);
     assert_eq!(back.margin, (820, 826));
+}
+
+#[test]
+fn next_logical_output_geometry_cycles_mixed_scale_outputs_both_ways() {
+    let outputs = [
+        LogicalOutputBounds {
+            id: 1,
+            x: 0,
+            y: 0,
+            width: 1280,
+            height: 720,
+        },
+        LogicalOutputBounds {
+            id: 2,
+            x: 1280,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        },
+    ];
+    let on_2x = OverlayGeometry {
+        x: 100.0,
+        y: 80.0,
+        width: 380.0,
+        height: 230.0,
+        click_through: false,
+    };
+
+    let to_1x = compute_next_logical_output_geometry(on_2x, &outputs)
+        .expect("should switch from 2x logical output to 1x logical output");
+    assert_eq!(to_1x.x, 1380.0);
+    assert_eq!(to_1x.y, 80.0);
+
+    let back_to_2x = compute_next_logical_output_geometry(to_1x, &outputs)
+        .expect("should switch back from 1x logical output to 2x logical output");
+    assert_eq!(back_to_2x.x, 100.0);
+    assert_eq!(back_to_2x.y, 80.0);
+
+    // Oversized relative offset on wider 1x monitor clamps within narrower 2x monitor.
+    let far_on_1x = OverlayGeometry {
+        x: 2680.0,
+        y: 900.0,
+        ..on_2x
+    };
+    let clamped_on_2x = compute_next_logical_output_geometry(far_on_1x, &outputs)
+        .expect("clamped 1x -> 2x switch should succeed");
+    assert_eq!(clamped_on_2x.x, 1280.0 - 380.0);
+    assert_eq!(clamped_on_2x.y, 720.0 - 230.0);
+}
+
+#[test]
+fn wayland_overlay_context_matches_rasterizer_scale_on_first_dpi_transition_frame() {
+    let ctx = egui::Context::default();
+
+    let raw_1x = build_wayland_overlay_raw_input((380, 230), 1, Some(0.0), Vec::new(), true);
+    let out_1x = ctx.run(raw_1x, |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.label("scale 1x");
+        });
+    });
+    assert_eq!(out_1x.pixels_per_point, 1.0);
+
+    let raw_2x = build_wayland_overlay_raw_input((380, 230), 2, Some(0.016), Vec::new(), true);
+    let out_2x = ctx.run(raw_2x, |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.label("scale 2x first frame");
+        });
+    });
+    assert_eq!(
+        out_2x.pixels_per_point, 2.0,
+        "1x -> 2x first frame must use 2.0 to match rasterizer"
+    );
+
+    let raw_back_1x = build_wayland_overlay_raw_input((380, 230), 1, Some(0.032), Vec::new(), true);
+    let out_back_1x = ctx.run(raw_back_1x, |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.label("scale 1x first frame");
+        });
+    });
+    assert_eq!(
+        out_back_1x.pixels_per_point, 1.0,
+        "2x -> 1x first frame must use 1.0 to match rasterizer"
+    );
+}
+
+#[test]
+fn rasterizer_textured_semi_transparent_quad_has_no_diagonal_seam() {
+    let mut raster = OverlayRasterizer::new();
+    let tex_id = TextureId::User(7);
+    let mut delta = TexturesDelta::default();
+    delta.set.push((
+        tex_id,
+        egui::epaint::ImageDelta::full(
+            ColorImage::filled([2, 2], Color32::from_rgba_premultiplied(100, 50, 25, 128)),
+            TextureOptions::NEAREST,
+        ),
+    ));
+    raster.apply_textures_delta(&delta);
+
+    let quad = Rect::from_min_max(pos2(0.0, 0.0), pos2(8.0, 8.0));
+    let uvs = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+    let mut mesh_a = Mesh::with_texture(tex_id);
+    push_quad(&mut mesh_a, quad, uvs, Color32::WHITE);
+    let prims_a = vec![egui::ClippedPrimitive {
+        clip_rect: quad,
+        primitive: egui::epaint::Primitive::Mesh(mesh_a),
+    }];
+    let buf_a = raster
+        .rasterize_if_dirty(8, 8, 1.0, &prims_a)
+        .expect("textured 8x8 quad must rasterize");
+    for y in 0..8 {
+        for x in 0..8 {
+            let alpha = buf_a[(y * 8 + x) * 4 + 3];
+            assert_eq!(
+                alpha, 128,
+                "diagonal/fill mismatch at ({x}, {y}) in standard split: got alpha {alpha}"
+            );
+        }
+    }
+
+    // Also test the alternate diagonal split [0, 1, 3, 1, 2, 3].
+    let mut mesh_b = Mesh::with_texture(tex_id);
+    push_quad(&mut mesh_b, quad, uvs, Color32::WHITE);
+    mesh_b.indices = vec![0, 1, 3, 1, 2, 3];
+    let prims_b = vec![egui::ClippedPrimitive {
+        clip_rect: quad,
+        primitive: egui::epaint::Primitive::Mesh(mesh_b),
+    }];
+    raster.invalidate();
+    let buf_b = raster
+        .rasterize_if_dirty(8, 8, 1.0, &prims_b)
+        .expect("alternate-diagonal textured 8x8 quad must rasterize");
+    for y in 0..8 {
+        for x in 0..8 {
+            let alpha = buf_b[(y * 8 + x) * 4 + 3];
+            assert_eq!(
+                alpha, 128,
+                "diagonal/fill mismatch at ({x}, {y}) in alternate split: got alpha {alpha}"
+            );
+        }
+    }
 }

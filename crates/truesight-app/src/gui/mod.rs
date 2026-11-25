@@ -121,6 +121,8 @@ pub struct TrueSightGuiApp {
         Option<overlay_backend::OverlayRect>,
         Option<overlay_backend::OverlayRect>,
     ),
+    #[cfg(target_os = "linux")]
+    wayland_logical_outputs: Vec<overlay_backend::LogicalOutputBounds>,
     hotkey_listener: Option<hotkey::GlobalHotkeyListener>,
 }
 
@@ -208,6 +210,8 @@ impl TrueSightGuiApp {
             wayland_last_cursor: None,
             #[cfg(target_os = "linux")]
             wayland_last_hit_regions: (None, None),
+            #[cfg(target_os = "linux")]
+            wayland_logical_outputs: Vec::new(),
             hotkey_listener: None,
         }
     }

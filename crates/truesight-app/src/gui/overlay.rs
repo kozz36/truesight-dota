@@ -396,7 +396,7 @@ impl TrueSightGuiApp {
                             toggle_build_view = true;
                         }
 
-                        if self.session.known_monitors.len() > 1
+                        if self.has_multiple_overlay_monitors(host_mode)
                             && overlay_icon_button(
                                 ui,
                                 icon_sz,

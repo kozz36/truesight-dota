@@ -1,6 +1,5 @@
 use super::super::overlay_backend::LogicalOutputBounds;
 use super::{LayerEvent, WaylandLayerState};
-use crate::session::MonitorRect;
 use smithay_client_toolkit::reexports::client::protocol::wl_output;
 
 pub(super) struct TargetOutputLayout {
@@ -13,25 +12,7 @@ pub(super) struct TargetOutputLayout {
 
 impl WaylandLayerState {
     pub(super) fn emit_monitors(&self) {
-        let monitors: Vec<MonitorRect> = self
-            .output_state
-            .outputs()
-            .filter_map(|o| {
-                let info = self.output_state.info(&o)?;
-                let (lx, ly) = info.logical_position.unwrap_or((0, 0));
-                let (lw, lh) = info.logical_size?;
-                if lw <= 0 || lh <= 0 {
-                    return None;
-                }
-                let sf = info.scale_factor.max(1) as f32;
-                Some(MonitorRect::new(
-                    lx as f32 * sf,
-                    ly as f32 * sf,
-                    lw as f32 * sf,
-                    lh as f32 * sf,
-                ))
-            })
-            .collect();
+        let monitors = self.logical_outputs();
         if !monitors.is_empty() {
             self.emit(LayerEvent::MonitorsUpdated(monitors));
         }

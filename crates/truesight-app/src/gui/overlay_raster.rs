@@ -383,6 +383,22 @@ fn fill_rect_premultiplied(
     }
 }
 
+#[inline]
+fn is_top_left_edge(ax: f32, ay: f32, bx: f32, by: f32) -> bool {
+    let dy = by - ay;
+    let dx = bx - ax;
+    dy < 0.0 || (dy == 0.0 && dx > 0.0)
+}
+
+#[inline]
+fn edge_function_canonical(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32) -> f32 {
+    if ay < by || (ay == by && ax <= bx) {
+        (bx - ax) * (py - ay) - (by - ay) * (px - ax)
+    } else {
+        -((ax - bx) * (py - by) - (ay - by) * (px - bx))
+    }
+}
+
 #[expect(clippy::too_many_arguments)]
 fn rasterize_triangle(
     buffer: &mut [u8],
@@ -390,22 +406,34 @@ fn rasterize_triangle(
     scale: f32,
     clip: (i32, i32, i32, i32),
     v0: egui::epaint::Vertex,
-    v1: egui::epaint::Vertex,
-    v2: egui::epaint::Vertex,
+    mut v1: egui::epaint::Vertex,
+    mut v2: egui::epaint::Vertex,
     tex: Option<&RasterTexture>,
 ) {
     let p0x = v0.pos.x * scale;
     let p0y = v0.pos.y * scale;
-    let p1x = v1.pos.x * scale;
-    let p1y = v1.pos.y * scale;
-    let p2x = v2.pos.x * scale;
-    let p2y = v2.pos.y * scale;
+    let mut p1x = v1.pos.x * scale;
+    let mut p1y = v1.pos.y * scale;
+    let mut p2x = v2.pos.x * scale;
+    let mut p2y = v2.pos.y * scale;
 
-    let area = (p1x - p0x) * (p2y - p0y) - (p1y - p0y) * (p2x - p0x);
+    let mut area = (p1x - p0x) * (p2y - p0y) - (p1y - p0y) * (p2x - p0x);
     if area.abs() < 1e-4 {
         return;
     }
+    if area < 0.0 {
+        std::mem::swap(&mut v1, &mut v2);
+        std::mem::swap(&mut p1x, &mut p2x);
+        std::mem::swap(&mut p1y, &mut p2y);
+        area = -area;
+    }
     let inv_area = 1.0 / area;
+
+    // Top-left edge ownership rule (Y-down CCW winding) ensures shared edges between adjacent
+    // triangles are rasterized by exactly one triangle with zero seam overlap or gaps.
+    let tl0 = is_top_left_edge(p1x, p1y, p2x, p2y);
+    let tl1 = is_top_left_edge(p2x, p2y, p0x, p0y);
+    let tl2 = is_top_left_edge(p0x, p0y, p1x, p1y);
 
     let (clip_min_x, clip_min_y, clip_max_x, clip_max_y) = clip;
     let min_x = (p0x.min(p1x).min(p2x).floor() as i32).max(clip_min_x);
@@ -422,12 +450,18 @@ fn rasterize_triangle(
         let row_offset = y as usize * stride_px as usize;
         for x in min_x..max_x {
             let px = x as f32 + 0.5;
-            let w0 = ((p2x - p1x) * (py - p1y) - (p2y - p1y) * (px - p1x)) * inv_area;
-            let w1 = ((p0x - p2x) * (py - p2y) - (p0y - p2y) * (px - p2x)) * inv_area;
-            let w2 = ((p1x - p0x) * (py - p0y) - (p1y - p0y) * (px - p0x)) * inv_area;
-            if w0 < -1e-4 || w1 < -1e-4 || w2 < -1e-4 {
+            let e0 = edge_function_canonical(p1x, p1y, p2x, p2y, px, py);
+            let e1 = edge_function_canonical(p2x, p2y, p0x, p0y, px, py);
+            let e2 = edge_function_canonical(p0x, p0y, p1x, p1y, px, py);
+            if !(e0 > 0.0 || (e0 == 0.0 && tl0))
+                || !(e1 > 0.0 || (e1 == 0.0 && tl1))
+                || !(e2 > 0.0 || (e2 == 0.0 && tl2))
+            {
                 continue;
             }
+            let w0 = (e0 * inv_area).clamp(0.0, 1.0);
+            let w1 = (e1 * inv_area).clamp(0.0, 1.0);
+            let w2 = (e2 * inv_area).clamp(0.0, 1.0);
 
             let vert_col = if uniform_vert {
                 v0.color
