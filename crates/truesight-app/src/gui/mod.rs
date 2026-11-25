@@ -5,7 +5,12 @@ mod matrix_card;
 mod onboarding;
 mod oracle_card;
 mod overlay;
+mod overlay_backend;
 mod overlay_build;
+#[cfg(test)]
+mod overlay_layer_tests;
+#[cfg(any(target_os = "linux", test))]
+mod overlay_raster;
 mod suggested_table;
 mod team_card;
 #[cfg(test)]
@@ -13,6 +18,8 @@ mod tests;
 pub mod theme;
 mod top_bar;
 pub mod viewmodel;
+#[cfg(target_os = "linux")]
+mod wayland_layer;
 
 #[cfg(test)]
 pub use theme::{Tone, fmt_pct, fmt_val, tone_for_user};
@@ -58,6 +65,7 @@ pub struct TrueSightGuiApp {
     gsi_listener: Option<BoundedGsiListener>,
     vision_worker: Option<BoundedVisionWorker>,
     textures: GuiTextureCache,
+    overlay_textures: GuiTextureCache,
     style_configured: bool,
     matrix_tab: MatrixTab,
     picker_target: Option<PickerTarget>,
@@ -90,6 +98,31 @@ pub struct TrueSightGuiApp {
     pub(super) overlay_resize_armed: Option<egui::Pos2>,
     pub(super) overlay_wm_gesture_cooldown: u8,
     pub(super) last_overlay_is_post_draft: Option<bool>,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    overlay_backend: overlay_backend::OverlayBackendKind,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    overlay_ctx: egui::Context,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    overlay_ctx_style_configured: bool,
+    #[cfg(target_os = "linux")]
+    overlay_rasterizer: overlay_raster::OverlayRasterizer,
+    #[cfg(target_os = "linux")]
+    wayland_layer: Option<wayland_layer::WaylandLayerHandle>,
+    #[cfg(target_os = "linux")]
+    wayland_layer_visible: bool,
+    #[cfg(target_os = "linux")]
+    wayland_layer_scale: i32,
+    #[cfg(target_os = "linux")]
+    wayland_layer_size: (u32, u32),
+    #[cfg(target_os = "linux")]
+    wayland_last_cursor: Option<egui::CursorIcon>,
+    #[cfg(target_os = "linux")]
+    wayland_last_hit_regions: (
+        Option<overlay_backend::OverlayRect>,
+        Option<overlay_backend::OverlayRect>,
+    ),
+    #[cfg(target_os = "linux")]
+    wayland_logical_outputs: Vec<overlay_backend::LogicalOutputBounds>,
     hotkey_listener: Option<hotkey::GlobalHotkeyListener>,
 }
 
@@ -99,6 +132,8 @@ impl Drop for TrueSightGuiApp {
         if let Some(stop) = self.stratz_paste_stop.take() {
             stop.store(true, std::sync::atomic::Ordering::Relaxed);
         }
+        #[cfg(target_os = "linux")]
+        drop(self.wayland_layer.take());
     }
 }
 
@@ -125,6 +160,7 @@ impl TrueSightGuiApp {
             gsi_listener,
             vision_worker,
             textures: GuiTextureCache::default(),
+            overlay_textures: GuiTextureCache::default(),
             style_configured: false,
             matrix_tab: MatrixTab::Counter,
             picker_target: None,
@@ -157,6 +193,25 @@ impl TrueSightGuiApp {
             overlay_resize_armed: None,
             overlay_wm_gesture_cooldown: 0,
             last_overlay_is_post_draft: None,
+            overlay_backend: overlay_backend::OverlayBackendKind::EframeViewport,
+            overlay_ctx: egui::Context::default(),
+            overlay_ctx_style_configured: false,
+            #[cfg(target_os = "linux")]
+            overlay_rasterizer: overlay_raster::OverlayRasterizer::new(),
+            #[cfg(target_os = "linux")]
+            wayland_layer: None,
+            #[cfg(target_os = "linux")]
+            wayland_layer_visible: false,
+            #[cfg(target_os = "linux")]
+            wayland_layer_scale: 1,
+            #[cfg(target_os = "linux")]
+            wayland_layer_size: (380, 230),
+            #[cfg(target_os = "linux")]
+            wayland_last_cursor: None,
+            #[cfg(target_os = "linux")]
+            wayland_last_hit_regions: (None, None),
+            #[cfg(target_os = "linux")]
+            wayland_logical_outputs: Vec::new(),
             hotkey_listener: None,
         }
     }
@@ -209,6 +264,12 @@ impl TrueSightGuiApp {
     pub(super) fn set_overlay_click_through_live(&mut self, ctx: &egui::Context, enabled: bool) {
         self.session.set_overlay_click_through(enabled);
         self.overlay_passthrough_repaint_frames = 2;
+        #[cfg(target_os = "linux")]
+        if self.overlay_backend == overlay_backend::OverlayBackendKind::WaylandLayerShell
+            && let Some(layer) = &self.wayland_layer
+        {
+            layer.send(overlay_backend::LayerCommand::SetClickThrough(enabled));
+        }
         let overlay_id = egui::ViewportId::from_hash_of("truesight_compact_overlay");
         ctx.request_repaint();
         ctx.request_repaint_of(overlay_id);
@@ -261,6 +322,11 @@ impl TrueSightGuiApp {
             return;
         }
         self.style_configured = true;
+        Self::configure_visuals_for(ctx);
+    }
+
+    /// Applies the Gem of True Sight dark HUD palette and borders to `ctx`.
+    pub(super) fn configure_visuals_for(ctx: &egui::Context) {
         let mut visuals = egui::Visuals::dark();
         visuals.panel_fill = P_VOID;
         visuals.window_fill = P_INDIGO_1;
@@ -606,73 +672,20 @@ impl TrueSightGuiApp {
             rects.account_window = acct_resp.map(|r| r.response.rect);
         }
 
-        if self.session.overlay_mode {
-            let overlay_id = egui::ViewportId::from_hash_of("truesight_compact_overlay");
-            let is_post_draft = self.session.is_post_draft_build_view();
-            let target_geom = self.session.active_overlay_geometry();
-            let builder = overlay::build_overlay_viewport_builder(target_geom, is_post_draft);
-            ctx.show_viewport_immediate(overlay_id, builder, |vctx, _class| {
-                if self
-                    .last_overlay_is_post_draft
-                    .is_some_and(|prev| prev != is_post_draft)
-                {
-                    self.overlay_wm_gesture_cooldown = 2;
-                    let min_sz = if is_post_draft {
-                        vec2(220.0, 104.0)
-                    } else {
-                        vec2(280.0, 160.0)
-                    };
-                    vctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(min_sz));
-                    vctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(
-                        target_geom.width,
-                        target_geom.height,
-                    )));
-                    let has_pos = vctx.input(|i| {
-                        let vp = i.viewport();
-                        vp.outer_rect.is_some() || vp.inner_rect.is_some()
-                    });
-                    if has_pos {
-                        vctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
-                            target_geom.x,
-                            target_geom.y,
-                        )));
-                    }
-                }
-                self.last_overlay_is_post_draft = Some(is_post_draft);
+        #[cfg(target_os = "linux")]
+        let handled_wayland_layer =
+            if self.overlay_backend == overlay_backend::OverlayBackendKind::WaylandLayerShell {
+                self.step_wayland_layer_overlay(ctx);
+                true
+            } else {
+                false
+            };
+        #[cfg(not(target_os = "linux"))]
+        let handled_wayland_layer = false;
 
-                if !f8_root && Self::is_non_repeating_key_pressed(vctx, egui::Key::F8) {
-                    self.session.set_overlay_mode(false);
-                    ctx.request_repaint();
-                }
-                if !pass_toggled_this_frame && Self::is_pass_shortcut_pressed(vctx) {
-                    let next = !self.session.overlay_geometry.click_through;
-                    self.set_overlay_click_through_live(ctx, next);
-                }
-
-                self.sync_live_overlay_viewport_geometry(vctx);
-                egui::CentralPanel::default()
-                    .frame(egui::Frame::NONE)
-                    .show(vctx, |ui| {
-                        let _ = self.render_overlay_panel(ui);
-                    });
-
-                let click_through = self.session.overlay_geometry.click_through;
-                if self.overlay_applied_click_through != Some(click_through) {
-                    vctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(click_through));
-                    self.overlay_applied_click_through = Some(click_through);
-                    self.overlay_passthrough_repaint_frames = 2;
-                    ctx.request_repaint();
-                    ctx.request_repaint_of(overlay_id);
-                } else if self.overlay_passthrough_repaint_frames > 0 {
-                    self.overlay_passthrough_repaint_frames -= 1;
-                    if !click_through {
-                        vctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(false));
-                    }
-                    ctx.request_repaint();
-                    ctx.request_repaint_of(overlay_id);
-                }
-            });
-        } else {
+        if !handled_wayland_layer && self.session.overlay_mode {
+            self.render_viewport_overlay(ctx, f8_root, pass_toggled_this_frame);
+        } else if !handled_wayland_layer {
             self.overlay_applied_click_through = None;
             self.overlay_passthrough_repaint_frames = 0;
             self.overlay_drag_armed = None;
@@ -857,6 +870,26 @@ pub fn run_gui(
         options,
         Box::new(move |cc| {
             let mut app = TrueSightGuiApp::new(session, gsi_listener, vision_worker);
+            let detected_backend = overlay_backend::detect_overlay_backend();
+            #[cfg(target_os = "linux")]
+            if detected_backend == overlay_backend::OverlayBackendKind::WaylandLayerShell {
+                match wayland_layer::WaylandLayerHandle::start(cc.egui_ctx.clone()) {
+                    Ok(handle) => {
+                        app.wayland_layer = Some(handle);
+                        app.overlay_backend =
+                            overlay_backend::OverlayBackendKind::WaylandLayerShell;
+                    }
+                    Err(_) => {
+                        app.overlay_backend = overlay_backend::OverlayBackendKind::EframeViewport;
+                    }
+                }
+            } else {
+                app.overlay_backend = detected_backend;
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                app.overlay_backend = detected_backend;
+            }
             app.hotkey_listener = Some(hotkey::GlobalHotkeyListener::start(cc.egui_ctx.clone()));
             Ok(Box::new(app))
         }),

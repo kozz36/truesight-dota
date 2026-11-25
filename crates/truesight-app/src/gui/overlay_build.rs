@@ -67,6 +67,7 @@ impl TrueSightGuiApp {
         &self,
         ui: &mut egui::Ui,
         summary: &OverlaySummary,
+        textures: &GuiTextureCache,
     ) -> Option<(ItemId, ItemId)> {
         let tr = super::i18n::strings(self.session.ui_language);
         let mut clicked_variant: Option<(ItemId, ItemId)> = None;
@@ -113,7 +114,7 @@ impl TrueSightGuiApp {
             }
             if inline_starting {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    self.render_overlay_starting_icons(ui, start_items, true);
+                    self.render_overlay_starting_icons(ui, start_items, true, textures);
                 });
             }
         });
@@ -133,7 +134,7 @@ impl TrueSightGuiApp {
         if !inline_starting && !start_items.is_empty() && rem_h_after_hdr >= 80.0 {
             ui.add_space(1.0);
             ui.horizontal(|ui| {
-                self.render_overlay_starting_icons(ui, start_items, false);
+                self.render_overlay_starting_icons(ui, start_items, false, textures);
             });
         }
         ui.add_space(3.0);
@@ -266,6 +267,7 @@ impl TrueSightGuiApp {
                                 variant_h,
                                 spec.var_rows,
                                 spec.grid_2x2,
+                                textures,
                                 &mut clicked_variant,
                             );
                         }
@@ -282,6 +284,7 @@ impl TrueSightGuiApp {
                 avail_w,
                 tile_w,
                 opt_reserve_h,
+                textures,
             );
         }
 
@@ -293,6 +296,7 @@ impl TrueSightGuiApp {
         ui: &mut egui::Ui,
         start_items: &[ItemId],
         right_to_left: bool,
+        textures: &GuiTextureCache,
     ) {
         let paint_chip = |ui: &mut egui::Ui, item_id: ItemId| {
             let owned = self.session.active_build_owned_items().contains(&item_id);
@@ -307,7 +311,7 @@ impl TrueSightGuiApp {
             paint_item_icon_with_fallback(
                 ui.painter(),
                 r,
-                self.textures.items.get(&item_id),
+                textures.items.get(&item_id),
                 Some(name.as_str()),
                 border,
                 owned,
@@ -346,6 +350,7 @@ impl TrueSightGuiApp {
         variant_w: f32,
         variant_h: f32,
         var_rows: usize,
+        textures: &GuiTextureCache,
         clicked_variant: &mut Option<(ItemId, ItemId)>,
     ) {
         let is_next = next_unowned_index == Some(idx);
@@ -362,7 +367,7 @@ impl TrueSightGuiApp {
             .item_catalog(step.item_id)
             .map(|e| (e.display_name, e.cost))
             .unwrap_or_else(|| (format!("#{}", step.item_id.0), 0));
-        let step_tex = self.textures.items.get(&step.item_id);
+        let step_tex = textures.items.get(&step.item_id);
 
         let step_resp = ui
             .vertical(|ui| {
@@ -478,7 +483,7 @@ impl TrueSightGuiApp {
                                     paint_item_icon_with_fallback(
                                         ui.painter(),
                                         vr,
-                                        self.textures.items.get(&var.item_id),
+                                        textures.items.get(&var.item_id),
                                         Some(vname.as_str()),
                                         vborder,
                                         var_owned,
@@ -543,6 +548,7 @@ impl TrueSightGuiApp {
         variant_h: f32,
         var_rows: usize,
         grid_2x2: bool,
+        textures: &GuiTextureCache,
         clicked_variant: &mut Option<(ItemId, ItemId)>,
     ) {
         egui::Frame::NONE
@@ -589,6 +595,7 @@ impl TrueSightGuiApp {
                                             variant_w,
                                             variant_h,
                                             var_rows,
+                                            textures,
                                             clicked_variant,
                                         );
                                     }
@@ -609,6 +616,7 @@ impl TrueSightGuiApp {
                                     variant_w,
                                     variant_h,
                                     var_rows,
+                                    textures,
                                     clicked_variant,
                                 );
                             }
@@ -618,6 +626,7 @@ impl TrueSightGuiApp {
             });
     }
 
+    #[expect(clippy::too_many_arguments)]
     fn render_overlay_optional_row(
         &self,
         ui: &mut egui::Ui,
@@ -626,6 +635,7 @@ impl TrueSightGuiApp {
         avail_w: f32,
         tile_w: f32,
         reserve_h: f32,
+        textures: &GuiTextureCache,
     ) {
         let opt_h = (reserve_h - 6.0).clamp(20.0, 31.0);
         let opt_w = (opt_h / 0.73)
@@ -681,7 +691,7 @@ impl TrueSightGuiApp {
                         paint_item_icon_with_fallback(
                             ui.painter(),
                             r.shrink(1.0),
-                            self.textures.items.get(&opt.item_id),
+                            textures.items.get(&opt.item_id),
                             Some(name.as_str()),
                             border,
                             opt.owned,

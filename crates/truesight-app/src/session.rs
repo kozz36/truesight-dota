@@ -2023,14 +2023,24 @@ impl AppSession {
     }
 
     /// Updates and persists geometry only for the currently active overlay mode (`Picks` vs `Build`).
-    pub fn set_active_overlay_geometry(&mut self, mut geom: OverlayGeometry) {
+    /// Persists the overlay geometry for the explicit view (`false` = Draft Picks, `true` = Build)
+    /// without altering the opposite view's stored rectangle.
+    pub fn set_overlay_geometry_for_view(
+        &mut self,
+        is_post_draft: bool,
+        mut geom: OverlayGeometry,
+    ) {
         geom.click_through = self.overlay_geometry.click_through;
-        if self.is_post_draft_build_view() {
+        if is_post_draft {
             self.build_overlay_geometry = geom;
         } else {
             self.overlay_geometry = geom;
         }
         let _ = self.persist_ui_config();
+    }
+
+    pub fn set_active_overlay_geometry(&mut self, geom: OverlayGeometry) {
+        self.set_overlay_geometry_for_view(self.is_post_draft_build_view(), geom);
     }
 
     /// Persists the onboarding dismissal preference when config persistence is enabled.
