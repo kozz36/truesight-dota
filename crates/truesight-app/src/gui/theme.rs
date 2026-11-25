@@ -210,7 +210,7 @@ fn hud_card_with_mode(
     fill_height: bool,
     add_contents: impl FnOnce(&mut egui::Ui),
 ) -> Rect {
-    let radius = CornerRadius::same(2);
+    let radius = CornerRadius::same(5);
     let bg_idx = ui.painter().add(Shape::Noop);
     let prepared = egui::Frame::NONE
         .fill(Color32::TRANSPARENT)
@@ -237,7 +237,7 @@ fn hud_card_with_mode(
         Stroke::new(1.0_f32, P_LINE),
         StrokeKind::Inside,
     );
-    paint_hud_corner_ticks(ui.painter(), rect, P_GEM);
+    paint_hud_corner_ticks(ui.painter(), rect.shrink(1.0), P_GEM);
     rect
 }
 
@@ -353,12 +353,14 @@ pub(super) fn paint_item_icon_with_fallback(
             );
         }
     }
-    painter.rect_stroke(
-        rect,
-        0.0,
-        Stroke::new(1.0_f32, border_color),
-        StrokeKind::Inside,
-    );
+    if border_color != Color32::TRANSPARENT {
+        painter.rect_stroke(
+            rect,
+            0.0,
+            Stroke::new(1.0_f32, border_color),
+            StrokeKind::Inside,
+        );
+    }
 }
 
 pub(super) fn paint_item_icon_named(

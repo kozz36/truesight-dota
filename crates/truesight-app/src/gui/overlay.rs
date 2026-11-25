@@ -280,6 +280,13 @@ impl TrueSightGuiApp {
                             .on_hover_text(tr.overlay_drag_hover);
                     }
 
+                    if let Some(gem_tex) = textures.gem.as_ref() {
+                        let (gem_r, _) = ui.allocate_exact_size(vec2(14.0, 10.5), Sense::hover());
+                        ui.painter()
+                            .image(gem_tex.id(), gem_r, uv_full(), Color32::WHITE);
+                        drag_hit_rect = drag_hit_rect.union(gem_r);
+                    }
+
                     let title_resp = ui.add(
                         egui::Label::new(
                             RichText::new(tr.overlay_title)
@@ -289,7 +296,11 @@ impl TrueSightGuiApp {
                         )
                         .sense(Sense::hover()),
                     );
-                    drag_hit_rect = grip_rect.union(title_resp.rect);
+                    drag_hit_rect = if drag_hit_rect == Rect::NOTHING {
+                        grip_rect.union(title_resp.rect)
+                    } else {
+                        drag_hit_rect.union(grip_rect).union(title_resp.rect)
+                    };
                     if interactive {
                         title_resp
                             .on_hover_cursor(if drag_active {

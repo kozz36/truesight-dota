@@ -100,7 +100,7 @@ impl TrueSightGuiApp {
                         RichText::new(format!("{hero_name} · P{}", role.index() + 1))
                             .size(9.0)
                             .strong()
-                            .color(P_MUTED),
+                            .color(P_SILVER),
                     )
                     .truncate(),
                 );
@@ -109,7 +109,7 @@ impl TrueSightGuiApp {
                     RichText::new(tr.overlay_item_build_label)
                         .size(9.0)
                         .strong()
-                        .color(P_MUTED),
+                        .color(P_SILVER),
                 );
             }
             if inline_starting {
@@ -326,11 +326,13 @@ impl TrueSightGuiApp {
             }
             ui.add_space(2.0);
             ui.add(
-                egui::Label::new(RichText::new("START").size(7.5).strong().color(P_MUTED)).extend(),
+                egui::Label::new(RichText::new("START").size(7.5).strong().color(P_SILVER))
+                    .extend(),
             );
         } else {
             ui.add(
-                egui::Label::new(RichText::new("START").size(7.5).strong().color(P_MUTED)).extend(),
+                egui::Label::new(RichText::new("START").size(7.5).strong().color(P_SILVER))
+                    .extend(),
             );
             for &id in start_items.iter().take(5) {
                 paint_chip(ui, id);
@@ -372,80 +374,76 @@ impl TrueSightGuiApp {
         let step_resp = ui
             .vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
-                egui::Frame::NONE
-                    .fill(P_INDIGO_2)
-                    .stroke(Stroke::new(
-                        if is_next { 1.5_f32 } else { 1.0_f32 },
-                        border_col,
-                    ))
-                    .inner_margin(Margin::same(1))
-                    .show(ui, |ui| {
-                        let (rect, resp) =
-                            ui.allocate_exact_size(vec2(tile_w, tile_h), Sense::hover());
-                        paint_item_icon_with_fallback(
-                            ui.painter(),
-                            rect,
-                            step_tex,
-                            Some(name.as_str()),
-                            border_col,
-                            step.owned,
-                        );
-                        if step.owned {
-                            paint_corner_pill(
-                                ui.painter(),
-                                rect.min + vec2(1.0, 1.0),
-                                Align2::LEFT_TOP,
-                                "OK",
-                                P_VOID,
-                                P_GEM,
-                                6.5,
-                            );
-                        } else if is_next {
-                            paint_corner_pill(
-                                ui.painter(),
-                                rect.min + vec2(1.0, 1.0),
-                                Align2::LEFT_TOP,
-                                "NEXT",
-                                P_VOID,
-                                P_GEM,
-                                6.5,
-                            );
-                        } else if step.owned_components > 0 {
-                            paint_corner_pill(
-                                ui.painter(),
-                                rect.min + vec2(1.0, 1.0),
-                                Align2::LEFT_TOP,
-                                &format!("{}/{}", step.owned_components, step.total_components),
-                                P_VOID,
-                                P_CYAN,
-                                6.5,
-                            );
-                        }
+                let (rect, resp) = ui.allocate_exact_size(vec2(tile_w, tile_h), Sense::hover());
+                paint_item_icon_with_fallback(
+                    ui.painter(),
+                    rect,
+                    step_tex,
+                    Some(name.as_str()),
+                    Color32::TRANSPARENT,
+                    step.owned,
+                );
+                ui.painter().rect_stroke(
+                    rect,
+                    egui::CornerRadius::same(3),
+                    Stroke::new(if is_next { 1.5_f32 } else { 1.0_f32 }, border_col),
+                    egui::StrokeKind::Inside,
+                );
+                if step.owned {
+                    paint_corner_pill(
+                        ui.painter(),
+                        rect.min + vec2(1.0, 1.0),
+                        Align2::LEFT_TOP,
+                        "OK",
+                        P_VOID,
+                        P_GEM,
+                        6.5,
+                    );
+                } else if is_next {
+                    paint_corner_pill(
+                        ui.painter(),
+                        rect.min + vec2(1.0, 1.0),
+                        Align2::LEFT_TOP,
+                        "NEXT",
+                        P_VOID,
+                        P_GEM,
+                        6.5,
+                    );
+                } else if step.owned_components > 0 {
+                    paint_corner_pill(
+                        ui.painter(),
+                        rect.min + vec2(1.0, 1.0),
+                        Align2::LEFT_TOP,
+                        &format!("{}/{}", step.owned_components, step.total_components),
+                        P_VOID,
+                        P_CYAN,
+                        6.5,
+                    );
+                }
 
-                        let timing_txt = format!("{}m", step.avg_time_mins.round().max(1.0) as u32);
-                        paint_corner_pill(
-                            ui.painter(),
-                            rect.max - vec2(1.0, 1.0),
-                            Align2::RIGHT_BOTTOM,
-                            &timing_txt,
-                            P_GLINT,
-                            P_VOID.gamma_multiply(0.84),
-                            7.0,
-                        );
+                let timing_txt = format!("{}m", step.avg_time_mins.round().max(1.0) as u32);
+                paint_corner_pill(
+                    ui.painter(),
+                    rect.max - vec2(1.0, 1.0),
+                    Align2::RIGHT_BOTTOM,
+                    &timing_txt,
+                    P_GLINT,
+                    P_VOID.gamma_multiply(0.84),
+                    7.0,
+                );
 
-                        let trait_note = step
-                            .counter_trait
-                            .map(|t| format!(" · CNT: {}", t.label()))
-                            .unwrap_or_default();
-                        let owned_note = if step.owned { " · OWNED" } else { "" };
-                        resp.on_hover_text(format!(
-                            "{name} ({cost}g) · ~{:.0}m · {}{}{}",
-                            step.avg_time_mins,
-                            phase_short(step.phase),
-                            trait_note,
-                            owned_note
-                        ));
-                    });
+                let trait_note = step
+                    .counter_trait
+                    .map(|t| format!(" · CNT: {}", t.label()))
+                    .unwrap_or_default();
+                let owned_note = if step.owned { " · OWNED" } else { "" };
+                resp.on_hover_text(format!(
+                    "{name} ({cost}g) · ~{:.0}m · {}{}{}",
+                    step.avg_time_mins,
+                    phase_short(step.phase),
+                    trait_note,
+                    owned_note
+                ));
 
                 if var_rows > 0 && !step.variants.is_empty() {
                     let owned_items = self.session.active_build_owned_items();
@@ -552,14 +550,15 @@ impl TrueSightGuiApp {
         clicked_variant: &mut Option<(ItemId, ItemId)>,
     ) {
         egui::Frame::NONE
-            .fill(P_INDIGO_1)
-            .stroke(Stroke::new(1.0_f32, P_LINE))
-            .inner_margin(Margin::symmetric(3, 2))
+            .fill(Color32::from_rgba_unmultiplied(10, 9, 24, 38))
+            .stroke(Stroke::NONE)
+            .corner_radius(egui::CornerRadius::same(4))
+            .inner_margin(Margin::symmetric(4, 3))
             .show(ui, |ui| {
                 // Explicit vertical (top_down Min) layout avoids inheriting `horizontal_top`
                 // while keeping parent available width instead of collapsing `max_rect.width` to 0.
                 ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 1.0;
+                    ui.spacing_mut().item_spacing.y = 2.0;
                     ui.add(
                         egui::Label::new(
                             RichText::new(phase_label).size(7.5).strong().color(P_CYAN),
@@ -651,8 +650,12 @@ impl TrueSightGuiApp {
         let inner_w = (avail_w - 12.0).max(80.0);
 
         egui::Frame::NONE
-            .fill(P_INDIGO_1)
-            .stroke(Stroke::new(1.0_f32, P_NEUTRAL))
+            .fill(Color32::from_rgba_unmultiplied(10, 9, 24, 58))
+            .stroke(Stroke::new(
+                1.0_f32,
+                Color32::from_rgba_unmultiplied(224, 194, 96, 130),
+            ))
+            .corner_radius(egui::CornerRadius::same(4))
             .inner_margin(Margin::symmetric(5, 2))
             .show(ui, |ui| {
                 ui.set_min_width(inner_w);
@@ -682,19 +685,19 @@ impl TrueSightGuiApp {
                         } else {
                             P_NEUTRAL
                         };
-                        ui.painter().rect_stroke(
-                            r,
-                            0.0,
-                            Stroke::new(1.5_f32, border),
-                            egui::StrokeKind::Inside,
-                        );
                         paint_item_icon_with_fallback(
                             ui.painter(),
-                            r.shrink(1.0),
+                            r,
                             textures.items.get(&opt.item_id),
                             Some(name.as_str()),
-                            border,
+                            Color32::TRANSPARENT,
                             opt.owned,
+                        );
+                        ui.painter().rect_stroke(
+                            r,
+                            egui::CornerRadius::same(3),
+                            Stroke::new(1.5_f32, border),
+                            egui::StrokeKind::Inside,
                         );
                         if opt.owned {
                             paint_corner_pill(
