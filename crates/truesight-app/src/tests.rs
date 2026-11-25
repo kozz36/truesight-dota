@@ -4566,7 +4566,7 @@ fn unlinking_steam_account_preserves_and_drains_queued_item_refresh() {
     let file_lock_bg = Arc::clone(&file_lock);
 
     session.set_background_sync_runner(move |bg_mgr, _force| {
-        calls_bg.fetch_add(1, Ordering::SeqCst);
+        let call_num = calls_bg.fetch_add(1, Ordering::SeqCst) + 1;
         targets_bg
             .lock()
             .unwrap()
@@ -4602,8 +4602,9 @@ fn unlinking_steam_account_preserves_and_drains_queued_item_refresh() {
         if let Some(prev) = existing_inner {
             entries.insert(0, prev);
         }
-        std::fs::write(&existing_path, format!("[{}]", entries.join(",")))
-            .map_err(|e| e.to_string())?;
+        let tmp_path = cache_dir_bg.join(format!("hero_item_stats.{call_num}.tmp"));
+        std::fs::write(&tmp_path, format!("[{}]", entries.join(","))).map_err(|e| e.to_string())?;
+        std::fs::rename(&tmp_path, &existing_path).map_err(|e| e.to_string())?;
         Ok("Item cache synced".into())
     });
 
@@ -4632,8 +4633,7 @@ fn unlinking_steam_account_preserves_and_drains_queued_item_refresh() {
         "unlinking Steam account must immediately drain pending queued item refresh into a fresh sync"
     );
 
-    // Unblock cancelled sync #2 and wait for the fresh post-unlink sync #3 to complete.
-    gate_tx.send(()).unwrap();
+    // Wait for the fresh post-unlink sync #3 to complete and reload before unblocking cancelled sync #2.
     wait_for_sync_until(&mut session, || calls.load(Ordering::SeqCst) >= 3);
     assert!(!session.sync_in_flight);
     assert_eq!(calls.load(Ordering::SeqCst), 3);
@@ -4653,6 +4653,8 @@ fn unlinking_steam_account_preserves_and_drains_queued_item_refresh() {
         "post-unlink item refresh must reload item_repo with synced Nyx stats: {nyx_stats:?}"
     );
 
+    gate_tx.send(()).unwrap();
+    drop(session);
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
 
