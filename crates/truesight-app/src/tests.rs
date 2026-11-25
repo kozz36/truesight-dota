@@ -3673,6 +3673,63 @@ fn resolve_effective_pixels_per_point_honors_native_scale_and_app_zoom() {
 }
 
 #[test]
+fn clamp_overlay_geometry_is_idempotent_across_fractional_dpi_and_capture_strip_edges() {
+    for ppp in [1.0_f32, 1.25_f32, 1.5_f32, 1.75_f32, 2.0_f32] {
+        let monitor = crate::session::MonitorRect::new(0.0, 0.0, 1920.0 * ppp, 1080.0 * ppp);
+        let strip = Some((200.0 * ppp, 40.0 * ppp, 1520.0 * ppp, 84.0 * ppp));
+        let samples = [
+            // Tall overlay colliding with both top capture strip and bottom monitor edge
+            crate::session::OverlayGeometry {
+                x: 1600.3 * ppp,
+                y: 55.7 * ppp,
+                width: 412.6 * ppp,
+                height: 695.4 * ppp,
+                click_through: false,
+            },
+            // Right/bottom overflow with fractional coordinates
+            crate::session::OverlayGeometry {
+                x: 1850.9 * ppp,
+                y: 990.3 * ppp,
+                width: 391.2 * ppp,
+                height: 247.8 * ppp,
+                click_through: false,
+            },
+        ];
+        for raw in samples {
+            let once = AppSession::clamp_overlay_geometry_in_monitor_with_min_scaled(
+                raw, monitor, strip, ppp, 280.0, 160.0,
+            );
+            let twice = AppSession::clamp_overlay_geometry_in_monitor_with_min_scaled(
+                once, monitor, strip, ppp, 280.0, 160.0,
+            );
+            assert!(
+                (once.x - twice.x).abs() < 1e-3
+                    && (once.y - twice.y).abs() < 1e-3
+                    && (once.width - twice.width).abs() < 1e-3
+                    && (once.height - twice.height).abs() < 1e-3,
+                "ppp={ppp}: clamping must be strictly idempotent; once={once:?}, twice={twice:?}"
+            );
+            // Also verify integer physical-pixel quantization of `once` stays clamped on re-clamp!
+            let rounded = crate::session::OverlayGeometry {
+                x: once.x.round(),
+                y: once.y.round(),
+                width: once.width.round(),
+                height: once.height.round(),
+                click_through: once.click_through,
+            };
+            let after_round = AppSession::clamp_overlay_geometry_in_monitor_with_min_scaled(
+                rounded, monitor, strip, ppp, 280.0, 160.0,
+            );
+            assert!(
+                (rounded.x - after_round.x).abs() < 1e-3
+                    && (rounded.y - after_round.y).abs() < 1e-3,
+                "ppp={ppp}: Win32 integer-pixel rounding must not bounce out of bounds; rounded={rounded:?}, after={after_round:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn ui_config_persists_ui_language_and_defaults_to_english_when_missing() {
     use crate::session::{UiConfig, UiLanguage, load_ui_config_from_dir, save_ui_config_to_dir};
 
