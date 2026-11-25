@@ -144,6 +144,7 @@ impl PointerHandler for WaylandLayerState {
 
         let mut pending_events = Vec::new();
         let mut enter_seen = false;
+        let mut gesture_finished = false;
         let mut migrate_target: Option<(
             super::super::overlay_backend::CrossMonitorTarget,
             (f32, f32),
@@ -262,6 +263,7 @@ impl PointerHandler for WaylandLayerState {
                     PointerEventKind::Leave { .. } => {
                         if !matches!(active.interaction, InteractionMode::None) {
                             active.interaction = InteractionMode::None;
+                            gesture_finished = true;
                             pending_events.push(LayerEvent::GeometryChanged {
                                 is_post_draft: active.is_post_draft,
                                 x: active.output_origin.0 + active.margin_x,
@@ -307,6 +309,7 @@ impl PointerHandler for WaylandLayerState {
                             && !matches!(active.interaction, InteractionMode::None)
                         {
                             active.interaction = InteractionMode::None;
+                            gesture_finished = true;
                             pending_events.push(LayerEvent::GeometryChanged {
                                 is_post_draft: active.is_post_draft,
                                 x: active.output_origin.0 + active.margin_x,
@@ -363,6 +366,12 @@ impl PointerHandler for WaylandLayerState {
             for ev in pending_events {
                 self.emit(ev);
             }
+            if gesture_finished {
+                self.flush_pending_set_geometry();
+            }
+            let _ = self.conn.flush();
+        } else if gesture_finished {
+            self.flush_pending_set_geometry();
             let _ = self.conn.flush();
         }
     }

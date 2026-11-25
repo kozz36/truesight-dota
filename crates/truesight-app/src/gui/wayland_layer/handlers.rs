@@ -163,6 +163,7 @@ impl LayerShellHandler for WaylandLayerState {
             .as_ref()
             .is_some_and(|a| &a.layer == layer)
         {
+            self.pending_set_geometry.clear();
             self.drag_anchor = None;
             self.active_surface = None;
             self.emit(LayerEvent::Closed);

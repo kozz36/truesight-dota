@@ -797,3 +797,231 @@ fn queued_picks_geometry_event_does_not_overwrite_build_geometry_on_gsi_transiti
     assert_eq!(app.session.build_overlay_geometry.y, 450.0);
     assert_eq!(app.wayland_layer_size, (420, 168));
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn deferred_build_set_geometry_applies_after_picks_drag_and_accepts_build_frame() {
+    use super::overlay_backend::LayerEvent;
+    use super::wayland_layer::{
+        DeferredGeometryQueue, PendingSetGeometry, WaylandLayerHandle, frame_matches_surface_dims,
+        surface_geometry_after_set,
+    };
+    use truesight_core::ports::DraftEvent;
+
+    let mut session = AppSession::new().unwrap();
+    session.overlay_mode = true;
+    session.overlay_geometry = OverlayGeometry {
+        x: 24.0,
+        y: 96.0,
+        width: 380.0,
+        height: 230.0,
+        click_through: false,
+    };
+    session.build_overlay_geometry = OverlayGeometry {
+        x: 600.0,
+        y: 450.0,
+        width: 420.0,
+        height: 168.0,
+        click_through: false,
+    };
+
+    let (cmd_tx, cmd_rx) = smithay_client_toolkit::reexports::calloop::channel::channel::<
+        super::overlay_backend::LayerCommand,
+    >();
+    let (event_tx, event_rx) = std::sync::mpsc::channel::<LayerEvent>();
+    let mut app = TrueSightGuiApp::new(session, None, None);
+    app.wayland_layer = Some(WaylandLayerHandle::from_test_channels(cmd_tx, event_rx));
+    app.wayland_layer_visible = true;
+    app.last_overlay_is_post_draft = Some(false);
+    app.wayland_layer_size = (380, 230);
+
+    // GSI transitions to Build while the user is still holding down a Picks drag.
+    app.session.apply_event(DraftEvent::GameRulesStateChanged {
+        state_name: "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS".into(),
+        game_time_secs: 0,
+    });
+    let main_ctx = egui::Context::default();
+    app.step_wayland_layer_overlay(&main_ctx);
+
+    let mut pending_cmd = None;
+    while let Ok(cmd) = cmd_rx.try_recv() {
+        if let super::overlay_backend::LayerCommand::SetGeometry {
+            is_post_draft,
+            x,
+            y,
+            width,
+            height,
+            min_w,
+            min_h,
+        } = cmd
+        {
+            pending_cmd = Some(PendingSetGeometry {
+                is_post_draft,
+                x,
+                y,
+                width,
+                height,
+                min_w,
+                min_h,
+            });
+        }
+    }
+    let build_req = pending_cmd.expect("Build SetGeometry command must be sent on GSI transition");
+
+    let mut queue = DeferredGeometryQueue::default();
+    assert!(
+        queue.on_set_geometry(true, build_req).is_none(),
+        "SetGeometry arriving mid-drag must be deferred until release"
+    );
+    // While drag is active, surface remains Picks (380x230), so Build 420x168 frame does not match yet.
+    assert!(!frame_matches_surface_dims(420, 168, 380, 230, 1));
+    assert!(
+        queue.on_gesture_finished(true).is_none(),
+        "anchored/active gesture still holding must not flush deferred SetGeometry early"
+    );
+
+    // Drag finishes at (120, 230): pointer emits Picks GeometryChanged(persist: true) first.
+    let drag_end =
+        compute_drag_margin_step((24, 96), (96.0, 134.0), (380, 230), Some((2560, 1440)));
+    assert_eq!(drag_end, (120, 230));
+    event_tx
+        .send(LayerEvent::GeometryChanged {
+            is_post_draft: false,
+            x: drag_end.0,
+            y: drag_end.1,
+            width: 380,
+            height: 230,
+            persist: true,
+        })
+        .unwrap();
+    app.step_wayland_layer_overlay(&main_ctx);
+    assert_eq!(app.session.overlay_geometry.x, 120.0);
+    assert_eq!(app.session.overlay_geometry.y, 230.0);
+    assert_eq!(app.session.build_overlay_geometry.x, 600.0);
+    assert_eq!(app.session.build_overlay_geometry.y, 450.0);
+    assert_eq!(app.wayland_layer_size, (420, 168));
+
+    // Then the presenter flushes the deferred Build SetGeometry command on release.
+    let flushed = queue
+        .on_gesture_finished(false)
+        .expect("releasing Picks drag must flush deferred Build SetGeometry");
+    let applied = surface_geometry_after_set(flushed, (0, 0), Some((2560, 1440)));
+    assert_eq!(applied, (600, 450, 420, 168, 220, 104, true));
+    assert!(frame_matches_surface_dims(
+        420, 168, applied.2, applied.3, 1
+    ));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn deferred_build_set_geometry_applies_after_picks_resize_and_accepts_build_frame() {
+    use super::overlay_backend::LayerEvent;
+    use super::wayland_layer::{
+        DeferredGeometryQueue, PendingSetGeometry, WaylandLayerHandle, frame_matches_surface_dims,
+        surface_geometry_after_set,
+    };
+    use truesight_core::ports::DraftEvent;
+
+    let mut session = AppSession::new().unwrap();
+    session.overlay_mode = true;
+    session.overlay_geometry = OverlayGeometry {
+        x: 24.0,
+        y: 96.0,
+        width: 380.0,
+        height: 230.0,
+        click_through: false,
+    };
+    session.build_overlay_geometry = OverlayGeometry {
+        x: 600.0,
+        y: 450.0,
+        width: 420.0,
+        height: 168.0,
+        click_through: false,
+    };
+
+    let (cmd_tx, cmd_rx) = smithay_client_toolkit::reexports::calloop::channel::channel::<
+        super::overlay_backend::LayerCommand,
+    >();
+    let (event_tx, event_rx) = std::sync::mpsc::channel::<LayerEvent>();
+    let mut app = TrueSightGuiApp::new(session, None, None);
+    app.wayland_layer = Some(WaylandLayerHandle::from_test_channels(cmd_tx, event_rx));
+    app.wayland_layer_visible = true;
+    app.last_overlay_is_post_draft = Some(false);
+    app.wayland_layer_size = (380, 230);
+
+    // GSI switches to Build while user is actively resizing Picks (380x230 -> 500x300).
+    app.session.apply_event(DraftEvent::GameRulesStateChanged {
+        state_name: "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS".into(),
+        game_time_secs: 0,
+    });
+    let main_ctx = egui::Context::default();
+    app.step_wayland_layer_overlay(&main_ctx);
+
+    let mut build_req = None;
+    while let Ok(cmd) = cmd_rx.try_recv() {
+        if let super::overlay_backend::LayerCommand::SetGeometry {
+            is_post_draft,
+            x,
+            y,
+            width,
+            height,
+            min_w,
+            min_h,
+        } = cmd
+        {
+            build_req = Some(PendingSetGeometry {
+                is_post_draft,
+                x,
+                y,
+                width,
+                height,
+                min_w,
+                min_h,
+            });
+        }
+    }
+    let build_req = build_req.expect("Build SetGeometry command must be queued on GSI switch");
+
+    let mut queue = DeferredGeometryQueue::default();
+    assert!(queue.on_set_geometry(true, build_req).is_none());
+
+    // Picks resize continues to obey Picks min bounds (280x160) until released.
+    let resized = compute_resize_step((380, 230), (120.0, 70.0), (280, 160), (840, 720));
+    assert_eq!(resized, (500, 300));
+
+    // Release emits Picks GeometryChanged(500x300, persist: true) first.
+    event_tx
+        .send(LayerEvent::GeometryChanged {
+            is_post_draft: false,
+            x: 24,
+            y: 96,
+            width: resized.0,
+            height: resized.1,
+            persist: true,
+        })
+        .unwrap();
+    app.step_wayland_layer_overlay(&main_ctx);
+    assert_eq!(app.session.overlay_geometry.width, 500.0);
+    assert_eq!(app.session.overlay_geometry.height, 300.0);
+    assert_eq!(app.session.build_overlay_geometry.width, 420.0);
+    assert_eq!(app.session.build_overlay_geometry.height, 168.0);
+    assert_eq!(app.wayland_layer_size, (420, 168));
+
+    // Flushing deferred SetGeometry switches surface dimensions to Build (420x168) so frames commit.
+    let flushed = queue
+        .on_gesture_finished(false)
+        .expect("releasing Picks resize must flush deferred Build SetGeometry");
+    let applied = surface_geometry_after_set(flushed, (0, 0), Some((2560, 1440)));
+    assert_eq!(applied, (600, 450, 420, 168, 220, 104, true));
+    assert!(frame_matches_surface_dims(
+        420, 168, applied.2, applied.3, 1
+    ));
+    assert!(!frame_matches_surface_dims(
+        500, 300, applied.2, applied.3, 1
+    ));
+
+    // Show/Hide lifecycle clear must drop stale pending SetGeometry.
+    assert!(queue.on_set_geometry(true, build_req).is_none());
+    queue.clear();
+    assert!(queue.on_gesture_finished(false).is_none());
+}

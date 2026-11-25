@@ -177,6 +177,82 @@ enum InteractionMode {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PendingSetGeometry {
+    pub(super) is_post_draft: bool,
+    pub(super) x: i32,
+    pub(super) y: i32,
+    pub(super) width: u32,
+    pub(super) height: u32,
+    pub(super) min_w: u32,
+    pub(super) min_h: u32,
+}
+
+/// Buffers view transitions (`LayerCommand::SetGeometry`) sent while a native pointer drag or
+/// resize is active so the gesture finishes cleanly under the view that started it and the target
+/// view geometry applies immediately on release.
+#[derive(Debug, Default, Clone, Copy)]
+pub(super) struct DeferredGeometryQueue {
+    pending: Option<PendingSetGeometry>,
+}
+
+impl DeferredGeometryQueue {
+    pub(super) fn clear(&mut self) {
+        self.pending = None;
+    }
+
+    pub(super) fn on_set_geometry(
+        &mut self,
+        gesture_active: bool,
+        req: PendingSetGeometry,
+    ) -> Option<PendingSetGeometry> {
+        if gesture_active {
+            self.pending = Some(req);
+            None
+        } else {
+            self.pending = None;
+            Some(req)
+        }
+    }
+
+    pub(super) fn on_gesture_finished(
+        &mut self,
+        gesture_active: bool,
+    ) -> Option<PendingSetGeometry> {
+        if gesture_active {
+            None
+        } else {
+            self.pending.take()
+        }
+    }
+}
+
+pub(super) fn surface_geometry_after_set(
+    req: PendingSetGeometry,
+    output_origin: (i32, i32),
+    output_size: Option<(i32, i32)>,
+) -> (i32, i32, u32, u32, u32, u32, bool) {
+    let w = req.width.max(req.min_w).min(MAX_OVERLAY_W);
+    let h = req.height.max(req.min_h).min(MAX_OVERLAY_H);
+    let raw_mx = req.x.saturating_sub(output_origin.0).max(0);
+    let raw_my = req.y.saturating_sub(output_origin.1).max(0);
+    let (mx, my) = compute_drag_margin_step((raw_mx, raw_my), (0.0, 0.0), (w, h), output_size);
+    (mx, my, w, h, req.min_w, req.min_h, req.is_post_draft)
+}
+
+pub(super) fn frame_matches_surface_dims(
+    frame_w_px: u32,
+    frame_h_px: u32,
+    surface_w: u32,
+    surface_h: u32,
+    scale: i32,
+) -> bool {
+    let s = scale.max(1) as u32;
+    let expected_w = surface_w.saturating_mul(s);
+    let expected_h = surface_h.saturating_mul(s);
+    frame_w_px > 0 && frame_h_px > 0 && frame_w_px == expected_w && frame_h_px == expected_h
+}
+
 pub(super) struct DragAnchor {
     pub(super) layer: LayerSurface,
     pub(super) desktop_origin: (i32, i32),
@@ -201,6 +277,7 @@ struct WaylandLayerState {
     current_cursor: egui::CursorIcon,
     last_frame: Option<PendingShmFrame>,
     drag_anchor: Option<DragAnchor>,
+    pending_set_geometry: DeferredGeometryQueue,
     active_surface: Option<ActiveLayerSurface>,
 }
 
@@ -229,18 +306,21 @@ impl WaylandLayerState {
         if !active.configured {
             return;
         }
+        let Some(frame_ref) = active.pending_frame.as_ref() else {
+            return;
+        };
+        if !frame_matches_surface_dims(
+            frame_ref.width_px,
+            frame_ref.height_px,
+            active.width,
+            active.height,
+            active.scale,
+        ) {
+            return;
+        }
         let Some(frame) = active.pending_frame.take() else {
             return;
         };
-        let expected_w = active.width.saturating_mul(active.scale.max(1) as u32);
-        let expected_h = active.height.saturating_mul(active.scale.max(1) as u32);
-        if frame.width_px == 0
-            || frame.height_px == 0
-            || frame.width_px != expected_w
-            || frame.height_px != expected_h
-        {
-            return;
-        }
         let expected_len = (frame.width_px as usize)
             .saturating_mul(frame.height_px as usize)
             .saturating_mul(4);
@@ -493,6 +573,66 @@ impl WaylandLayerState {
                 persist: true,
             });
         }
+        self.flush_pending_set_geometry();
+    }
+
+    fn is_gesture_active(&self) -> bool {
+        self.drag_anchor.is_some()
+            || self
+                .active_surface
+                .as_ref()
+                .is_some_and(|a| !matches!(a.interaction, InteractionMode::None))
+    }
+
+    pub(super) fn flush_pending_set_geometry(&mut self) {
+        if let Some(req) = self
+            .pending_set_geometry
+            .on_gesture_finished(self.is_gesture_active())
+        {
+            self.apply_set_geometry(req);
+        }
+    }
+
+    fn apply_set_geometry(&mut self, req: PendingSetGeometry) {
+        let w = req.width.max(req.min_w).min(MAX_OVERLAY_W);
+        let h = req.height.max(req.min_h).min(MAX_OVERLAY_H);
+        let target = self.resolve_target_output(req.x, req.y, w, h);
+        let current_output_id = self.active_surface.as_ref().and_then(|a| a.output_id);
+        if let Some(target_id) = target.id
+            && Some(target_id) != current_output_id
+        {
+            let raw_mx = req.x.saturating_sub(target.origin.0).max(0);
+            let raw_my = req.y.saturating_sub(target.origin.1).max(0);
+            let margin =
+                compute_drag_margin_step((raw_mx, raw_my), (0.0, 0.0), (w, h), target.size);
+            self.migrate_to_output(
+                CrossMonitorTarget {
+                    output_id: target_id,
+                    origin: target.origin,
+                    size: target.size.unwrap_or((w as i32, h as i32)),
+                    margin,
+                },
+                Some((w, h, req.min_w, req.min_h)),
+                Some(req.is_post_draft),
+                false,
+            );
+        } else if let Some(active) = self.active_surface.as_mut() {
+            let (mx, my, w, h, min_w, min_h, view) =
+                surface_geometry_after_set(req, active.output_origin, active.output_size);
+            active.min_w = min_w;
+            active.min_h = min_h;
+            active.is_post_draft = view;
+            active.margin_x = mx;
+            active.margin_y = my;
+            active.width = w;
+            active.height = h;
+            active
+                .layer
+                .set_margin(active.margin_y, 0, 0, active.margin_x);
+            active.layer.set_size(active.width, active.height);
+            active.layer.commit();
+            self.commit_pending_frame();
+        }
     }
 
     fn handle_command(&mut self, cmd: LayerCommand) {
@@ -507,6 +647,7 @@ impl WaylandLayerState {
                 min_h,
                 click_through,
             } => {
+                self.pending_set_geometry.clear();
                 self.drag_anchor = None;
                 self.active_surface = None;
                 let target = self.resolve_target_output(x, y, width, height);
@@ -536,6 +677,7 @@ impl WaylandLayerState {
                 self.active_surface = Some(active);
             }
             LayerCommand::Hide => {
+                self.pending_set_geometry.clear();
                 self.drag_anchor = None;
                 self.active_surface = None;
             }
@@ -548,62 +690,43 @@ impl WaylandLayerState {
                 min_w,
                 min_h,
             } => {
-                let w = width.max(min_w).min(MAX_OVERLAY_W);
-                let h = height.max(min_h).min(MAX_OVERLAY_H);
-                let target = self.resolve_target_output(x, y, w, h);
-                let current_output_id = self.active_surface.as_ref().and_then(|a| a.output_id);
-                let interacting = self
-                    .active_surface
-                    .as_ref()
-                    .is_some_and(|a| !matches!(a.interaction, InteractionMode::None));
-                if !interacting
-                    && let Some(target_id) = target.id
-                    && Some(target_id) != current_output_id
+                let req = PendingSetGeometry {
+                    is_post_draft,
+                    x,
+                    y,
+                    width,
+                    height,
+                    min_w,
+                    min_h,
+                };
+                if let Some(req) = self
+                    .pending_set_geometry
+                    .on_set_geometry(self.is_gesture_active(), req)
                 {
-                    let raw_mx = x.saturating_sub(target.origin.0).max(0);
-                    let raw_my = y.saturating_sub(target.origin.1).max(0);
-                    let margin =
-                        compute_drag_margin_step((raw_mx, raw_my), (0.0, 0.0), (w, h), target.size);
-                    self.migrate_to_output(
-                        CrossMonitorTarget {
-                            output_id: target_id,
-                            origin: target.origin,
-                            size: target.size.unwrap_or((w as i32, h as i32)),
-                            margin,
-                        },
-                        Some((w, h, min_w, min_h)),
-                        Some(is_post_draft),
-                        false,
-                    );
-                } else if let Some(active) = self.active_surface.as_mut() {
-                    active.min_w = min_w;
-                    active.min_h = min_h;
-                    if matches!(active.interaction, InteractionMode::None) {
-                        active.is_post_draft = is_post_draft;
-                        let raw_mx = x.saturating_sub(active.output_origin.0).max(0);
-                        let raw_my = y.saturating_sub(active.output_origin.1).max(0);
-                        let (mx, my) = compute_drag_margin_step(
-                            (raw_mx, raw_my),
-                            (0.0, 0.0),
-                            (w, h),
-                            active.output_size,
-                        );
-                        active.margin_x = mx;
-                        active.margin_y = my;
-                        active.width = w;
-                        active.height = h;
-                        active
-                            .layer
-                            .set_margin(active.margin_y, 0, 0, active.margin_x);
-                        active.layer.set_size(active.width, active.height);
-                        active.layer.commit();
-                    }
+                    self.apply_set_geometry(req);
                 }
             }
             LayerCommand::SetClickThrough(click_through) => {
-                if click_through {
-                    self.drag_anchor = None;
-                }
+                let had_anchor = if click_through {
+                    self.drag_anchor.take().is_some()
+                } else {
+                    false
+                };
+                let cancelled_geom = if click_through
+                    && let Some(active) = self.active_surface.as_mut()
+                    && (had_anchor || !matches!(active.interaction, InteractionMode::None))
+                {
+                    active.interaction = InteractionMode::None;
+                    Some((
+                        active.is_post_draft,
+                        active.output_origin.0 + active.margin_x,
+                        active.output_origin.1 + active.margin_y,
+                        active.width,
+                        active.height,
+                    ))
+                } else {
+                    None
+                };
                 if let Some(active) = self.active_surface.as_mut()
                     && active.click_through != click_through
                 {
@@ -613,6 +736,17 @@ impl WaylandLayerState {
                     }
                     Self::apply_input_region(active);
                     active.layer.commit();
+                }
+                if let Some((is_post_draft, x, y, width, height)) = cancelled_geom {
+                    self.emit(LayerEvent::GeometryChanged {
+                        is_post_draft,
+                        x,
+                        y,
+                        width,
+                        height,
+                        persist: true,
+                    });
+                    self.flush_pending_set_geometry();
                 }
             }
             LayerCommand::SetHitRegions {
@@ -732,6 +866,7 @@ fn run_presenter_thread(
         current_cursor: egui::CursorIcon::Default,
         last_frame: None,
         drag_anchor: None,
+        pending_set_geometry: DeferredGeometryQueue::default(),
         active_surface: None,
     };
 
