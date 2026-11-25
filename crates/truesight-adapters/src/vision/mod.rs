@@ -157,25 +157,43 @@ pub fn compute_topbar_slot_rects(
     build_topbar_rects(rad_xs, dire_xs, y, slot_w, slot_h)
 }
 
-/// Computes Pick Phase top-bar slot coordinates calibrated on real Dota 2 (`2560x1440` scaled).
+/// Computes Pick Phase top-bar slot coordinates calibrated on real Dota 2 (`2560x1440` scaled),
+/// starting below the `y = 0..7` player-color strip and clearing the `/` / `\` slanted borders.
 pub fn compute_pickphase_topbar_slot_rects(
     frame_w: usize,
     virtual_h: usize,
 ) -> ([TopBarSlotRect; 5], [TopBarSlotRect; 5]) {
     let scale_x = (frame_w as f32) / 2560.0;
     let scale_y = (virtual_h as f32) / 1440.0;
-    let y = (4.0 * scale_y).round() as usize;
-    let width = (121.0 * scale_x).round().max(8.0) as usize;
-    let height = (56.0 * scale_y).round().max(8.0) as usize;
+    let y = (9.0 * scale_y).round() as usize;
+    let width = (118.0 * scale_x).round().max(8.0) as usize;
+    let height = (82.0 * scale_y).round().max(8.0) as usize;
 
     let mut rad_xs = [0_usize; 5];
     let mut dire_xs = [0_usize; 5];
     for i in 0..5 {
-        rad_xs[i] = ((282.0 + (i as f32) * 165.0 + 12.0) * scale_x).round() as usize;
-        dire_xs[i] = ((1470.0 + (i as f32) * 165.0 + 12.0) * scale_x).round() as usize;
+        rad_xs[i] = ((280.0 + (i as f32) * 165.0 + 18.0) * scale_x).round() as usize;
+        dire_xs[i] = ((1475.0 + (i as f32) * 165.0 + 8.0) * scale_x).round() as usize;
     }
 
     build_topbar_rects(rad_xs, dire_xs, y, width, height)
+}
+
+/// Insets a `PickPhase` portrait slot rectangle to its upper badge-free portrait core (`22/36`
+/// of portrait height), excluding bottom Dota Plus tier emblems and info corner badges while
+/// staying strictly below the top player-color strip.
+pub(crate) fn pickphase_upper_core_rect(rect: TopBarSlotRect) -> TopBarSlotRect {
+    let height = (((rect.height as f32) * (22.0 / 36.0)).round() as usize).min(rect.height);
+    if rect.width >= DESC_COLS && height >= DESC_ROWS {
+        TopBarSlotRect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height,
+        }
+    } else {
+        rect
+    }
 }
 
 /// Insets an `InGame` HUD slot rectangle to its interior portrait core, excluding the top
@@ -250,6 +268,9 @@ const DESC_LEN: usize = DESC_COLS * DESC_ROWS * 3;
 const DARK_INTENSITY_THRESHOLD: f32 = 12.0;
 const MATCH_L1_THRESHOLD: f32 = 14.5;
 const PICKPHASE_L1_THRESHOLD: f32 = 31.0;
+/// Stricter L1 ceiling for the partial upper-core `PickPhase` crop (`22/36` portrait height) so
+/// bottom-badged portraits match accurately without promoting empty/darkened blind-pick slots.
+const PICKPHASE_UPPER_CORE_L1_THRESHOLD: f32 = 26.0;
 const INGAME_L1_THRESHOLD: f32 = 35.0;
 /// Stricter L1 ceiling for the partial upper-core `InGame` crop (`20/36` portrait height),
 /// aligned with `MAX_OVERWRITE_L1_DIFF` and `weak_cutoff` so shifted or half-obscured portraits
@@ -555,10 +576,14 @@ impl HeroVisionCatalog {
             TopBarLayout::PickPhase => [
                 Some((
                     rect,
-                    &[&self.upper_entries, &self.inner_entries, &self.full_entries],
+                    &[&self.inner_entries, &self.full_entries, &self.upper_entries],
                     PICKPHASE_L1_THRESHOLD,
                 )),
-                None,
+                Some((
+                    pickphase_upper_core_rect(rect),
+                    &[&self.upper_entries],
+                    PICKPHASE_UPPER_CORE_L1_THRESHOLD,
+                )),
             ],
             TopBarLayout::InGame => [
                 Some((

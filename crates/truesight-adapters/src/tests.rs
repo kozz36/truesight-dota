@@ -2960,7 +2960,7 @@ fn windows_non_16_9_crop_preserves_source_height_and_detects_4_3_pickphase() {
     let w = 1024_usize;
     let h = 768_usize;
     let (rad_rects, dire_rects) = compute_pickphase_topbar_slot_rects(w, h);
-    assert_eq!(rad_rects[0].height, 30);
+    assert_eq!(rad_rects[0].height, 44);
 
     let atlas = parse_hero_atlas().unwrap();
     let mut full_rgba = vec![14_u8; w * h * 4];
@@ -8038,4 +8038,274 @@ fn sync_validates_player_comfort_before_staging_so_malformed_player_does_not_dis
     );
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn pickphase_topbar_excludes_player_color_strip_and_recovers_dota_plus_badged_portraits() {
+    use crate::vision::{
+        HeroVisionCatalog, RgbFrame, ScreenFrameSource, VisionCaptureAdapter,
+        compute_pickphase_topbar_slot_rects, parse_hero_atlas, pickphase_upper_core_rect,
+    };
+    use std::collections::VecDeque;
+    use truesight_core::ports::{DraftEvent, DraftEventSource};
+
+    struct QueueSource(VecDeque<RgbFrame>);
+    impl ScreenFrameSource for QueueSource {
+        fn capture_frame(&mut self) -> Result<Option<RgbFrame>, truesight_core::ports::PortError> {
+            Ok(self.0.pop_front())
+        }
+    }
+
+    let atlas = parse_hero_atlas().expect("embedded hero atlas must load");
+    let catalog = HeroVisionCatalog::from_embedded().expect("vision catalog must load");
+
+    // Verify the upper-core inset preserves x/w and restricts height cleanly above bottom badges.
+    let probe_rect = compute_pickphase_topbar_slot_rects(2560, 1440).0[0];
+    let upper_core = pickphase_upper_core_rect(probe_rect);
+    assert!(
+        probe_rect.y >= 8,
+        "PickPhase rect must skip y=0..7 player color strip"
+    );
+    assert_eq!(upper_core.x, probe_rect.x);
+    assert_eq!(upper_core.y, probe_rect.y);
+    assert!(upper_core.height < probe_rect.height);
+
+    let player_colors: [[u8; 3]; 10] = [
+        [52, 118, 255],
+        [102, 255, 192],
+        [191, 0, 191],
+        [243, 240, 11],
+        [255, 107, 0],
+        [254, 134, 194],
+        [161, 180, 71],
+        [101, 217, 247],
+        [0, 131, 33],
+        [164, 105, 0],
+    ];
+    let rad_ids = [94_u16, 16, 48, 3, 31];
+    let dire_ids = [111_u16, 43, 30, 26, 37];
+
+    for (fw, vh, strip_h) in [
+        (2560_usize, 1440_usize, 116_usize),
+        (1920_usize, 1080_usize, 87_usize),
+    ] {
+        let sx = fw as f32 / 2560.0;
+        let sy = vh as f32 / 1440.0;
+        let mut rgb = vec![16_u8; fw * strip_h * 3];
+
+        let paint_pick_slot =
+            |buf: &mut [u8], slot_x: f32, hid: u16, color: [u8; 3], paint_bottom_badge: bool| {
+                let bar_x0 = (slot_x * sx).round() as usize;
+                let bar_w = (143.0 * sx).round() as usize;
+                let bar_h = (8.0 * sy).round().max(1.0) as usize;
+                for py in 0..bar_h {
+                    for px in bar_x0..(bar_x0 + bar_w).min(fw) {
+                        let idx = (py * fw + px) * 3;
+                        buf[idx..idx + 3].copy_from_slice(&color);
+                    }
+                }
+                let card_y0 = (8.0 * sy).round() as usize;
+                let card_h = (84.0 * sy).round().max(1.0) as usize;
+                let hero_rgb = &atlas.heroes[&HeroId(hid)];
+                for dy in 0..card_h {
+                    let sy_src = (dy * atlas.hero_height) / card_h;
+                    for dx in 0..bar_w {
+                        let sx_src = (dx * atlas.hero_width) / bar_w;
+                        let s = (sy_src * atlas.hero_width + sx_src) * 3;
+                        let px = (bar_x0 + dx).min(fw - 1);
+                        let py = (card_y0 + dy).min(strip_h - 1);
+                        let d = (py * fw + px) * 3;
+                        buf[d..d + 3].copy_from_slice(&hero_rgb[s..s + 3]);
+                    }
+                }
+                if paint_bottom_badge {
+                    let badge_y0 = card_y0 + (card_h * 22) / 36;
+                    for py in badge_y0..(card_y0 + card_h).min(strip_h) {
+                        for px in bar_x0..(bar_x0 + bar_w).min(fw) {
+                            let idx = (py * fw + px) * 3;
+                            buf[idx] = 175;
+                            buf[idx + 1] = 105;
+                            buf[idx + 2] = 42;
+                        }
+                    }
+                }
+            };
+
+        for (i, &hid) in rad_ids.iter().enumerate() {
+            paint_pick_slot(
+                &mut rgb,
+                280.0 + (i as f32) * 165.0,
+                hid,
+                player_colors[i],
+                i < 2,
+            );
+        }
+        for (i, &hid) in dire_ids.iter().enumerate() {
+            paint_pick_slot(
+                &mut rgb,
+                1475.0 + (i as f32) * 165.0,
+                hid,
+                player_colors[5 + i],
+                i == 0,
+            );
+        }
+
+        let frames = VecDeque::from([
+            RgbFrame::with_source_height(fw, strip_h, vh, rgb.clone()),
+            RgbFrame::with_source_height(fw, strip_h, vh, rgb),
+        ]);
+        let mut adapter = VisionCaptureAdapter::new(QueueSource(frames), catalog.clone());
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            seen.extend(adapter.poll_events().unwrap());
+        }
+        let picked_ids: Vec<HeroId> = seen
+            .iter()
+            .filter_map(|e| match e {
+                DraftEvent::PickDetected { hero_id, .. } => Some(*hero_id),
+                _ => None,
+            })
+            .collect();
+        for expected in rad_ids.iter().chain(dire_ids.iter()) {
+            assert!(
+                picked_ids.contains(&HeroId(*expected)),
+                "PickPhase at {fw}x{vh} missed hero #{expected} (got {picked_ids:?})"
+            );
+        }
+        assert_eq!(picked_ids.len(), 10);
+    }
+}
+
+#[test]
+fn pickphase_ranked_2_2_1_blind_pick_waves_lock_all_picks_without_empty_slot_phantoms() {
+    use crate::vision::{
+        HeroVisionCatalog, RgbFrame, ScreenFrameSource, VisionCaptureAdapter, parse_hero_atlas,
+    };
+    use std::collections::VecDeque;
+    use truesight_core::domain::Side;
+    use truesight_core::ports::{DraftEvent, DraftEventSource};
+
+    struct QueueSource(VecDeque<RgbFrame>);
+    impl ScreenFrameSource for QueueSource {
+        fn capture_frame(&mut self) -> Result<Option<RgbFrame>, truesight_core::ports::PortError> {
+            Ok(self.0.pop_front())
+        }
+    }
+
+    let atlas = parse_hero_atlas().expect("embedded hero atlas must load");
+    let catalog = HeroVisionCatalog::from_embedded().expect("vision catalog must load");
+    let (fw, vh, strip_h) = (2560_usize, 1440_usize, 116_usize);
+
+    let paint_wave = |rad_picks: &[Option<u16>; 5], dire_picks: &[Option<u16>; 5]| -> RgbFrame {
+        let mut rgb = vec![16_u8; fw * strip_h * 3];
+        let colors = [
+            [52, 118, 255],
+            [102, 255, 192],
+            [191, 0, 191],
+            [243, 240, 11],
+            [255, 107, 0],
+        ];
+        for (base_x, picks) in [(280_usize, rad_picks), (1475_usize, dire_picks)] {
+            for (slot, maybe_hid) in picks.iter().enumerate() {
+                let x0 = base_x + slot * 165;
+                for py in 0..8 {
+                    for px in x0..x0 + 143 {
+                        let idx = (py * fw + px) * 3;
+                        rgb[idx..idx + 3].copy_from_slice(&colors[slot]);
+                    }
+                }
+                if let Some(hid) = maybe_hid {
+                    let hero_rgb = &atlas.heroes[&HeroId(*hid)];
+                    for dy in 0..84 {
+                        let sy = (dy * atlas.hero_height) / 84;
+                        for dx in 0..143 {
+                            let sx = (dx * atlas.hero_width) / 143;
+                            let s = (sy * atlas.hero_width + sx) * 3;
+                            let d = ((8 + dy) * fw + (x0 + dx)) * 3;
+                            rgb[d..d + 3].copy_from_slice(&hero_rgb[s..s + 3]);
+                        }
+                    }
+                } else {
+                    for py in 8..92 {
+                        for px in x0..x0 + 143 {
+                            let idx = (py * fw + px) * 3;
+                            rgb[idx] = 24;
+                            rgb[idx + 1] = 28;
+                            rgb[idx + 2] = 36;
+                        }
+                    }
+                }
+            }
+        }
+        RgbFrame::with_source_height(fw, strip_h, vh, rgb)
+    };
+
+    // Wave 1 (2+2 blind picks), Wave 2 (4+4), Wave 3 (5+5).
+    let w1 = paint_wave(
+        &[Some(25), Some(29), None, None, None],
+        &[Some(14), Some(26), None, None, None],
+    );
+    let w2 = paint_wave(
+        &[Some(25), Some(29), Some(31), Some(48), None],
+        &[Some(14), Some(26), Some(43), Some(37), None],
+    );
+    let w3 = paint_wave(
+        &[Some(25), Some(29), Some(31), Some(48), Some(3)],
+        &[Some(14), Some(26), Some(43), Some(37), Some(111)],
+    );
+
+    let frames = VecDeque::from([w1.clone(), w1, w2.clone(), w2, w3.clone(), w3]);
+    let mut adapter = VisionCaptureAdapter::new(QueueSource(frames), catalog);
+
+    let mut wave1_picks = Vec::new();
+    for _ in 0..2 {
+        for ev in adapter.poll_events().unwrap() {
+            if let DraftEvent::PickDetected {
+                side,
+                slot,
+                hero_id,
+                ..
+            } = ev
+            {
+                wave1_picks.push((side, slot, hero_id));
+            }
+        }
+    }
+    assert_eq!(
+        wave1_picks.len(),
+        4,
+        "Wave 1 must lock exactly 2+2 picks with 0 empty-slot phantoms: {wave1_picks:?}"
+    );
+    assert!(wave1_picks.contains(&(Side::Allies, 0, HeroId(25))));
+    assert!(wave1_picks.contains(&(Side::Allies, 1, HeroId(29))));
+    assert!(wave1_picks.contains(&(Side::Enemies, 0, HeroId(14))));
+    assert!(wave1_picks.contains(&(Side::Enemies, 1, HeroId(26))));
+
+    let mut wave2_picks = Vec::new();
+    for _ in 0..2 {
+        for ev in adapter.poll_events().unwrap() {
+            if let DraftEvent::PickDetected { hero_id, .. } = ev {
+                wave2_picks.push(hero_id);
+            }
+        }
+    }
+    assert_eq!(
+        wave2_picks.len(),
+        4,
+        "Wave 2 must add the 4 new picks cleanly: {wave2_picks:?}"
+    );
+
+    let mut wave3_picks = Vec::new();
+    for _ in 0..2 {
+        for ev in adapter.poll_events().unwrap() {
+            if let DraftEvent::PickDetected { hero_id, .. } = ev {
+                wave3_picks.push(hero_id);
+            }
+        }
+    }
+    assert_eq!(
+        wave3_picks.len(),
+        2,
+        "Wave 3 must lock both last picks cleanly: {wave3_picks:?}"
+    );
 }
