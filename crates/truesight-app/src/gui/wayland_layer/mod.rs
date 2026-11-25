@@ -1,7 +1,10 @@
-use super::overlay_backend::{LayerCommand, LayerEvent, OverlayRect, compute_drag_margin_step};
-use crate::session::MonitorRect;
-use eframe::egui;
+mod output;
 mod pointer;
+
+use super::overlay_backend::{
+    CrossMonitorTarget, LayerCommand, LayerEvent, OverlayRect, compute_drag_margin_step,
+};
+use eframe::egui;
 
 use pointer::map_egui_cursor;
 use smithay_client_toolkit::compositor::{CompositorHandler, CompositorState, Region};
@@ -126,11 +129,25 @@ impl WaylandLayerHandle {
     }
 }
 
-struct TargetOutputLayout {
-    output: Option<wl_output::WlOutput>,
-    origin: (i32, i32),
-    size: Option<(i32, i32)>,
+struct ActiveLayerSurface {
+    layer: LayerSurface,
+    empty_region: Option<Region>,
+    configured: bool,
+    output_id: Option<u32>,
     scale: i32,
+    output_origin: (i32, i32),
+    output_size: Option<(i32, i32)>,
+    margin_x: i32,
+    margin_y: i32,
+    width: u32,
+    height: u32,
+    min_w: u32,
+    min_h: u32,
+    click_through: bool,
+    drag_rect: Option<OverlayRect>,
+    resize_rect: Option<OverlayRect>,
+    interaction: InteractionMode,
+    pending_frame: Option<PendingShmFrame>,
 }
 
 #[derive(Debug, Clone)]
@@ -154,26 +171,6 @@ enum InteractionMode {
     },
 }
 
-struct ActiveLayerSurface {
-    layer: LayerSurface,
-    empty_region: Option<Region>,
-    configured: bool,
-    scale: i32,
-    output_origin: (i32, i32),
-    output_size: Option<(i32, i32)>,
-    margin_x: i32,
-    margin_y: i32,
-    width: u32,
-    height: u32,
-    min_w: u32,
-    min_h: u32,
-    click_through: bool,
-    drag_rect: Option<OverlayRect>,
-    resize_rect: Option<OverlayRect>,
-    interaction: InteractionMode,
-    pending_frame: Option<PendingShmFrame>,
-}
-
 struct WaylandLayerState {
     conn: Connection,
     qh: QueueHandle<Self>,
@@ -190,6 +187,7 @@ struct WaylandLayerState {
     themed_pointer: Option<ThemedPointer>,
     plain_pointer: Option<wl_pointer::WlPointer>,
     current_cursor: egui::CursorIcon,
+    last_frame: Option<PendingShmFrame>,
     active_surface: Option<ActiveLayerSurface>,
 }
 
@@ -198,80 +196,6 @@ impl WaylandLayerState {
         if self.event_tx.send(ev).is_ok() {
             self.main_ctx.request_repaint();
         }
-    }
-
-    fn emit_monitors(&self) {
-        let monitors: Vec<MonitorRect> = self
-            .output_state
-            .outputs()
-            .filter_map(|o| {
-                let info = self.output_state.info(&o)?;
-                let (lx, ly) = info.logical_position.unwrap_or((0, 0));
-                let (lw, lh) = info.logical_size?;
-                if lw <= 0 || lh <= 0 {
-                    return None;
-                }
-                let sf = info.scale_factor.max(1) as f32;
-                Some(MonitorRect::new(
-                    lx as f32 * sf,
-                    ly as f32 * sf,
-                    lw as f32 * sf,
-                    lh as f32 * sf,
-                ))
-            })
-            .collect();
-        if !monitors.is_empty() {
-            self.emit(LayerEvent::MonitorsUpdated(monitors));
-        }
-    }
-
-    fn resolve_target_output(
-        &self,
-        desktop_x: i32,
-        desktop_y: i32,
-        width: u32,
-        height: u32,
-    ) -> TargetOutputLayout {
-        let cx = desktop_x + (width as i32 / 2);
-        let cy = desktop_y + (height as i32 / 2);
-        let mut fallback = None;
-
-        for out in self.output_state.outputs() {
-            let Some(info) = self.output_state.info(&out) else {
-                continue;
-            };
-            let origin = info.logical_position.unwrap_or((0, 0));
-            let size = info.logical_size.filter(|&(w, h)| w > 0 && h > 0);
-            let scale = info.scale_factor.max(1);
-            if fallback.is_none() {
-                fallback = Some(TargetOutputLayout {
-                    output: Some(out.clone()),
-                    origin,
-                    size,
-                    scale,
-                });
-            }
-            if let Some((lw, lh)) = size
-                && cx >= origin.0
-                && cx < origin.0 + lw
-                && cy >= origin.1
-                && cy < origin.1 + lh
-            {
-                return TargetOutputLayout {
-                    output: Some(out),
-                    origin,
-                    size: Some((lw, lh)),
-                    scale,
-                };
-            }
-        }
-
-        fallback.unwrap_or(TargetOutputLayout {
-            output: None,
-            origin: (0, 0),
-            size: None,
-            scale: 1,
-        })
     }
 
     fn apply_input_region(active: &ActiveLayerSurface) {
@@ -295,7 +219,13 @@ impl WaylandLayerState {
         let Some(frame) = active.pending_frame.take() else {
             return;
         };
-        if frame.width_px == 0 || frame.height_px == 0 {
+        let expected_w = active.width.saturating_mul(active.scale.max(1) as u32);
+        let expected_h = active.height.saturating_mul(active.scale.max(1) as u32);
+        if frame.width_px == 0
+            || frame.height_px == 0
+            || frame.width_px != expected_w
+            || frame.height_px != expected_h
+        {
             return;
         }
         let expected_len = (frame.width_px as usize)
@@ -323,7 +253,80 @@ impl WaylandLayerState {
         wl_surface.damage_buffer(0, 0, frame.width_px as i32, frame.height_px as i32);
         if buffer.attach_to(wl_surface).is_ok() {
             active.layer.commit();
+            self.last_frame = Some(frame);
         }
+    }
+
+    pub(super) fn migrate_to_output(
+        &mut self,
+        target: CrossMonitorTarget,
+        resize: Option<(u32, u32, u32, u32)>,
+        persist: bool,
+    ) {
+        let Some((wl_output, scale)) = self.output_by_id(target.output_id) else {
+            return;
+        };
+        let Some(prev) = self.active_surface.take() else {
+            return;
+        };
+        let (width, height, min_w, min_h) =
+            resize.unwrap_or((prev.width, prev.height, prev.min_w, prev.min_h));
+        let surface = self.compositor_state.create_surface(&self.qh);
+        let layer = self.layer_shell.create_layer_surface(
+            &self.qh,
+            surface,
+            Layer::Overlay,
+            Some("truesight-overlay"),
+            Some(&wl_output),
+        );
+        layer.set_anchor(Anchor::TOP | Anchor::LEFT);
+        layer.set_exclusive_zone(0);
+        layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+        layer.set_size(width, height);
+        layer.set_margin(target.margin.1, 0, 0, target.margin.0);
+
+        let empty_region = Region::new(&self.compositor_state).ok();
+        let pending_frame = self.last_frame.clone().filter(|f| {
+            f.width_px == width.saturating_mul(scale as u32)
+                && f.height_px == height.saturating_mul(scale as u32)
+                && f.scale == scale
+        });
+        let active = ActiveLayerSurface {
+            layer,
+            empty_region,
+            configured: false,
+            output_id: Some(target.output_id),
+            scale,
+            output_origin: target.origin,
+            output_size: Some(target.size),
+            margin_x: target.margin.0,
+            margin_y: target.margin.1,
+            width,
+            height,
+            min_w,
+            min_h,
+            click_through: prev.click_through,
+            drag_rect: prev.drag_rect,
+            resize_rect: prev.resize_rect,
+            interaction: InteractionMode::None,
+            pending_frame,
+        };
+        Self::apply_input_region(&active);
+        active.layer.commit();
+        self.active_surface = Some(active);
+
+        self.emit(LayerEvent::GeometryChanged {
+            x: target.origin.0 + target.margin.0,
+            y: target.origin.1 + target.margin.1,
+            width,
+            height,
+            persist,
+        });
+        self.emit(LayerEvent::Configured {
+            width,
+            height,
+            scale,
+        });
     }
 
     fn handle_command(&mut self, cmd: LayerCommand) {
@@ -368,6 +371,7 @@ impl WaylandLayerState {
                     layer,
                     empty_region,
                     configured: false,
+                    output_id: target.id,
                     scale: target.scale,
                     output_origin: target.origin,
                     output_size: target.size,
@@ -398,14 +402,48 @@ impl WaylandLayerState {
                 min_w,
                 min_h,
             } => {
-                if let Some(active) = self.active_surface.as_mut() {
+                let w = width.max(min_w).min(MAX_OVERLAY_W);
+                let h = height.max(min_h).min(MAX_OVERLAY_H);
+                let target = self.resolve_target_output(x, y, w, h);
+                let current_output_id = self.active_surface.as_ref().and_then(|a| a.output_id);
+                let interacting = self
+                    .active_surface
+                    .as_ref()
+                    .is_some_and(|a| !matches!(a.interaction, InteractionMode::None));
+                if !interacting
+                    && let Some(target_id) = target.id
+                    && Some(target_id) != current_output_id
+                {
+                    let raw_mx = x.saturating_sub(target.origin.0).max(0);
+                    let raw_my = y.saturating_sub(target.origin.1).max(0);
+                    let margin =
+                        compute_drag_margin_step((raw_mx, raw_my), (0.0, 0.0), (w, h), target.size);
+                    self.migrate_to_output(
+                        CrossMonitorTarget {
+                            output_id: target_id,
+                            origin: target.origin,
+                            size: target.size.unwrap_or((w as i32, h as i32)),
+                            margin,
+                        },
+                        Some((w, h, min_w, min_h)),
+                        false,
+                    );
+                } else if let Some(active) = self.active_surface.as_mut() {
                     active.min_w = min_w;
                     active.min_h = min_h;
                     if matches!(active.interaction, InteractionMode::None) {
-                        active.margin_x = x.saturating_sub(active.output_origin.0).max(0);
-                        active.margin_y = y.saturating_sub(active.output_origin.1).max(0);
-                        active.width = width.max(min_w).min(MAX_OVERLAY_W);
-                        active.height = height.max(min_h).min(MAX_OVERLAY_H);
+                        let raw_mx = x.saturating_sub(active.output_origin.0).max(0);
+                        let raw_my = y.saturating_sub(active.output_origin.1).max(0);
+                        let (mx, my) = compute_drag_margin_step(
+                            (raw_mx, raw_my),
+                            (0.0, 0.0),
+                            (w, h),
+                            active.output_size,
+                        );
+                        active.margin_x = mx;
+                        active.margin_y = my;
+                        active.width = w;
+                        active.height = h;
                         active
                             .layer
                             .set_margin(active.margin_y, 0, 0, active.margin_x);
@@ -540,6 +578,7 @@ fn run_presenter_thread(
         themed_pointer: None,
         plain_pointer: None,
         current_cursor: egui::CursorIcon::Default,
+        last_frame: None,
         active_surface: None,
     };
 
@@ -638,6 +677,7 @@ impl CompositorHandler for WaylandLayerState {
             && active.layer.wl_surface() == surface
             && let Some(info) = info
         {
+            active.output_id = Some(info.id);
             active.output_origin = info.logical_position.unwrap_or(active.output_origin);
             if let Some(sz) = info.logical_size.filter(|&(w, h)| w > 0 && h > 0) {
                 active.output_size = Some(sz);

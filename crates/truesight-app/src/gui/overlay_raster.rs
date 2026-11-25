@@ -177,11 +177,8 @@ impl OverlayRasterizer {
         let total_bytes = (width_px as usize)
             .saturating_mul(height_px as usize)
             .saturating_mul(4);
-        if self.buffer.len() != total_bytes {
-            self.buffer.resize(total_bytes, 0);
-        } else {
-            self.buffer.fill(0);
-        }
+        self.buffer.clear();
+        self.buffer.resize(total_bytes, 0);
         self.width_px = width_px;
         self.height_px = height_px;
         self.last_frame_hash = Some(hash);

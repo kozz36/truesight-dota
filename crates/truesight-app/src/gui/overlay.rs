@@ -9,6 +9,16 @@ use eframe::egui::{
 };
 use truesight_core::domain::{ItemId, Role, TEAM_SIZE};
 
+fn paint_monitor_switch_icon(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let c = rect.center();
+    let stroke = Stroke::new(1.2_f32, color);
+    let back = Rect::from_min_max(pos2(c.x - 5.5, c.y - 4.5), pos2(c.x + 1.5, c.y + 1.5));
+    let front = Rect::from_min_max(pos2(c.x - 1.5, c.y - 1.5), pos2(c.x + 5.5, c.y + 4.5));
+    painter.rect_stroke(back, 1.0, stroke, StrokeKind::Inside);
+    painter.rect_filled(front, 1.0, P_INDIGO_2);
+    painter.rect_stroke(front, 1.0, stroke, StrokeKind::Inside);
+}
+
 fn overlay_icon_button(
     ui: &mut egui::Ui,
     size: Vec2,
@@ -230,6 +240,7 @@ impl TrueSightGuiApp {
         let mut toggle_build_view = false;
         let mut reset_draft = false;
         let mut toggle_click_through = false;
+        let mut cycle_monitor = false;
         let mut exit_overlay = false;
         let mut clicked_variant: Option<(ItemId, ItemId)> = None;
         let mut drag_handle = Rect::NOTHING;
@@ -383,6 +394,20 @@ impl TrueSightGuiApp {
                         .clicked()
                         {
                             toggle_build_view = true;
+                        }
+
+                        if self.session.known_monitors.len() > 1
+                            && overlay_icon_button(
+                                ui,
+                                icon_sz,
+                                P_CYAN,
+                                false,
+                                "Move overlay to next monitor",
+                                paint_monitor_switch_icon,
+                            )
+                            .clicked()
+                        {
+                            cycle_monitor = true;
                         }
                     });
                 });
@@ -778,6 +803,9 @@ impl TrueSightGuiApp {
         if toggle_click_through {
             let next = !self.session.overlay_geometry.click_through;
             self.set_overlay_click_through_live(ui.ctx(), next);
+        }
+        if cycle_monitor {
+            self.cycle_overlay_monitor(ui.ctx(), host_mode);
         }
         if exit_overlay {
             self.session.set_overlay_mode(false);

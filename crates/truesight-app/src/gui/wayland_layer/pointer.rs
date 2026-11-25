@@ -1,4 +1,6 @@
-use super::super::overlay_backend::{LayerEvent, compute_drag_margin_step, compute_resize_step};
+use super::super::overlay_backend::{
+    LayerEvent, compute_drag_margin_step, compute_resize_step, resolve_cross_monitor_drag_target,
+};
 use super::{
     BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, InteractionMode, MAX_OVERLAY_H, MAX_OVERLAY_W,
     WaylandLayerState,
@@ -40,8 +42,10 @@ impl PointerHandler for WaylandLayerState {
         _pointer: &wl_pointer::WlPointer,
         events: &[PointerEvent],
     ) {
+        let outputs = self.logical_outputs();
         let mut pending_events = Vec::new();
         let mut enter_seen = false;
+        let mut migrate_target = None;
         {
             let Some(active) = self.active_surface.as_mut() else {
                 return;
@@ -65,6 +69,34 @@ impl PointerHandler for WaylandLayerState {
                             } => {
                                 if !*frame_pending {
                                     let delta = (px - grab_local.0, py - grab_local.1);
+                                    let raw_dx = delta.0.round() as i32;
+                                    let raw_dy = delta.1.round() as i32;
+                                    if let Some(cur_size) = active.output_size {
+                                        let desired_desktop = (
+                                            active.output_origin.0 + active.margin_x + raw_dx,
+                                            active.output_origin.1 + active.margin_y + raw_dy,
+                                        );
+                                        let pointer_desktop = (
+                                            active.output_origin.0
+                                                + active.margin_x
+                                                + px.round() as i32,
+                                            active.output_origin.1
+                                                + active.margin_y
+                                                + py.round() as i32,
+                                        );
+                                        if let Some(target) = resolve_cross_monitor_drag_target(
+                                            active.output_id,
+                                            active.output_origin,
+                                            cur_size,
+                                            desired_desktop,
+                                            pointer_desktop,
+                                            (active.width, active.height),
+                                            &outputs,
+                                        ) {
+                                            migrate_target = Some(target);
+                                            break;
+                                        }
+                                    }
                                     let next = compute_drag_margin_step(
                                         (active.margin_x, active.margin_y),
                                         delta,
@@ -213,6 +245,12 @@ impl PointerHandler for WaylandLayerState {
 
         if enter_seen && let Some(pointer) = &self.themed_pointer {
             let _ = pointer.set_cursor(&self.conn, map_egui_cursor(self.current_cursor));
+        }
+
+        if let Some(target) = migrate_target {
+            self.migrate_to_output(target, None, true);
+            let _ = self.conn.flush();
+            return;
         }
 
         if !pending_events.is_empty() {

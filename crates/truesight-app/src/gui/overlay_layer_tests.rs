@@ -1,10 +1,12 @@
 use super::TrueSightGuiApp;
 use super::overlay_backend::{
-    OverlayBackendKind, OverlayHostMode, OverlayRect, compute_drag_margin_step,
-    compute_resize_step, resolve_overlay_backend,
+    LogicalOutputBounds, OverlayBackendKind, OverlayHostMode, OverlayRect,
+    compute_drag_margin_step, compute_next_monitor_geometry, compute_resize_step,
+    resolve_cross_monitor_drag_target, resolve_overlay_backend,
 };
 use super::overlay_raster::OverlayRasterizer;
 use crate::AppSession;
+use crate::session::{MonitorRect, OverlayGeometry};
 use eframe::egui::{
     self, Color32, ColorImage, Mesh, Pos2, Rect, TextureFilter, TextureId, TextureOptions,
     TexturesDelta, epaint::Vertex, pos2, vec2,
@@ -324,4 +326,167 @@ fn layer_shell_overlay_headless_tessellation_and_rasterization_picks_and_build()
         .rasterize_if_dirty(420, 168, out_build.pixels_per_point, &prims_build)
         .expect("build overlay should rasterize");
     assert!(buf_build.chunks_exact(4).any(|px| px[3] > 0));
+}
+
+#[test]
+fn rasterizer_clears_buffer_on_resize_without_stale_noise() {
+    let mut raster = OverlayRasterizer::new();
+    let white_tex = TextureId::Managed(0);
+    let mut delta = TexturesDelta::default();
+    delta.set.push((
+        white_tex,
+        egui::epaint::ImageDelta::full(
+            ColorImage::filled([1, 1], Color32::WHITE),
+            TextureOptions::NEAREST,
+        ),
+    ));
+    raster.apply_textures_delta(&delta);
+
+    let mut solid_mesh = Mesh::with_texture(white_tex);
+    push_quad(
+        &mut solid_mesh,
+        Rect::from_min_max(pos2(0.0, 0.0), pos2(10.0, 10.0)),
+        Rect::ZERO,
+        Color32::from_rgba_premultiplied(20, 220, 80, 255),
+    );
+    let prims1 = vec![egui::ClippedPrimitive {
+        clip_rect: Rect::from_min_max(pos2(0.0, 0.0), pos2(10.0, 10.0)),
+        primitive: egui::epaint::Primitive::Mesh(solid_mesh),
+    }];
+    let first = raster.rasterize_if_dirty(10, 10, 1.0, &prims1).unwrap();
+    assert!(first.chunks_exact(4).all(|px| px[3] == 255));
+
+    // Grow width & shrink height with only a tiny 2x2 quad in top-left.
+    let mut small_mesh = Mesh::with_texture(white_tex);
+    push_quad(
+        &mut small_mesh,
+        Rect::from_min_max(pos2(0.0, 0.0), pos2(2.0, 2.0)),
+        Rect::ZERO,
+        Color32::from_rgba_premultiplied(50, 100, 150, 255),
+    );
+    let prims2 = vec![egui::ClippedPrimitive {
+        clip_rect: Rect::from_min_max(pos2(0.0, 0.0), pos2(14.0, 8.0)),
+        primitive: egui::epaint::Primitive::Mesh(small_mesh),
+    }];
+    let resized = raster.rasterize_if_dirty(14, 8, 1.0, &prims2).unwrap();
+    assert_eq!(resized.len(), 14 * 8 * 4);
+    for y in 0..8 {
+        for x in 0..14 {
+            let off = (y * 14 + x) * 4;
+            if x < 2 && y < 2 {
+                assert_eq!(&resized[off..off + 4], &[150, 100, 50, 255]);
+            } else {
+                assert_eq!(
+                    &resized[off..off + 4],
+                    &[0, 0, 0, 0],
+                    "stale pixel survived resize at ({x}, {y})"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn cross_monitor_drag_migrates_across_portrait_and_landscape_outputs() {
+    let outputs = [
+        LogicalOutputBounds {
+            id: 2,
+            x: 0,
+            y: 0,
+            width: 1440,
+            height: 2560,
+        },
+        LogicalOutputBounds {
+            id: 1,
+            x: 1440,
+            y: 560,
+            width: 2560,
+            height: 1440,
+        },
+    ];
+    let ov_sz = (380, 230);
+
+    // Small overshoot (10px < 48px) with pointer still inside output 2 must stay put.
+    assert!(
+        resolve_cross_monitor_drag_target(
+            Some(2),
+            (0, 0),
+            (1440, 2560),
+            (1440 - 380 + 10, 900),
+            (1430, 910),
+            ov_sz,
+            &outputs,
+        )
+        .is_none()
+    );
+
+    // Dragging pointer into output 1 at y=900 migrates to DP-1 (y relative to 560 -> 340).
+    let to_dp1 = resolve_cross_monitor_drag_target(
+        Some(2),
+        (0, 0),
+        (1440, 2560),
+        (1440, 900),
+        (1460, 900),
+        ov_sz,
+        &outputs,
+    )
+    .expect("crossing into DP-1 must migrate");
+    assert_eq!(to_dp1.output_id, 1);
+    assert_eq!(to_dp1.origin, (1440, 560));
+    assert_eq!(to_dp1.margin, (0, 340));
+
+    // Dragging right above DP-1 top offset (y=112 < 560) still crosses onto DP-1 clamped at top=0.
+    let to_dp1_top = resolve_cross_monitor_drag_target(
+        Some(2),
+        (0, 0),
+        (1440, 2560),
+        (1440 - 380 + 60, 112),
+        (1425, 120),
+        ov_sz,
+        &outputs,
+    )
+    .expect("pushing right above offset monitor should still migrate");
+    assert_eq!(to_dp1_top.output_id, 1);
+    assert_eq!(to_dp1_top.margin, (0, 0));
+
+    // Dragging back left from DP-1 onto HDMI-A-1 lands on right edge of output 2.
+    let back_to_hdmi = resolve_cross_monitor_drag_target(
+        Some(1),
+        (1440, 560),
+        (2560, 1440),
+        (1440 - 60, 800),
+        (1420, 810),
+        ov_sz,
+        &outputs,
+    )
+    .expect("dragging left from DP-1 must migrate back to HDMI-A-1");
+    assert_eq!(back_to_hdmi.output_id, 2);
+    assert_eq!(back_to_hdmi.origin, (0, 0));
+    assert_eq!(back_to_hdmi.margin, (1440 - 380, 800));
+}
+
+#[test]
+fn next_monitor_geometry_cycles_cleanly_between_outputs() {
+    let monitors = [
+        MonitorRect::new(0.0, 0.0, 1440.0, 2560.0),
+        MonitorRect::new(1440.0, 560.0, 2560.0, 1440.0),
+    ];
+    let on_hdmi = OverlayGeometry {
+        x: 24.0,
+        y: 112.0,
+        width: 380.0,
+        height: 230.0,
+        click_through: false,
+    };
+    let moved_to_dp1 = compute_next_monitor_geometry(on_hdmi, &monitors, 1.0)
+        .expect("should cycle to second monitor");
+    assert_eq!(moved_to_dp1.x, 1440.0 + 24.0);
+    assert_eq!(moved_to_dp1.y, 560.0 + 112.0);
+    assert_eq!(moved_to_dp1.width, 380.0);
+    assert_eq!(moved_to_dp1.height, 230.0);
+
+    let cycled_back = compute_next_monitor_geometry(moved_to_dp1, &monitors, 1.0)
+        .expect("should cycle back to first monitor");
+    assert_eq!(cycled_back.x, 24.0);
+    assert_eq!(cycled_back.y, 112.0);
 }

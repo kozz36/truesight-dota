@@ -209,6 +209,252 @@ pub(super) fn compute_resize_step(
     (w, h)
 }
 
+/// Logical desktop bounds of one connected Wayland output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(super) struct LogicalOutputBounds {
+    pub(super) id: u32,
+    pub(super) x: i32,
+    pub(super) y: i32,
+    pub(super) width: i32,
+    pub(super) height: i32,
+}
+
+/// Destination output and surface-local margins after a cross-monitor drag handoff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(super) struct CrossMonitorTarget {
+    pub(super) output_id: u32,
+    pub(super) origin: (i32, i32),
+    pub(super) size: (i32, i32),
+    pub(super) margin: (i32, i32),
+}
+
+fn landing_on_output(
+    out: &LogicalOutputBounds,
+    desired_x: i32,
+    desired_y: i32,
+    overlay_w: i32,
+    overlay_h: i32,
+) -> CrossMonitorTarget {
+    let max_mx = (out.width - overlay_w).max(0);
+    let max_my = (out.height - overlay_h).max(0);
+    let mx = (desired_x - out.x).clamp(0, max_mx);
+    let my = (desired_y - out.y).clamp(0, max_my);
+    CrossMonitorTarget {
+        output_id: out.id,
+        origin: (out.x, out.y),
+        size: (out.width, out.height),
+        margin: (mx, my),
+    }
+}
+
+fn axis_gap(a_start: i32, a_len: i32, b_start: i32, b_len: i32) -> i32 {
+    let a_end = a_start + a_len;
+    let b_end = b_start + b_len;
+    if b_end < a_start {
+        a_start - b_end
+    } else if a_end < b_start {
+        b_start - a_end
+    } else {
+        0
+    }
+}
+
+/// Resolves whether a live drag has crossed into another connected output (including vertically
+/// offset portrait + landscape topologies), returning the target output and clamped margins.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(super) fn resolve_cross_monitor_drag_target(
+    current_output_id: Option<u32>,
+    current_origin: (i32, i32),
+    current_size: (i32, i32),
+    desired_desktop_pos: (i32, i32),
+    pointer_desktop_pos: (i32, i32),
+    overlay_size: (u32, u32),
+    outputs: &[LogicalOutputBounds],
+) -> Option<CrossMonitorTarget> {
+    const POINTER_CROSS_PX: i32 = 12;
+    const EDGE_PUSH_PX: i32 = 48;
+
+    if outputs.len() < 2 {
+        return None;
+    }
+
+    let (cur_left, cur_top) = current_origin;
+    let (cur_w, cur_h) = current_size;
+    let cur_right = cur_left + cur_w;
+    let cur_bottom = cur_top + cur_h;
+    let (des_x, des_y) = desired_desktop_pos;
+    let (ptr_x, ptr_y) = pointer_desktop_pos;
+    let (ov_w, ov_h) = (overlay_size.0 as i32, overlay_size.1 as i32);
+
+    // 1. Direct pointer penetration into another output across the compositor seam.
+    let ptr_outside_current = ptr_x <= cur_left - POINTER_CROSS_PX
+        || ptr_x >= cur_right + POINTER_CROSS_PX
+        || ptr_y <= cur_top - POINTER_CROSS_PX
+        || ptr_y >= cur_bottom + POINTER_CROSS_PX;
+    if ptr_outside_current
+        && let Some(target) = outputs.iter().find(|b| {
+            Some(b.id) != current_output_id
+                && b.width > 0
+                && b.height > 0
+                && ptr_x >= b.x
+                && ptr_x < b.x + b.width
+                && ptr_y >= b.y
+                && ptr_y < b.y + b.height
+        })
+    {
+        return Some(landing_on_output(target, des_x, des_y, ov_w, ov_h));
+    }
+
+    // 2. Directional edge push (handles left-grip drags and vertically offset monitors).
+    let push_right =
+        des_x + ov_w >= cur_right + EDGE_PUSH_PX || ptr_x >= cur_right + POINTER_CROSS_PX;
+    let push_left = des_x <= cur_left - EDGE_PUSH_PX || ptr_x <= cur_left - POINTER_CROSS_PX;
+    let push_bottom =
+        des_y + ov_h >= cur_bottom + EDGE_PUSH_PX || ptr_y >= cur_bottom + POINTER_CROSS_PX;
+    let push_top = des_y <= cur_top - EDGE_PUSH_PX || ptr_y <= cur_top - POINTER_CROSS_PX;
+
+    let mut best: Option<((i32, i32), &LogicalOutputBounds)> = None;
+    for b in outputs {
+        if Some(b.id) == current_output_id || b.width <= 0 || b.height <= 0 {
+            continue;
+        }
+        let primary_gap = if push_right && b.x >= cur_right {
+            b.x - cur_right
+        } else if push_left && b.x + b.width <= cur_left {
+            cur_left - (b.x + b.width)
+        } else if push_bottom && b.y >= cur_bottom {
+            b.y - cur_bottom
+        } else if push_top && b.y + b.height <= cur_top {
+            cur_top - (b.y + b.height)
+        } else {
+            continue;
+        };
+        let secondary_gap =
+            if (push_right && b.x >= cur_right) || (push_left && b.x + b.width <= cur_left) {
+                axis_gap(des_y, ov_h, b.y, b.height)
+            } else {
+                axis_gap(des_x, ov_w, b.x, b.width)
+            };
+        let key = (primary_gap, secondary_gap);
+        if best.is_none_or(|(best_key, _)| key < best_key) {
+            best = Some((key, b));
+        }
+    }
+
+    best.map(|(_, b)| landing_on_output(b, des_x, des_y, ov_w, ov_h))
+}
+
+/// Computes the next monitor's logical `OverlayGeometry` when cycling monitors, preserving
+/// relative coordinates clamped safely within the destination display.
+pub(super) fn compute_next_monitor_geometry(
+    current: crate::session::OverlayGeometry,
+    monitors: &[crate::session::MonitorRect],
+    pixels_per_point: f32,
+) -> Option<crate::session::OverlayGeometry> {
+    if monitors.len() < 2 {
+        return None;
+    }
+    let ppp = pixels_per_point.max(0.5);
+    let logical: Vec<(f32, f32, f32, f32)> = monitors
+        .iter()
+        .filter(|m| m.width > 0.0 && m.height > 0.0)
+        .map(|m| (m.x / ppp, m.y / ppp, m.width / ppp, m.height / ppp))
+        .collect();
+    if logical.len() < 2 {
+        return None;
+    }
+
+    let cx = current.x + current.width * 0.5;
+    let cy = current.y + current.height * 0.5;
+    let cur_idx = logical
+        .iter()
+        .position(|&(mx, my, mw, mh)| cx >= mx && cx < mx + mw && cy >= my && cy < my + mh)
+        .unwrap_or_else(|| {
+            logical
+                .iter()
+                .enumerate()
+                .min_by(|(_, a), (_, b)| {
+                    let dist = |r: &(f32, f32, f32, f32)| -> f32 {
+                        let dx = (cx - (r.0 + r.2 * 0.5)).abs();
+                        let dy = (cy - (r.1 + r.3 * 0.5)).abs();
+                        dx * dx + dy * dy
+                    };
+                    dist(a).total_cmp(&dist(b))
+                })
+                .map_or(0, |(idx, _)| idx)
+        });
+
+    let cur = logical[cur_idx];
+    let next = logical[(cur_idx + 1) % logical.len()];
+    let rel_x = (current.x - cur.0).max(0.0);
+    let rel_y = (current.y - cur.1).max(0.0);
+    let max_x = (next.0 + next.2 - current.width).max(next.0);
+    let max_y = (next.1 + next.3 - current.height).max(next.1);
+    Some(crate::session::OverlayGeometry {
+        x: (next.0 + rel_x).clamp(next.0, max_x),
+        y: (next.1 + rel_y).clamp(next.1, max_y),
+        width: current.width,
+        height: current.height,
+        click_through: current.click_through,
+    })
+}
+
+impl super::TrueSightGuiApp {
+    /// Moves the active overlay window to the next detected monitor while preserving its size
+    /// and relative corner offset.
+    pub(super) fn cycle_overlay_monitor(
+        &mut self,
+        ctx: &egui::Context,
+        host_mode: OverlayHostMode,
+    ) {
+        #[cfg(target_os = "linux")]
+        let ppp = match host_mode {
+            OverlayHostMode::LayerShell => self.wayland_layer_scale.max(1) as f32,
+            OverlayHostMode::Viewport => ctx.pixels_per_point().max(0.5),
+        };
+        #[cfg(not(target_os = "linux"))]
+        let ppp = {
+            let _ = host_mode;
+            ctx.pixels_per_point().max(0.5)
+        };
+
+        let cur = self.session.active_overlay_geometry();
+        let Some(next) = compute_next_monitor_geometry(cur, &self.session.known_monitors, ppp)
+        else {
+            return;
+        };
+        self.session.set_active_overlay_geometry(next);
+
+        #[cfg(target_os = "linux")]
+        if host_mode == OverlayHostMode::LayerShell
+            && let Some(handle) = self.wayland_layer.as_ref()
+        {
+            let is_post_draft = self.session.is_post_draft_build_view();
+            let (min_w, min_h) = if is_post_draft {
+                (220, 104)
+            } else {
+                (280, 160)
+            };
+            handle.send(LayerCommand::SetGeometry {
+                x: next.x.round() as i32,
+                y: next.y.round() as i32,
+                width: (next.width.round() as u32).clamp(min_w, 840),
+                height: (next.height.round() as u32).clamp(min_h, 720),
+                min_w,
+                min_h,
+            });
+            self.overlay_rasterizer.invalidate();
+            return;
+        }
+
+        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
+            next.x, next.y,
+        )));
+    }
+}
+
 #[cfg(target_os = "linux")]
 impl super::TrueSightGuiApp {
     /// Drives the dedicated Wayland `zwlr_layer_shell_v1` overlay `egui::Context`,
@@ -230,6 +476,7 @@ impl super::TrueSightGuiApp {
                 } => {
                     self.wayland_layer_size = (width.max(1), height.max(1));
                     self.wayland_layer_scale = scale.max(1);
+                    self.overlay_rasterizer.invalidate();
                 }
                 LayerEvent::GeometryChanged {
                     x,
