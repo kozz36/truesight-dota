@@ -101,25 +101,35 @@ impl TrueSightGuiApp {
                 let bg_fill = if is_picking {
                     Color32::from_rgba_unmultiplied(46, 230, 122, 22)
                 } else {
-                    P_INDIGO_2
-                };
-                let border_col = if is_dragging_this {
-                    P_NEUTRAL
-                } else if is_picking {
-                    P_GEM
-                } else {
-                    P_INDIGO_3
+                    Color32::from_rgba_unmultiplied(
+                        P_INDIGO_2.r(),
+                        P_INDIGO_2.g(),
+                        P_INDIGO_2.b(),
+                        105,
+                    )
                 };
 
                 let (r, _) =
                     ui.allocate_exact_size(vec2(ui.available_width(), slot_h), Sense::hover());
-                ui.painter().rect_filled(r, 0.0, bg_fill);
-                ui.painter().rect_stroke(
-                    r,
-                    0.0,
-                    Stroke::new(1.0_f32, border_col),
-                    StrokeKind::Inside,
-                );
+                ui.painter()
+                    .rect_filled(r, egui::CornerRadius::same(4), bg_fill);
+                if is_dragging_this || is_picking {
+                    let active_border = if is_dragging_this { P_NEUTRAL } else { P_GEM };
+                    ui.painter().rect_stroke(
+                        r,
+                        egui::CornerRadius::same(4),
+                        Stroke::new(1.0_f32, active_border),
+                        StrokeKind::Inside,
+                    );
+                } else {
+                    ui.painter().line_segment(
+                        [pos2(r.min.x + 3.0, r.max.y), pos2(r.max.x - 2.0, r.max.y)],
+                        Stroke::new(
+                            1.0_f32,
+                            Color32::from_rgba_unmultiplied(P_LINE.r(), P_LINE.g(), P_LINE.b(), 65),
+                        ),
+                    );
+                }
                 ui.painter().rect_filled(
                     Rect::from_min_max(r.min, pos2(r.min.x + 3.0, r.max.y)),
                     0.0,
@@ -139,7 +149,10 @@ impl TrueSightGuiApp {
                     ui.painter().rect_stroke(
                         portrait_rect,
                         0.0,
-                        Stroke::new(1.0_f32, P_LINE),
+                        Stroke::new(
+                            1.0_f32,
+                            Color32::from_rgba_unmultiplied(P_LINE.r(), P_LINE.g(), P_LINE.b(), 85),
+                        ),
                         StrokeKind::Inside,
                     );
                 } else {

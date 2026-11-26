@@ -19,6 +19,37 @@ fn paint_monitor_switch_icon(painter: &egui::Painter, rect: Rect, color: Color32
     painter.rect_stroke(front, 1.0, stroke, StrokeKind::Inside);
 }
 
+#[inline]
+fn translucent(c: Color32, alpha: u8) -> Color32 {
+    Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), alpha)
+}
+
+fn paint_empty_matrix_slot(
+    painter: &egui::Painter,
+    rect: Rect,
+    fill_alpha: u8,
+    border_alpha: u8,
+    label: Option<&str>,
+    font_size: f32,
+) {
+    painter.rect_filled(rect, CornerRadius::same(2), translucent(P_VOID, fill_alpha));
+    painter.rect_stroke(
+        rect,
+        CornerRadius::same(2),
+        Stroke::new(1.0_f32, translucent(P_LINE, border_alpha)),
+        StrokeKind::Inside,
+    );
+    if let Some(txt) = label {
+        painter.text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            txt,
+            FontId::proportional(font_size),
+            P_SILVER,
+        );
+    }
+}
+
 fn overlay_icon_button(
     ui: &mut egui::Ui,
     size: Vec2,
@@ -29,14 +60,14 @@ fn overlay_icon_button(
 ) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     let bg = if active || resp.hovered() {
-        P_INDIGO_3
+        translucent(P_INDIGO_3, 155)
     } else {
-        Color32::from_rgba_unmultiplied(P_INDIGO_2.r(), P_INDIGO_2.g(), P_INDIGO_2.b(), 190)
+        translucent(P_INDIGO_2, 72)
     };
     let border = if active || resp.hovered() {
         accent
     } else {
-        P_LINE
+        translucent(P_LINE, 130)
     };
     let fg = if active || resp.hovered() {
         accent
@@ -44,10 +75,10 @@ fn overlay_icon_button(
         P_GLINT
     };
     let painter = ui.painter();
-    painter.rect_filled(rect, CornerRadius::same(2), bg);
+    painter.rect_filled(rect, CornerRadius::same(3), bg);
     painter.rect_stroke(
         rect,
-        CornerRadius::same(2),
+        CornerRadius::same(3),
         Stroke::new(1.0_f32, border),
         StrokeKind::Inside,
     );
@@ -345,7 +376,8 @@ impl TrueSightGuiApp {
 
                         if self.session.overlay_geometry.click_through {
                             egui::Frame::NONE
-                                .fill(P_INDIGO_2)
+                                .fill(translucent(P_INDIGO_2, 110))
+                                .corner_radius(CornerRadius::same(3))
                                 .stroke(Stroke::new(1.0_f32, P_NEUTRAL))
                                 .inner_margin(Margin::symmetric(4, 1))
                                 .show(ui, |ui| {
@@ -436,13 +468,22 @@ impl TrueSightGuiApp {
                                 RichText::new(format!("P{}", idx + 1))
                                     .size(9.0)
                                     .strong()
-                                    .color(if is_on { P_VOID } else { P_MUTED }),
+                                    .color(if is_on { P_VOID } else { P_SILVER }),
                             )
                             .fill(if is_on {
                                 P_GEM
                             } else {
-                                P_INDIGO_2
-                            });
+                                translucent(P_INDIGO_2, 76)
+                            })
+                            .stroke(Stroke::new(
+                                1.0_f32,
+                                if is_on {
+                                    P_GEM
+                                } else {
+                                    translucent(P_LINE, 130)
+                                },
+                            ))
+                            .corner_radius(CornerRadius::same(3));
                             if ui.add(btn).clicked() {
                                 clicked_role = Some(role);
                             }
@@ -480,7 +521,7 @@ impl TrueSightGuiApp {
                                     ))
                                     .size(9.0)
                                     .strong()
-                                    .color(P_MUTED),
+                                    .color(P_SILVER),
                                 );
                                 if summary.top_suggestions.is_empty() {
                                     ui.label(
@@ -528,7 +569,7 @@ impl TrueSightGuiApp {
                                 RichText::new(tr.overlay_cnt_label)
                                     .size(9.0)
                                     .strong()
-                                    .color(P_MUTED),
+                                    .color(P_SILVER),
                             );
                             ui.spacing_mut().item_spacing = vec2(grid_gap, grid_gap);
 
@@ -559,18 +600,14 @@ impl TrueSightGuiApp {
                                             ui.painter().rect_filled(r, 0.0, P_INDIGO_2);
                                         }
                                     } else {
-                                        ui.painter().rect_stroke(
+                                        let lbl = format!("E{}", col + 1);
+                                        paint_empty_matrix_slot(
+                                            ui.painter(),
                                             r,
-                                            0.0,
-                                            Stroke::new(1.0_f32, P_LINE),
-                                            StrokeKind::Inside,
-                                        );
-                                        ui.painter().text(
-                                            r.center(),
-                                            Align2::CENTER_CENTER,
-                                            format!("E{}", col + 1),
-                                            FontId::proportional((cell_side * 0.32).max(6.5)),
-                                            P_MUTED,
+                                            36,
+                                            120,
+                                            Some(&lbl),
+                                            (cell_side * 0.32).max(6.5),
                                         );
                                     }
                                     ui.painter().line_segment(
@@ -599,18 +636,14 @@ impl TrueSightGuiApp {
                                             ui.painter().rect_filled(rh, 0.0, P_INDIGO_2);
                                         }
                                     } else {
-                                        ui.painter().rect_stroke(
+                                        let lbl = format!("A{}", row + 1);
+                                        paint_empty_matrix_slot(
+                                            ui.painter(),
                                             rh,
-                                            0.0,
-                                            Stroke::new(1.0_f32, P_LINE),
-                                            StrokeKind::Inside,
-                                        );
-                                        ui.painter().text(
-                                            rh.center(),
-                                            Align2::CENTER_CENTER,
-                                            format!("A{}", row + 1),
-                                            FontId::proportional((cell_side * 0.32).max(6.5)),
-                                            P_MUTED,
+                                            36,
+                                            120,
+                                            Some(&lbl),
+                                            (cell_side * 0.32).max(6.5),
                                         );
                                     }
                                     ui.painter().line_segment(
@@ -646,12 +679,13 @@ impl TrueSightGuiApp {
                                         } else {
                                             let (er, _) =
                                                 ui.allocate_exact_size(cell_sz, Sense::hover());
-                                            ui.painter().rect_filled(er, 0.0, P_INDIGO_1);
-                                            ui.painter().rect_stroke(
+                                            paint_empty_matrix_slot(
+                                                ui.painter(),
                                                 er,
+                                                44,
+                                                115,
+                                                None,
                                                 0.0,
-                                                Stroke::new(1.0_f32, P_LINE),
-                                                StrokeKind::Inside,
                                             );
                                         }
                                     }
