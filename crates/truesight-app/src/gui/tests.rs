@@ -4285,36 +4285,38 @@ fn live_overlay_viewport_suppresses_corrective_commands_during_active_wm_resize_
     // Simulate BeginResize(SouthEast) having armed WM modal resize (pointer cleared by egui).
     app.overlay_viewport_sync.begin_wm_gesture();
 
-    let run_sync_tick = |app: &mut TrueSightGuiApp, x: f32, y: f32, w: f32, h: f32| {
-        let mut raw_input = egui::RawInput {
-            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(w, h))),
-            ..Default::default()
-        };
-        raw_input.viewports.insert(
-            egui::ViewportId::ROOT,
-            egui::ViewportInfo {
-                monitor_size: Some(vec2(1920.0, 1080.0)),
-                native_pixels_per_point: Some(1.0),
-                outer_rect: Some(Rect::from_min_size(pos2(x, y), vec2(w, h))),
-                inner_rect: Some(Rect::from_min_size(pos2(x, y), vec2(w, h))),
+    let run_sync_tick_with_events =
+        |app: &mut TrueSightGuiApp, x: f32, y: f32, w: f32, h: f32, events: Vec<egui::Event>| {
+            let mut raw_input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(w, h))),
+                events,
                 ..Default::default()
-            },
-        );
-        let out = ctx.run(raw_input, |vctx| {
-            app.sync_live_overlay_viewport_geometry(vctx);
-        });
-        out.viewport_output
-            .get(&egui::ViewportId::ROOT)
-            .map(|v| v.commands.clone())
-            .unwrap_or_default()
-    };
+            };
+            raw_input.viewports.insert(
+                egui::ViewportId::ROOT,
+                egui::ViewportInfo {
+                    monitor_size: Some(vec2(1920.0, 1080.0)),
+                    native_pixels_per_point: Some(1.0),
+                    outer_rect: Some(Rect::from_min_size(pos2(x, y), vec2(w, h))),
+                    inner_rect: Some(Rect::from_min_size(pos2(x, y), vec2(w, h))),
+                    ..Default::default()
+                },
+            );
+            let out = ctx.run(raw_input, |vctx| {
+                app.sync_live_overlay_viewport_geometry(vctx);
+            });
+            out.viewport_output
+                .get(&egui::ViewportId::ROOT)
+                .map(|v| v.commands.clone())
+                .unwrap_or_default()
+        };
 
     // 8 consecutive frames of OS WM_SIZING expansion past the bottom-right monitor edge:
     // sync must NOT emit fighting OuterPosition or InnerSize commands while size changes.
     for step in 0..8 {
         let w = 380.0 + (step as f32) * 14.0;
         let h = 230.0 + (step as f32) * 18.0;
-        let cmds = run_sync_tick(&mut app, 1500.0, 780.0, w, h);
+        let cmds = run_sync_tick_with_events(&mut app, 1500.0, 780.0, w, h, Vec::new());
         assert!(
             !cmds.iter().any(|c| matches!(
                 c,
@@ -4324,13 +4326,36 @@ fn live_overlay_viewport_suppresses_corrective_commands_during_active_wm_resize_
         );
     }
 
-    // Once user releases and OS stops changing the rect, 4 steady frames let the settle window flush,
-    // emitting at most 1 final clamp command and 0 oscillation afterward.
+    // Holding the expanded rectangle steady WITHOUT releasing the native grab must keep
+    // clamping suppressed across arbitrary idle ticks (user pauses mid-resize).
     let final_w = 380.0 + 7.0 * 14.0;
     let final_h = 230.0 + 7.0 * 18.0;
+    for hold_tick in 0..10 {
+        let cmds = run_sync_tick_with_events(&mut app, 1500.0, 780.0, final_w, final_h, Vec::new());
+        assert!(
+            !cmds.iter().any(|c| matches!(
+                c,
+                egui::ViewportCommand::OuterPosition(_) | egui::ViewportCommand::InnerSize(_)
+            )),
+            "hold_tick {hold_tick}: held pause before release must keep clamp suppressed, got: {cmds:?}"
+        );
+    }
+
+    // Once the user releases (or OS modal resize returns control to pointer events), 5 steady
+    // frames let the settle window flush and emit 1 final clamp command with 0 oscillation.
     let mut settled_cmds = Vec::new();
-    for _ in 0..5 {
-        let cmds = run_sync_tick(&mut app, 1500.0, 780.0, final_w, final_h);
+    for tick in 0..6 {
+        let events = if tick == 0 {
+            vec![egui::Event::PointerButton {
+                pos: pos2(10.0, 10.0),
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }]
+        } else {
+            Vec::new()
+        };
+        let cmds = run_sync_tick_with_events(&mut app, 1500.0, 780.0, final_w, final_h, events);
         settled_cmds.extend(cmds);
     }
     let pos_cmds = settled_cmds
@@ -4339,12 +4364,81 @@ fn live_overlay_viewport_suppresses_corrective_commands_during_active_wm_resize_
         .count();
     assert_eq!(
         pos_cmds, 1,
-        "after WM resize settles, sync must emit exactly 1 final OuterPosition clamp: {settled_cmds:?}"
+        "after WM resize settles post-release, sync must emit exactly 1 final OuterPosition clamp: {settled_cmds:?}"
     );
     assert!(
         app.session.overlay_geometry.y + app.session.overlay_geometry.height <= 1080.0 + 0.5,
         "clamped overlay must fit inside monitor height after settle: {:?}",
         app.session.overlay_geometry
+    );
+}
+
+#[test]
+fn live_overlay_viewport_resumes_clamp_when_pointer_resumes_after_held_pause() {
+    let mut session = AppSession::new().unwrap();
+    session.overlay_mode = true;
+    session.set_known_monitors(vec![crate::session::MonitorRect::new(
+        0.0, 0.0, 1920.0, 1080.0,
+    )]);
+    session.overlay_geometry = crate::session::OverlayGeometry {
+        x: 1500.0,
+        y: 780.0,
+        width: 478.0,
+        height: 356.0,
+        click_through: false,
+    };
+    let mut app = TrueSightGuiApp::new(session, None, None);
+    let ctx = egui::Context::default();
+    app.overlay_viewport_sync.begin_wm_gesture();
+
+    let run_tick = |app: &mut TrueSightGuiApp, events: Vec<egui::Event>| {
+        let mut raw_input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(478.0, 356.0))),
+            events,
+            ..Default::default()
+        };
+        raw_input.viewports.insert(
+            egui::ViewportId::ROOT,
+            egui::ViewportInfo {
+                monitor_size: Some(vec2(1920.0, 1080.0)),
+                native_pixels_per_point: Some(1.0),
+                outer_rect: Some(Rect::from_min_size(pos2(1500.0, 780.0), vec2(478.0, 356.0))),
+                inner_rect: Some(Rect::from_min_size(pos2(1500.0, 780.0), vec2(478.0, 356.0))),
+                ..Default::default()
+            },
+        );
+        ctx.run(raw_input, |vctx| {
+            app.sync_live_overlay_viewport_geometry(vctx);
+        })
+        .viewport_output
+        .get(&egui::ViewportId::ROOT)
+        .map(|v| v.commands.clone())
+        .unwrap_or_default()
+    };
+
+    for _ in 0..8 {
+        let cmds = run_tick(&mut app, Vec::new());
+        assert!(!cmds.iter().any(|c| matches!(
+            c,
+            egui::ViewportCommand::OuterPosition(_) | egui::ViewportCommand::InnerSize(_)
+        )));
+    }
+
+    // Windows WM_SIZING consumes WM_LBUTTONUP when exiting modal resize; cursor motion resumes instead.
+    let mut post_move_cmds = Vec::new();
+    for tick in 0..6 {
+        let events = if tick == 0 {
+            vec![egui::Event::PointerMoved(pos2(20.0, 20.0))]
+        } else {
+            Vec::new()
+        };
+        post_move_cmds.extend(run_tick(&mut app, events));
+    }
+    assert!(
+        post_move_cmds
+            .iter()
+            .any(|c| matches!(c, egui::ViewportCommand::OuterPosition(_))),
+        "resumed pointer motion after WM exit must settle and clamp once: {post_move_cmds:?}"
     );
 }
 

@@ -11,6 +11,7 @@ const OVERLAY_LIVE_MOTION_SETTLE_FRAMES: u8 = 3;
 #[derive(Default)]
 pub(crate) struct OverlayViewportSyncState {
     wm_gesture_active: bool,
+    wm_gesture_awaiting_end: bool,
     wm_settle_frames: u8,
     motion_settle_frames: u8,
     consecutive_motion_frames: u8,
@@ -26,13 +27,23 @@ impl OverlayViewportSyncState {
 
     pub(super) fn begin_wm_gesture(&mut self) {
         self.wm_gesture_active = true;
+        self.wm_gesture_awaiting_end = true;
         self.wm_settle_frames = OVERLAY_WM_GESTURE_SETTLE_FRAMES;
         self.last_sent_pos = None;
         self.last_sent_size = None;
     }
 
+    /// Transitions an active OS drag/resize gesture into its post-release settle countdown.
+    pub(super) fn end_wm_gesture(&mut self) {
+        if self.wm_gesture_awaiting_end {
+            self.wm_gesture_awaiting_end = false;
+            self.wm_settle_frames = OVERLAY_WM_GESTURE_SETTLE_FRAMES;
+        }
+    }
+
     pub(super) fn begin_programmatic_move(&mut self) {
         self.wm_gesture_active = false;
+        self.wm_gesture_awaiting_end = false;
         self.wm_settle_frames = 2;
         self.motion_settle_frames = 0;
         self.consecutive_motion_frames = 0;
@@ -43,6 +54,11 @@ impl OverlayViewportSyncState {
 
     fn is_settling(&self) -> bool {
         self.wm_gesture_active || self.wm_settle_frames > 0 || self.motion_settle_frames > 0
+    }
+
+    fn needs_settle_repaint(&self) -> bool {
+        !self.wm_gesture_awaiting_end
+            && (self.wm_settle_frames > 0 || self.motion_settle_frames > 0)
     }
 
     fn observe_candidate(&mut self, candidate: OverlayGeometry, pos_tol: f32) {
@@ -76,11 +92,14 @@ impl OverlayViewportSyncState {
             }
         } else {
             self.consecutive_motion_frames = 0;
-            if self.wm_settle_frames > 0 {
-                self.wm_settle_frames -= 1;
-            }
-            if self.wm_settle_frames == 0 {
-                self.wm_gesture_active = false;
+            // Keep clamping suppressed indefinitely while the user pauses mid-grab before releasing.
+            if !self.wm_gesture_awaiting_end {
+                if self.wm_settle_frames > 0 {
+                    self.wm_settle_frames -= 1;
+                }
+                if self.wm_settle_frames == 0 {
+                    self.wm_gesture_active = false;
+                }
             }
             if self.motion_settle_frames > 0 {
                 self.motion_settle_frames -= 1;
@@ -195,12 +214,29 @@ impl TrueSightGuiApp {
         let clamped_pts = clamped_px.scale_to_egui_points(ppp);
 
         // Avoid sending corrective position/size commands while a drag/resize or settle window is active.
+        let (primary_down, wm_gesture_ended) = vctx.input(|i| {
+            let ended = i.pointer.primary_released()
+                || i.pointer.any_released()
+                || i.events.iter().any(|e| {
+                    matches!(
+                        e,
+                        egui::Event::PointerMoved(_)
+                            | egui::Event::PointerGone
+                            | egui::Event::WindowFocused(false)
+                            | egui::Event::PointerButton { pressed: false, .. }
+                    )
+                });
+            (i.pointer.primary_down(), ended)
+        });
+        if !primary_down && wm_gesture_ended {
+            self.overlay_viewport_sync.end_wm_gesture();
+        }
         let actively_interacting = self.overlay_drag_armed.is_some()
             || self.overlay_resize_armed.is_some()
             || self.overlay_viewport_sync.is_settling()
-            || vctx.input(|i| i.pointer.primary_down());
+            || primary_down;
         if actively_interacting {
-            if self.overlay_viewport_sync.is_settling() {
+            if self.overlay_viewport_sync.needs_settle_repaint() {
                 vctx.request_repaint_after(std::time::Duration::from_millis(32));
             }
             return;
