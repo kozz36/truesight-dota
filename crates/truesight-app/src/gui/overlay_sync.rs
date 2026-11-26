@@ -214,6 +214,8 @@ impl TrueSightGuiApp {
         let clamped_pts = clamped_px.scale_to_egui_points(ppp);
 
         // Avoid sending corrective position/size commands while a drag/resize or settle window is active.
+        // Do not treat `PointerGone` as gesture end: Windows can emit `WM_MOUSELEAVE` while the
+        // native modal resize loop still holds capture near a monitor edge.
         let (primary_down, wm_gesture_ended) = vctx.input(|i| {
             let ended = i.pointer.primary_released()
                 || i.pointer.any_released()
@@ -221,7 +223,6 @@ impl TrueSightGuiApp {
                     matches!(
                         e,
                         egui::Event::PointerMoved(_)
-                            | egui::Event::PointerGone
                             | egui::Event::WindowFocused(false)
                             | egui::Event::PointerButton { pressed: false, .. }
                     )

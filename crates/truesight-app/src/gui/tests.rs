@@ -4424,6 +4424,23 @@ fn live_overlay_viewport_resumes_clamp_when_pointer_resumes_after_held_pause() {
         )));
     }
 
+    // Cursor leave (`PointerGone` / WM_MOUSELEAVE) during a held pause must NOT end the native grab.
+    for tick in 0..6 {
+        let events = if tick == 0 {
+            vec![egui::Event::PointerGone]
+        } else {
+            Vec::new()
+        };
+        let cmds = run_tick(&mut app, events);
+        assert!(
+            !cmds.iter().any(|c| matches!(
+                c,
+                egui::ViewportCommand::OuterPosition(_) | egui::ViewportCommand::InnerSize(_)
+            )),
+            "tick {tick}: PointerGone without button release must keep clamp suppressed: {cmds:?}"
+        );
+    }
+
     // Windows WM_SIZING consumes WM_LBUTTONUP when exiting modal resize; cursor motion resumes instead.
     let mut post_move_cmds = Vec::new();
     for tick in 0..6 {
