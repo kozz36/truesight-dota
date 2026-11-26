@@ -230,58 +230,97 @@ fn push_tiled_grain_mesh(
     shapes.push(Shape::mesh(mesh));
 }
 
-/// Builds a multi-layer Gem of True Sight dark-crystal card surface background using smooth
-/// continuous radial falloff textures + subtle tiled micro-grain behind card content.
+/// Builds a multi-layer Gem of True Sight dark-crystal card surface background combining
+/// smooth continuous radial falloff light, sculpted cut-stone facet planes with specular
+/// crystal ridges, and subtle tiled micro-grain behind card content.
 pub(super) fn build_gemstone_card_background(
     rect: Rect,
     grain_tex: Option<TextureId>,
     glow_tex: Option<TextureId>,
     corner_radius: CornerRadius,
 ) -> Shape {
+    let w = rect.width().max(1.0);
     let h = rect.height().max(1.0);
     let tl = rect.min;
     let tr = rect.right_top();
+    let br = rect.max;
     let bl = rect.left_bottom();
 
-    let mut shapes = Vec::with_capacity(6);
+    let mut shapes = Vec::with_capacity(11);
     shapes.push(Shape::rect_filled(rect, corner_radius, P_INDIGO_1));
 
-    // Smooth upper-left emerald optical radiance + lower-right deep obsidian depth vignette
+    // Smooth upper-left emerald inner radiance + lower-right obsidian depth vignette
     push_radial_glow_mesh(
         &mut shapes,
         rect,
         glow_tex,
-        Color32::from_rgba_unmultiplied(P_GEM.r(), P_GEM.g(), P_GEM.b(), 24),
+        Color32::from_rgba_unmultiplied(P_GEM.r(), P_GEM.g(), P_GEM.b(), 22),
         false,
     );
     push_radial_glow_mesh(
         &mut shapes,
         rect,
         glow_tex,
-        Color32::from_rgba_unmultiplied(6, 5, 16, 46),
+        Color32::from_rgba_unmultiplied(6, 5, 16, 36),
         true,
     );
 
-    push_tiled_grain_mesh(&mut shapes, rect, grain_tex, 12);
+    // Sculpted cut-stone crystal facet planes + faint 1px specular ridge creases
+    let p_top = pos2(tl.x + w * 0.58, tl.y);
+    let p_mid = pos2(tl.x + w * 0.34, tl.y + h * 0.52);
+    let p_left = pos2(tl.x, tl.y + h * 0.38);
+    let p_right = pos2(tr.x, tl.y + h * 0.30);
+    let p_piv = pos2(tl.x + w * 0.66, tl.y + h * 0.44);
+    let p_bot = pos2(tl.x + w * 0.44, br.y);
+
+    shapes.push(Shape::convex_polygon(
+        vec![tl, p_top, p_mid, p_left],
+        Color32::from_rgba_unmultiplied(P_GEM.r(), P_GEM.g(), P_GEM.b(), 11),
+        Stroke::NONE,
+    ));
+    shapes.push(Shape::convex_polygon(
+        vec![p_top, tr, p_right, p_piv],
+        Color32::from_rgba_unmultiplied(150, 178, 236, 9),
+        Stroke::NONE,
+    ));
+    shapes.push(Shape::convex_polygon(
+        vec![p_bot, p_piv, p_right, br],
+        Color32::from_rgba_unmultiplied(5, 4, 15, 54),
+        Stroke::NONE,
+    ));
+
+    shapes.push(Shape::line_segment(
+        [p_top, p_mid],
+        Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(244, 250, 252, 18)),
+    ));
+    shapes.push(Shape::line_segment(
+        [p_piv, p_right],
+        Stroke::new(
+            1.0_f32,
+            Color32::from_rgba_unmultiplied(P_GEM.r(), P_GEM.g(), P_GEM.b(), 16),
+        ),
+    ));
+
+    push_tiled_grain_mesh(&mut shapes, rect, grain_tex, 13);
 
     // Subtle crystal edge glint along top and left rim
     shapes.push(Shape::line_segment(
         [pos2(tl.x + 3.0, tl.y + 1.0), pos2(tr.x - 3.0, tr.y + 1.0)],
-        Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(244, 250, 252, 22)),
+        Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(244, 250, 252, 24)),
     ));
     shapes.push(Shape::line_segment(
         [
             pos2(tl.x + 1.0, tl.y + 3.0),
             pos2(bl.x + 1.0, tl.y + h * 0.50),
         ],
-        Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(46, 230, 122, 26)),
+        Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(46, 230, 122, 28)),
     ));
 
     Shape::Vec(shapes)
 }
 
-/// Builds a translucent radial cabochon emerald glass background for the compact overlay backed by
-/// true per-pixel alpha (`ARGB8888`) and continuous smooth falloff scaled by `opacity`.
+/// Builds a translucent sculpted emerald glass background for the compact overlay combining true
+/// per-pixel alpha (`ARGB8888`), continuous smooth radial glow, subtle facet planes, and fine grain.
 pub(super) fn build_overlay_glass_background(
     rect: Rect,
     opacity: f32,
@@ -289,12 +328,20 @@ pub(super) fn build_overlay_glass_background(
     glow_tex: Option<TextureId>,
 ) -> Shape {
     let op = AppSession::sanitize_overlay_opacity(opacity);
+    let w = rect.width().max(1.0);
+    let h = rect.height().max(1.0);
+    let tl = rect.min;
+    let br = rect.max;
+
     let base_alpha = (255.0 * op).round().clamp(40.0, 245.0) as u8;
-    let emerald_alpha = (26.0 * op + 6.0).round().clamp(8.0, 38.0) as u8;
-    let obsidian_alpha = (26.0 * op).round().clamp(6.0, 40.0) as u8;
+    let emerald_alpha = (22.0 * op + 4.0).round().clamp(8.0, 32.0) as u8;
+    let obsidian_alpha = (22.0 * op).round().clamp(6.0, 36.0) as u8;
+    let crown_alpha = (16.0 * op + 4.0).round().clamp(6.0, 28.0) as u8;
+    let pavilion_alpha = (24.0 * op).round().clamp(6.0, 40.0) as u8;
+    let ridge_alpha = (20.0 * op + 6.0).round().clamp(8.0, 32.0) as u8;
     let grain_alpha = (10.0 * op).round().clamp(3.0, 16.0) as u8;
 
-    let mut shapes = Vec::with_capacity(4);
+    let mut shapes = Vec::with_capacity(7);
     shapes.push(Shape::rect_filled(
         rect,
         CornerRadius::same(6),
@@ -315,6 +362,32 @@ pub(super) fn build_overlay_glass_background(
         Color32::from_rgba_unmultiplied(6, 5, 16, obsidian_alpha),
         true,
     );
+
+    // Sculpted glass crown & pavilion planes + faint specular ridge crease
+    let g_top = pos2(tl.x + w * 0.56, tl.y);
+    let g_mid = pos2(tl.x + w * 0.28, tl.y + h * 0.54);
+    shapes.push(Shape::convex_polygon(
+        vec![tl, g_top, g_mid, pos2(tl.x, tl.y + h * 0.36)],
+        Color32::from_rgba_unmultiplied(P_GEM.r(), P_GEM.g(), P_GEM.b(), crown_alpha),
+        Stroke::NONE,
+    ));
+    shapes.push(Shape::convex_polygon(
+        vec![
+            pos2(tl.x + w * 0.42, br.y),
+            pos2(tl.x + w * 0.68, tl.y + h * 0.44),
+            pos2(br.x, tl.y + h * 0.28),
+            br,
+        ],
+        Color32::from_rgba_unmultiplied(5, 4, 15, pavilion_alpha),
+        Stroke::NONE,
+    ));
+    shapes.push(Shape::line_segment(
+        [g_top, g_mid],
+        Stroke::new(
+            1.0_f32,
+            Color32::from_rgba_unmultiplied(244, 250, 252, ridge_alpha),
+        ),
+    ));
 
     push_tiled_grain_mesh(&mut shapes, rect, grain_tex, grain_alpha);
 

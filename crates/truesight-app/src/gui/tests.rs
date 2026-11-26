@@ -4370,13 +4370,13 @@ fn hud_card_renders_gemstone_facets_behind_content_with_corner_ticks() {
     for clipped in &full_output.shapes {
         count_card_shapes(&clipped.shape, &mut polygons, &mut lines, &mut meshes);
     }
-    assert_eq!(
-        polygons, 0,
-        "hud_card must use smooth textured gradients instead of stepped polygon discs, got {polygons}"
+    assert!(
+        polygons >= 3,
+        "hud_card must paint >= 3 sculpted crystal facet planes behind content, got {polygons}"
     );
     assert!(
-        lines >= 6,
-        "hud_card must paint specular bevels + corner ticks, got {lines}"
+        lines >= 8,
+        "hud_card must paint specular bevels, facet ridge creases, and corner ticks, got {lines}"
     );
     assert!(
         meshes >= 3,
