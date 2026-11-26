@@ -166,22 +166,22 @@ pub fn compute_pickphase_topbar_slot_rects(
     let scale_x = (frame_w as f32) / 2560.0;
     let scale_y = (virtual_h as f32) / 1440.0;
     let y = (9.0 * scale_y).round() as usize;
-    let width = (118.0 * scale_x).round().max(8.0) as usize;
+    let width = (126.0 * scale_x).round().max(8.0) as usize;
     let height = (82.0 * scale_y).round().max(8.0) as usize;
 
     let mut rad_xs = [0_usize; 5];
     let mut dire_xs = [0_usize; 5];
     for i in 0..5 {
-        rad_xs[i] = ((280.0 + (i as f32) * 165.0 + 18.0) * scale_x).round() as usize;
-        dire_xs[i] = ((1475.0 + (i as f32) * 165.0 + 8.0) * scale_x).round() as usize;
+        rad_xs[i] = ((280.0 + (i as f32) * 165.0 + 12.0) * scale_x).round() as usize;
+        dire_xs[i] = ((1475.0 + (i as f32) * 165.0 + 2.0) * scale_x).round() as usize;
     }
 
     build_topbar_rects(rad_xs, dire_xs, y, width, height)
 }
 
 /// Insets a `PickPhase` portrait slot rectangle to its upper badge-free portrait core (`22/36`
-/// of portrait height), excluding bottom Dota Plus tier emblems and info corner badges while
-/// staying strictly below the top player-color strip.
+/// of portrait height), excluding bottom Ranked medal banners, Dota Plus tier emblems, and info
+/// corner badges while staying strictly below the top player-color strip.
 pub(crate) fn pickphase_upper_core_rect(rect: TopBarSlotRect) -> TopBarSlotRect {
     let height = (((rect.height as f32) * (22.0 / 36.0)).round() as usize).min(rect.height);
     if rect.width >= DESC_COLS && height >= DESC_ROWS {
