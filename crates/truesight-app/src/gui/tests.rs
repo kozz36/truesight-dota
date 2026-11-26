@@ -4264,3 +4264,286 @@ fn direct_upgrade_chip_in_build_bar_and_overlay_is_informational_and_preserves_o
         after_alt_click.steps
     );
 }
+
+#[test]
+fn gemstone_micro_grain_texture_is_deterministic_tileable_and_subtle() {
+    let img_a = super::surfaces::generate_micro_grain_image();
+    let img_b = super::surfaces::generate_micro_grain_image();
+    assert_eq!(
+        img_a.size,
+        [
+            super::surfaces::MICRO_GRAIN_SIZE,
+            super::surfaces::MICRO_GRAIN_SIZE
+        ]
+    );
+    assert_eq!(img_a.pixels, img_b.pixels);
+
+    let mut min_lum = u8::MAX;
+    let mut max_lum = 0_u8;
+    for px in &img_a.pixels {
+        let [r, g, b, a] = px.to_srgba_unmultiplied();
+        min_lum = min_lum.min(r).min(g).min(b);
+        max_lum = max_lum.max(r).max(g).max(b);
+        assert!(
+            a >= 200,
+            "tileable grain texture alpha should stay high and subtle via tint: {a}"
+        );
+    }
+    assert!(
+        max_lum > min_lum && (max_lum - min_lum) >= 18,
+        "grain texture must have crystalline variance: min={min_lum}, max={max_lum}"
+    );
+}
+
+#[test]
+fn gemstone_radial_glow_texture_decays_smoothly_without_hard_edges() {
+    let img = super::surfaces::generate_radial_glow_image();
+    let sz = super::surfaces::RADIAL_GLOW_SIZE;
+    assert_eq!(img.size, [sz, sz]);
+    let origin_alpha = img.pixels[0].to_srgba_unmultiplied()[3];
+    let mid_alpha = img.pixels[(sz / 3) * sz + (sz / 3)].to_srgba_unmultiplied()[3];
+    let right_edge_alpha = img.pixels[sz - 1].to_srgba_unmultiplied()[3];
+    let bottom_edge_alpha = img.pixels[(sz - 1) * sz].to_srgba_unmultiplied()[3];
+    let corner_alpha = img.pixels[sz * sz - 1].to_srgba_unmultiplied()[3];
+
+    assert!(
+        origin_alpha >= 240,
+        "glow center near UV origin must stay luminous, got {origin_alpha}"
+    );
+    assert!(
+        mid_alpha > 0 && mid_alpha < origin_alpha,
+        "mid-card glow alpha must fall off monotonically ({origin_alpha} -> {mid_alpha})"
+    );
+    assert_eq!(
+        right_edge_alpha, 0,
+        "right edge must reach zero alpha before rect boundary"
+    );
+    assert_eq!(
+        bottom_edge_alpha, 0,
+        "bottom edge must reach zero alpha before rect boundary"
+    );
+    assert_eq!(corner_alpha, 0);
+}
+
+#[test]
+fn hud_card_renders_gemstone_facets_behind_content_with_corner_ticks() {
+    let mut app = TrueSightGuiApp::new(make_5v5_gui_session(), None, None);
+    let ctx = egui::Context::default();
+    let full_output = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(420.0, 260.0))),
+            ..Default::default()
+        },
+        |ctx| {
+            app.textures.ensure_loaded(ctx);
+            egui::CentralPanel::default().show(ctx, |ui| {
+                super::theme::hud_card(ui, |ui| {
+                    ui.label("Gemstone Smooth Glow Test");
+                });
+            });
+        },
+    );
+
+    fn count_card_shapes(
+        shape: &egui::Shape,
+        polygons: &mut usize,
+        lines: &mut usize,
+        meshes: &mut usize,
+    ) {
+        match shape {
+            egui::Shape::Vec(items) => {
+                for s in items {
+                    count_card_shapes(s, polygons, lines, meshes);
+                }
+            }
+            egui::Shape::Path(path) if path.closed && path.fill != egui::Color32::TRANSPARENT => {
+                *polygons += 1
+            }
+            egui::Shape::LineSegment { .. } | egui::Shape::Path(_) => *lines += 1,
+            egui::Shape::Mesh(_) => *meshes += 1,
+            _ => {}
+        }
+    }
+    let mut polygons = 0;
+    let mut lines = 0;
+    let mut meshes = 0;
+    for clipped in &full_output.shapes {
+        count_card_shapes(&clipped.shape, &mut polygons, &mut lines, &mut meshes);
+    }
+    assert!(
+        polygons >= 3,
+        "hud_card must paint >= 3 sculpted crystal facet planes behind content, got {polygons}"
+    );
+    assert!(
+        lines >= 8,
+        "hud_card must paint specular bevels, facet ridge creases, and corner ticks, got {lines}"
+    );
+    assert!(
+        meshes >= 3,
+        "hud_card must composite radial emerald glow, obsidian vignette, and grain meshes, got {meshes}"
+    );
+}
+
+#[test]
+fn options_window_exposes_overlay_opacity_control_and_updates_session() {
+    let mut app = TrueSightGuiApp::new(make_5v5_gui_session(), None, None);
+    app.onboarding_open = false;
+    app.options_open = true;
+    app.session.set_overlay_opacity(0.58);
+    let ctx = egui::Context::default();
+
+    let mut out = None;
+    for _ in 0..2 {
+        out = Some(ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, 800.0))),
+                ..Default::default()
+            },
+            |ctx| {
+                let _ = app.render_options_window(ctx, 48.0);
+            },
+        ));
+    }
+    let out = out.expect("second pass options window output");
+
+    let mut texts = Vec::new();
+    for clipped in &out.shapes {
+        collect_painted_texts(&clipped.shape, &mut texts);
+    }
+    let tr = super::i18n::strings(app.session.ui_language);
+    assert!(
+        texts.iter().any(|t| t.contains(tr.overlay_opacity_label)),
+        "options drawer must show '{}' control; painted texts: {texts:?}",
+        tr.overlay_opacity_label
+    );
+    assert!(
+        texts.iter().any(|t| t.contains("58%")),
+        "options drawer must show live overlay glass percentage '58%'; painted texts: {texts:?}"
+    );
+}
+
+#[test]
+fn overlay_small_text_scrim_clears_wcag_aa_contrast_over_white_backdrop_at_default_and_min_opacity()
+{
+    use super::theme::{P_CYAN, P_GLINT, P_NEUTRAL};
+    use crate::session::{DEFAULT_OVERLAY_OPACITY, MIN_OVERLAY_OPACITY};
+    use eframe::egui::Color32;
+
+    let blend_over = |fg: Color32, bg: Color32| -> Color32 {
+        let a = f32::from(fg.a()) / 255.0;
+        let ch = |f: u8, b: u8| -> u8 {
+            ((f32::from(f) * a + f32::from(b) * (1.0 - a)).round()).clamp(0.0, 255.0) as u8
+        };
+        Color32::from_rgb(ch(fg.r(), bg.r()), ch(fg.g(), bg.g()), ch(fg.b(), bg.b()))
+    };
+    let rel_luminance = |c: Color32| -> f32 {
+        let lin = |u: u8| -> f32 {
+            let v = f32::from(u) / 255.0;
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * lin(c.r()) + 0.7152 * lin(c.g()) + 0.0722 * lin(c.b())
+    };
+    let contrast_ratio = |a: Color32, b: Color32| -> f32 {
+        let la = rel_luminance(a);
+        let lb = rel_luminance(b);
+        let (hi, lo) = if la >= lb { (la, lb) } else { (lb, la) };
+        (hi + 0.05) / (lo + 0.05)
+    };
+
+    let scrim = Color32::from_rgba_unmultiplied(
+        P_VOID.r(),
+        P_VOID.g(),
+        P_VOID.b(),
+        super::surfaces::OVERLAY_TEXT_SCRIM_ALPHA,
+    );
+    for opacity in [DEFAULT_OVERLAY_OPACITY, MIN_OVERLAY_OPACITY] {
+        let glass_shape = super::surfaces::build_overlay_glass_background(
+            Rect::from_min_size(pos2(0.0, 0.0), vec2(320.0, 200.0)),
+            opacity,
+            None,
+            None,
+        );
+        let base_fill = match glass_shape {
+            egui::Shape::Vec(shapes) => match shapes.first() {
+                Some(egui::Shape::Rect(r)) => r.fill,
+                other => panic!("expected filled glass base rect, got {other:?}"),
+            },
+            other => panic!("expected Shape::Vec from glass background, got {other:?}"),
+        };
+        let glass_over_white = blend_over(base_fill, Color32::WHITE);
+        let scrim_over_white = blend_over(scrim, glass_over_white);
+
+        for (label, fg) in [
+            ("P_GLINT", P_GLINT),
+            ("P_SILVER", P_SILVER),
+            ("P_GEM", P_GEM),
+            ("P_CYAN", P_CYAN),
+            ("P_NEUTRAL", P_NEUTRAL),
+            ("OVERLAY_DIRE_TEXT", super::surfaces::OVERLAY_DIRE_TEXT),
+        ] {
+            let ratio = contrast_ratio(fg, scrim_over_white);
+            assert!(
+                ratio >= 4.5,
+                "opacity={opacity:.2}: {label} contrast {ratio:.2}:1 must meet WCAG AA >= 4.5:1 over white backdrop"
+            );
+        }
+    }
+
+    let ctx = egui::Context::default();
+    let out = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(160.0, 80.0))),
+            ..Default::default()
+        },
+        |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                super::surfaces::paint_empty_matrix_slot(
+                    ui.painter(),
+                    Rect::from_min_size(pos2(8.0, 8.0), vec2(26.0, 26.0)),
+                    36,
+                    120,
+                    Some("A1"),
+                    8.5,
+                );
+                super::surfaces::paint_empty_matrix_slot(
+                    ui.painter(),
+                    Rect::from_min_size(pos2(40.0, 8.0), vec2(26.0, 26.0)),
+                    36,
+                    120,
+                    Some("E1"),
+                    8.5,
+                );
+            });
+        },
+    );
+    fn collect_fills(shape: &egui::Shape, out: &mut Vec<Color32>) {
+        match shape {
+            egui::Shape::Rect(r) if r.fill != Color32::TRANSPARENT => out.push(r.fill),
+            egui::Shape::Vec(v) => v.iter().for_each(|s| collect_fills(s, out)),
+            _ => {}
+        }
+    }
+    let mut fills = Vec::new();
+    for clipped in &out.shapes {
+        collect_fills(&clipped.shape, &mut fills);
+    }
+    let scrim_count = fills
+        .iter()
+        .filter(|c| {
+            **c == Color32::from_rgba_unmultiplied(
+                P_VOID.r(),
+                P_VOID.g(),
+                P_VOID.b(),
+                super::surfaces::OVERLAY_TEXT_SCRIM_ALPHA,
+            )
+        })
+        .count();
+    assert_eq!(
+        scrim_count, 2,
+        "both labeled empty matrix headers (A1, E1) must paint an opaque-enough dark scrim backing; fills={fills:?}"
+    );
+}

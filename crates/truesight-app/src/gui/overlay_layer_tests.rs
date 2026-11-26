@@ -296,7 +296,7 @@ fn layer_shell_overlay_headless_tessellation_and_rasterization_picks_and_build()
     let mut saw_translucent_bg = false;
     let mut saw_opaque_fg = false;
     for px in buf_picks.chunks_exact(4) {
-        if px[3] > 180 && px[3] < 250 {
+        if px[3] > 140 && px[3] < 250 {
             saw_translucent_bg = true;
         }
         if px[3] == 255 {
@@ -1024,4 +1024,139 @@ fn deferred_build_set_geometry_applies_after_picks_resize_and_accepts_build_fram
     assert!(queue.on_set_geometry(true, build_req).is_none());
     queue.clear();
     assert!(queue.on_gesture_finished(false).is_none());
+}
+
+#[test]
+fn overlay_rasterizer_tiles_repeat_wrapped_textures_seamlessly() {
+    let mut raster = OverlayRasterizer::new();
+    let tex_id = TextureId::Managed(42);
+    let checkerboard = ColorImage {
+        size: [2, 2],
+        source_size: vec2(2.0, 2.0),
+        pixels: vec![
+            Color32::from_rgba_premultiplied(240, 240, 240, 255),
+            Color32::from_rgba_premultiplied(20, 20, 20, 255),
+            Color32::from_rgba_premultiplied(20, 20, 20, 255),
+            Color32::from_rgba_premultiplied(240, 240, 240, 255),
+        ],
+    };
+    let mut delta = TexturesDelta::default();
+    delta.set.push((
+        tex_id,
+        egui::epaint::ImageDelta::full(
+            checkerboard,
+            TextureOptions {
+                magnification: TextureFilter::Nearest,
+                minification: TextureFilter::Nearest,
+                wrap_mode: egui::TextureWrapMode::Repeat,
+                mipmap_mode: None,
+            },
+        ),
+    ));
+    raster.apply_textures_delta(&delta);
+
+    let mut mesh = Mesh::with_texture(tex_id);
+    push_quad(
+        &mut mesh,
+        Rect::from_min_max(pos2(0.0, 0.0), pos2(4.0, 4.0)),
+        Rect::from_min_max(pos2(0.0, 0.0), pos2(2.0, 2.0)),
+        Color32::WHITE,
+    );
+    let prims = vec![egui::ClippedPrimitive {
+        clip_rect: Rect::from_min_max(pos2(0.0, 0.0), pos2(4.0, 4.0)),
+        primitive: egui::epaint::Primitive::Mesh(mesh),
+    }];
+    let bytes = raster.rasterize_if_dirty(4, 4, 1.0, &prims).unwrap();
+    // Row 0 wraps checkerboard [bright, dark, bright, dark] instead of clamping to the edge texel.
+    let p0 = 0;
+    let p1 = 4;
+    let p2 = 8;
+    let p3 = 12;
+    assert_eq!(bytes[p0], 240);
+    assert_eq!(bytes[p1], 20);
+    assert_eq!(bytes[p2], 240);
+    assert_eq!(bytes[p3], 20);
+}
+
+#[test]
+fn wayland_overlay_glass_surface_renders_lower_default_alpha_and_responds_to_opacity() {
+    let mut session = AppSession::new().unwrap();
+    session.overlay_mode = true;
+    session.set_slot_manual(Side::Allies, 0, truesight_core::domain::HeroId(2));
+    session.set_slot_manual(Side::Enemies, 0, truesight_core::domain::HeroId(74));
+
+    let mut app = TrueSightGuiApp::new(session, None, None);
+    let overlay_ctx = egui::Context::default();
+    let mut raster = OverlayRasterizer::new();
+
+    let render_at_opacity = |app: &mut TrueSightGuiApp,
+                             overlay_ctx: &egui::Context,
+                             raster: &mut OverlayRasterizer,
+                             opacity: f32|
+     -> (u32, u32) {
+        app.session.set_overlay_opacity(opacity);
+        let out = overlay_ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(380.0, 230.0))),
+                ..Default::default()
+            },
+            |ctx| {
+                TrueSightGuiApp::configure_visuals_for(ctx);
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(ctx, |ui| {
+                        let _ = app.render_overlay_panel_with_host(ui, OverlayHostMode::LayerShell);
+                    });
+            },
+        );
+        raster.apply_textures_delta(&out.textures_delta);
+        let prims = overlay_ctx.tessellate(out.shapes, out.pixels_per_point);
+        raster.invalidate();
+        let bytes = raster
+            .rasterize_if_dirty(380, 230, out.pixels_per_point, &prims)
+            .expect("glass overlay should rasterize");
+        // Measure translucent interior background pixels (excluding opaque borders/portraits/text).
+        let mut glass_alpha_sum = 0_u64;
+        let mut glass_count = 0_u64;
+        for y in 26..210_usize {
+            for x in 16..364_usize {
+                let off = (y * 380 + x) * 4;
+                let a = bytes[off + 3];
+                if a > 0 && a < 225 {
+                    glass_alpha_sum += u64::from(a);
+                    glass_count += 1;
+                }
+            }
+        }
+        assert!(
+            glass_count > 1000,
+            "overlay must contain broad translucent glass field"
+        );
+        let max_border_alpha = (0..380_usize)
+            .map(|x| u32::from(bytes[x * 4 + 3]))
+            .max()
+            .unwrap_or(0);
+        ((glass_alpha_sum / glass_count) as u32, max_border_alpha)
+    };
+
+    let (default_alpha, border_alpha) = render_at_opacity(
+        &mut app,
+        &overlay_ctx,
+        &mut raster,
+        crate::session::DEFAULT_OVERLAY_OPACITY,
+    );
+    assert!(
+        (120..=185).contains(&default_alpha),
+        "default glass overlay interior alpha must be noticeably more transparent than legacy 235 (expected 120..=185), got {default_alpha}"
+    );
+    assert!(
+        border_alpha >= 220,
+        "outer emerald glass frame must stay crisp even when base fill is more transparent: {border_alpha}"
+    );
+
+    let (lower_alpha, _) = render_at_opacity(&mut app, &overlay_ctx, &mut raster, 0.42);
+    assert!(
+        lower_alpha + 20 < default_alpha,
+        "lowering overlay_opacity to 0.42 must visibly reduce glass alpha ({lower_alpha} vs {default_alpha})"
+    );
 }

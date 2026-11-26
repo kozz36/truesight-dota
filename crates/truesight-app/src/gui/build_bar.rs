@@ -1,7 +1,7 @@
 use super::TrueSightGuiApp;
 use super::i18n::UiStrings;
 use super::theme::*;
-use eframe::egui::{self, Align, Layout, Margin, Rect, RichText, Sense, Stroke, vec2};
+use eframe::egui::{self, Align, Color32, Layout, Margin, Rect, RichText, Sense, Stroke, vec2};
 use truesight_core::domain::{
     BuildStep, ItemId, ItemPhase, OptionalBuildItem, counter_trait_table_patch,
 };
@@ -65,14 +65,23 @@ impl TrueSightGuiApp {
         is_next: bool,
         clicked_variant: &mut Option<(ItemId, ItemId)>,
     ) {
-        let border_color = if step.owned {
+        let fill_color = if step.owned {
+            Color32::from_rgba_unmultiplied(P_INDIGO_1.r(), P_INDIGO_1.g(), P_INDIGO_1.b(), 135)
+        } else {
+            Color32::from_rgba_unmultiplied(P_INDIGO_2.r(), P_INDIGO_2.g(), P_INDIGO_2.b(), 180)
+        };
+        let card_border = if step.owned {
             P_GEM_DEEP
         } else if is_next {
             P_GEM
         } else {
-            P_LINE
+            Color32::from_rgba_unmultiplied(P_LINE.r(), P_LINE.g(), P_LINE.b(), 145)
         };
-        let fill_color = if step.owned { P_INDIGO_1 } else { P_INDIGO_2 };
+        let icon_border = if step.owned {
+            P_GEM_DEEP
+        } else {
+            Color32::TRANSPARENT
+        };
         let (name, cost) = self
             .session
             .item_repo
@@ -85,9 +94,10 @@ impl TrueSightGuiApp {
             .fill(fill_color)
             .stroke(Stroke::new(
                 if is_next { 1.5_f32 } else { 1.0_f32 },
-                border_color,
+                card_border,
             ))
-            .inner_margin(Margin::symmetric(5, 3))
+            .corner_radius(egui::CornerRadius::same(4))
+            .inner_margin(Margin::symmetric(6, 4))
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.horizontal(|ui| {
@@ -127,7 +137,7 @@ impl TrueSightGuiApp {
                         step_tex,
                         Some(name.as_str()),
                         vec2(32.0, 24.0),
-                        border_color,
+                        icon_border,
                         step.owned,
                     );
                     ui.vertical(|ui| {
@@ -185,7 +195,13 @@ impl TrueSightGuiApp {
                                 .into(),
                         ),
                     )
-                    .fill(P_INDIGO_2)
+                    .fill(Color32::from_rgba_unmultiplied(
+                        P_INDIGO_2.r(),
+                        P_INDIGO_2.g(),
+                        P_INDIGO_2.b(),
+                        165,
+                    ))
+                    .corner_radius(egui::CornerRadius::same(3))
                     .stroke(chip_stroke)
                     .sense(if is_direct_upgrade {
                         Sense::hover()
@@ -233,11 +249,11 @@ impl TrueSightGuiApp {
         clicked_variant: &mut Option<(ItemId, ItemId)>,
     ) {
         let timing_summary = format_phase_timing_window(steps);
-        let inner_w = (col_w - 10.0).max(80.0);
+        let inner_w = (col_w - 6.0).max(80.0);
         egui::Frame::NONE
-            .fill(P_INDIGO_1)
-            .stroke(Stroke::new(1.0_f32, P_LINE))
-            .inner_margin(Margin::same(4))
+            .fill(Color32::TRANSPARENT)
+            .stroke(Stroke::NONE)
+            .inner_margin(Margin::symmetric(2, 2))
             .show(ui, |ui| {
                 ui.allocate_ui_with_layout(
                     vec2(inner_w, 0.0),
@@ -246,13 +262,21 @@ impl TrueSightGuiApp {
                         ui.set_min_width(inner_w);
                         ui.set_max_width(inner_w);
 
-                        ui.horizontal(|ui| {
+                        let hdr_resp = ui.horizontal(|ui| {
                             ui.label(RichText::new(phase_title).size(9.5).strong().color(P_CYAN));
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                ui.label(RichText::new(timing_summary).size(9.0).color(P_MUTED));
+                                ui.label(RichText::new(timing_summary).size(9.0).color(P_SILVER));
                             });
                         });
-                        ui.add_space(2.0);
+                        let rule_y = hdr_resp.response.rect.bottom() + 2.0;
+                        ui.painter().line_segment(
+                            [
+                                egui::pos2(hdr_resp.response.rect.left(), rule_y),
+                                egui::pos2(hdr_resp.response.rect.left() + inner_w, rule_y),
+                            ],
+                            Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(76, 198, 232, 72)),
+                        );
+                        ui.add_space(5.0);
 
                         if steps.is_empty() {
                             ui.label(RichText::new("—").size(9.5).color(P_MUTED));
@@ -307,11 +331,11 @@ impl TrueSightGuiApp {
         optional_items: &[OptionalBuildItem],
         section_w: f32,
     ) {
-        let inner_w = (section_w - 14.0).max(120.0);
+        let inner_w = (section_w - 6.0).max(120.0);
         egui::Frame::NONE
-            .fill(P_INDIGO_1)
-            .stroke(Stroke::new(1.0_f32, P_LINE))
-            .inner_margin(Margin::same(6))
+            .fill(Color32::TRANSPARENT)
+            .stroke(Stroke::NONE)
+            .inner_margin(Margin::symmetric(2, 4))
             .show(ui, |ui| {
                 ui.allocate_ui_with_layout(
                     vec2(inner_w, 0.0),
@@ -319,6 +343,16 @@ impl TrueSightGuiApp {
                     |ui| {
                         ui.set_min_width(inner_w);
                         ui.set_max_width(inner_w);
+                        let top_y = ui.cursor().min.y;
+                        let left_x = ui.cursor().min.x;
+                        ui.painter().line_segment(
+                            [
+                                egui::pos2(left_x, top_y),
+                                egui::pos2(left_x + inner_w, top_y),
+                            ],
+                            Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(224, 194, 96, 80)),
+                        );
+                        ui.add_space(4.0);
                         ui.horizontal(|ui| {
                             ui.label(
                                 RichText::new(tr.optional_items_label)
@@ -350,8 +384,14 @@ impl TrueSightGuiApp {
                                 let opt_tex = self.textures.items.get(&opt.item_id);
                                 let border = if opt.owned { P_GEM_DEEP } else { P_NEUTRAL };
                                 let chip_resp = egui::Frame::NONE
-                                    .fill(P_INDIGO_2)
+                                    .fill(Color32::from_rgba_unmultiplied(
+                                        P_INDIGO_2.r(),
+                                        P_INDIGO_2.g(),
+                                        P_INDIGO_2.b(),
+                                        175,
+                                    ))
                                     .stroke(Stroke::new(1.0_f32, border))
+                                    .corner_radius(egui::CornerRadius::same(4))
                                     .inner_margin(Margin::symmetric(6, 4))
                                     .show(ui, |ui| {
                                         ui.horizontal(|ui| {
@@ -361,7 +401,7 @@ impl TrueSightGuiApp {
                                                 opt_tex,
                                                 Some(name.as_str()),
                                                 vec2(28.0, 20.0),
-                                                border,
+                                                Color32::TRANSPARENT,
                                                 opt.owned,
                                             );
                                             ui.vertical(|ui| {
@@ -540,8 +580,22 @@ impl TrueSightGuiApp {
                                     .unwrap_or_else(|| (format!("Item #{}", item_id.0), 0));
                                 let tex = self.textures.items.get(&item_id);
                                 egui::Frame::NONE
-                                    .fill(P_INDIGO_2)
-                                    .stroke(Stroke::new(1.0_f32, P_LINE))
+                                    .fill(Color32::from_rgba_unmultiplied(
+                                        P_INDIGO_2.r(),
+                                        P_INDIGO_2.g(),
+                                        P_INDIGO_2.b(),
+                                        165,
+                                    ))
+                                    .stroke(Stroke::new(
+                                        1.0_f32,
+                                        Color32::from_rgba_unmultiplied(
+                                            P_LINE.r(),
+                                            P_LINE.g(),
+                                            P_LINE.b(),
+                                            135,
+                                        ),
+                                    ))
+                                    .corner_radius(egui::CornerRadius::same(4))
                                     .inner_margin(Margin::symmetric(5, 2))
                                     .show(ui, |ui| {
                                         ui.horizontal(|ui| {
@@ -551,7 +605,7 @@ impl TrueSightGuiApp {
                                                 tex,
                                                 Some(name.as_str()),
                                                 vec2(22.0, 16.0),
-                                                P_LINE,
+                                                Color32::TRANSPARENT,
                                                 false,
                                             );
                                             ui.label(
@@ -599,36 +653,72 @@ impl TrueSightGuiApp {
                             let eq = (usable_w / 3.0).floor().max(120.0);
                             (eq, eq, eq)
                         };
-                        ui.horizontal_top(|ui| {
+                        let cols_resp = ui.horizontal_top(|ui| {
                             ui.spacing_mut().item_spacing.x = col_gap;
-                            self.render_phase_column(
-                                ui,
-                                tr.phase_early,
-                                early_w,
-                                &early_steps,
-                                build.next_unowned_index,
-                                false,
-                                &mut clicked_variant,
-                            );
-                            self.render_phase_column(
-                                ui,
-                                tr.phase_core,
-                                core_w,
-                                &core_steps,
-                                build.next_unowned_index,
-                                false,
-                                &mut clicked_variant,
-                            );
-                            self.render_phase_column(
-                                ui,
-                                tr.phase_late,
-                                late_w,
-                                &late_steps,
-                                build.next_unowned_index,
-                                use_late_2x2,
-                                &mut clicked_variant,
-                            );
+                            let r1 = ui
+                                .vertical(|ui| {
+                                    self.render_phase_column(
+                                        ui,
+                                        tr.phase_early,
+                                        early_w,
+                                        &early_steps,
+                                        build.next_unowned_index,
+                                        false,
+                                        &mut clicked_variant,
+                                    );
+                                })
+                                .response
+                                .rect;
+                            let r2 = ui
+                                .vertical(|ui| {
+                                    self.render_phase_column(
+                                        ui,
+                                        tr.phase_core,
+                                        core_w,
+                                        &core_steps,
+                                        build.next_unowned_index,
+                                        false,
+                                        &mut clicked_variant,
+                                    );
+                                })
+                                .response
+                                .rect;
+                            let _ = ui
+                                .vertical(|ui| {
+                                    self.render_phase_column(
+                                        ui,
+                                        tr.phase_late,
+                                        late_w,
+                                        &late_steps,
+                                        build.next_unowned_index,
+                                        use_late_2x2,
+                                        &mut clicked_variant,
+                                    );
+                                })
+                                .response
+                                .rect;
+                            (r1.right(), r2.right())
                         });
+                        let col_rect = cols_resp.response.rect;
+                        let (split_x1, split_x2) = cols_resp.inner;
+                        let div_stroke = Stroke::new(
+                            1.0_f32,
+                            Color32::from_rgba_unmultiplied(
+                                P_LINE.r(),
+                                P_LINE.g(),
+                                P_LINE.b(),
+                                120,
+                            ),
+                        );
+                        for x in [split_x1 + col_gap * 0.5, split_x2 + col_gap * 0.5] {
+                            ui.painter().line_segment(
+                                [
+                                    egui::pos2(x, col_rect.top() + 2.0),
+                                    egui::pos2(x, col_rect.bottom() - 2.0),
+                                ],
+                                div_stroke,
+                            );
+                        }
                     } else if avail_w >= 340.0 {
                         let two_w = ((avail_w - col_gap - 4.0) / 2.0).floor().max(120.0);
                         ui.horizontal_top(|ui| {
