@@ -539,6 +539,7 @@ impl super::TrueSightGuiApp {
             return;
         }
 
+        self.overlay_viewport_sync.begin_programmatic_move();
         ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
             next.x, next.y,
         )));
@@ -809,7 +810,7 @@ impl super::TrueSightGuiApp {
                 .last_overlay_is_post_draft
                 .is_some_and(|prev| prev != is_post_draft)
             {
-                self.overlay_wm_gesture_cooldown = 2;
+                self.overlay_viewport_sync.begin_programmatic_move();
                 let min_sz = if is_post_draft {
                     egui::vec2(220.0, 104.0)
                 } else {

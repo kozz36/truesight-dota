@@ -1907,20 +1907,20 @@ impl AppSession {
         min_h_pts: f32,
     ) -> OverlayGeometry {
         let ppp = Self::sanitize_pixels_per_point(pixels_per_point);
-        let min_w_px = min_w_pts * ppp;
-        let max_w_cap_px = 840.0 * ppp;
-        let min_h_px = min_h_pts * ppp;
-        let max_h_cap_px = 720.0 * ppp;
+        let min_w_px = (min_w_pts * ppp).ceil();
+        let max_w_cap_px = (840.0 * ppp).floor();
+        let min_h_px = (min_h_pts * ppp).ceil();
+        let max_h_cap_px = (720.0 * ppp).floor();
         let min_mon_w_px = 640.0 * ppp;
         let min_mon_h_px = 480.0 * ppp;
 
         let mon_x = if monitor_px.x.is_finite() {
-            monitor_px.x
+            monitor_px.x.ceil()
         } else {
             0.0
         };
         let mon_y = if monitor_px.y.is_finite() {
-            monitor_px.y
+            monitor_px.y.ceil()
         } else {
             0.0
         };
@@ -1948,11 +1948,11 @@ impl AppSession {
         geom_px.width = raw_w.clamp(min_w_px, max_w_cap_px.min(mon_w.max(min_w_px)));
         geom_px.height = raw_h.clamp(min_h_px, max_h_cap_px.min(mon_h.max(min_h_px)));
 
-        let default_top_floor = (mon_h * 0.08).ceil().max(96.0 * ppp);
+        let default_top_floor = (mon_h * 0.08).ceil().max((96.0 * ppp).ceil());
         let raw_x = if geom_px.x.is_finite() {
             geom_px.x
         } else {
-            mon_x + 24.0 * ppp
+            mon_x + (24.0 * ppp).ceil()
         };
         let raw_y = if geom_px.y.is_finite() {
             geom_px.y
@@ -1960,8 +1960,8 @@ impl AppSession {
             mon_y + default_top_floor
         };
 
-        let max_x = (mon_x + mon_w - geom_px.width).max(mon_x);
-        let max_y = (mon_y + mon_h - geom_px.height).max(mon_y);
+        let max_x = (mon_x + mon_w - geom_px.width).floor().max(mon_x);
+        let max_y = (mon_y + mon_h - geom_px.height).floor().max(mon_y);
         geom_px.x = raw_x.clamp(mon_x, max_x);
         geom_px.y = raw_y.clamp(mon_y, max_y);
 
@@ -1976,8 +1976,8 @@ impl AppSession {
             let overlaps_x = geom_px.x < cx + cw && geom_px.x + geom_px.width > cx;
             let overlaps_y = geom_px.y < cy + ch && geom_px.y + geom_px.height > cy;
             if overlaps_x && overlaps_y {
-                let below_y = cy + ch;
-                let above_y = cy - geom_px.height;
+                let below_y = (cy + ch).ceil();
+                let above_y = (cy - geom_px.height).floor();
                 if below_y <= max_y {
                     geom_px.y = below_y.max(mon_y);
                 } else if above_y >= mon_y {

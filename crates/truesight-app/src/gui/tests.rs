@@ -4266,6 +4266,356 @@ fn direct_upgrade_chip_in_build_bar_and_overlay_is_informational_and_preserves_o
 }
 
 #[test]
+fn live_overlay_viewport_suppresses_corrective_commands_during_active_wm_resize_and_settles() {
+    let mut session = AppSession::new().unwrap();
+    session.overlay_mode = true;
+    session.set_known_monitors(vec![crate::session::MonitorRect::new(
+        0.0, 0.0, 1920.0, 1080.0,
+    )]);
+    session.overlay_geometry = crate::session::OverlayGeometry {
+        x: 1500.0,
+        y: 780.0,
+        width: 380.0,
+        height: 230.0,
+        click_through: false,
+    };
+    let mut app = TrueSightGuiApp::new(session, None, None);
+    let ctx = egui::Context::default();
+
+    // Simulate BeginResize(SouthEast) having armed WM modal resize (pointer cleared by egui).
+    app.overlay_viewport_sync.begin_wm_gesture();
+
+    let run_sync_tick_with_events =
+        |app: &mut TrueSightGuiApp, x: f32, y: f32, w: f32, h: f32, events: Vec<egui::Event>| {
+            let mut raw_input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(w, h))),
+                events,
+                ..Default::default()
+            };
+            raw_input.viewports.insert(
+                egui::ViewportId::ROOT,
+                egui::ViewportInfo {
+                    monitor_size: Some(vec2(1920.0, 1080.0)),
+                    native_pixels_per_point: Some(1.0),
+                    outer_rect: Some(Rect::from_min_size(pos2(x, y), vec2(w, h))),
+                    inner_rect: Some(Rect::from_min_size(pos2(x, y), vec2(w, h))),
+                    ..Default::default()
+                },
+            );
+            let out = ctx.run(raw_input, |vctx| {
+                app.sync_live_overlay_viewport_geometry(vctx);
+            });
+            out.viewport_output
+                .get(&egui::ViewportId::ROOT)
+                .map(|v| v.commands.clone())
+                .unwrap_or_default()
+        };
+
+    // 8 consecutive frames of OS WM_SIZING expansion past the bottom-right monitor edge:
+    // sync must NOT emit fighting OuterPosition or InnerSize commands while size changes.
+    for step in 0..8 {
+        let w = 380.0 + (step as f32) * 14.0;
+        let h = 230.0 + (step as f32) * 18.0;
+        let cmds = run_sync_tick_with_events(&mut app, 1500.0, 780.0, w, h, Vec::new());
+        assert!(
+            !cmds.iter().any(|c| matches!(
+                c,
+                egui::ViewportCommand::OuterPosition(_) | egui::ViewportCommand::InnerSize(_)
+            )),
+            "tick {step}: active OS resize must suppress fighting viewport commands, got: {cmds:?}"
+        );
+    }
+
+    // Holding the expanded rectangle steady WITHOUT releasing the native grab must keep
+    // clamping suppressed across arbitrary idle ticks (user pauses mid-resize).
+    let final_w = 380.0 + 7.0 * 14.0;
+    let final_h = 230.0 + 7.0 * 18.0;
+    for hold_tick in 0..10 {
+        let cmds = run_sync_tick_with_events(&mut app, 1500.0, 780.0, final_w, final_h, Vec::new());
+        assert!(
+            !cmds.iter().any(|c| matches!(
+                c,
+                egui::ViewportCommand::OuterPosition(_) | egui::ViewportCommand::InnerSize(_)
+            )),
+            "hold_tick {hold_tick}: held pause before release must keep clamp suppressed, got: {cmds:?}"
+        );
+    }
+
+    // Once the user releases (or OS modal resize returns control to pointer events), 5 steady
+    // frames let the settle window flush and emit 1 final clamp command with 0 oscillation.
+    let mut settled_cmds = Vec::new();
+    for tick in 0..6 {
+        let events = if tick == 0 {
+            vec![egui::Event::PointerButton {
+                pos: pos2(10.0, 10.0),
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }]
+        } else {
+            Vec::new()
+        };
+        let cmds = run_sync_tick_with_events(&mut app, 1500.0, 780.0, final_w, final_h, events);
+        settled_cmds.extend(cmds);
+    }
+    let pos_cmds = settled_cmds
+        .iter()
+        .filter(|c| matches!(c, egui::ViewportCommand::OuterPosition(_)))
+        .count();
+    assert_eq!(
+        pos_cmds, 1,
+        "after WM resize settles post-release, sync must emit exactly 1 final OuterPosition clamp: {settled_cmds:?}"
+    );
+    assert!(
+        app.session.overlay_geometry.y + app.session.overlay_geometry.height <= 1080.0 + 0.5,
+        "clamped overlay must fit inside monitor height after settle: {:?}",
+        app.session.overlay_geometry
+    );
+}
+
+#[test]
+fn live_overlay_viewport_resumes_clamp_when_pointer_resumes_after_held_pause() {
+    let mut session = AppSession::new().unwrap();
+    session.overlay_mode = true;
+    session.set_known_monitors(vec![crate::session::MonitorRect::new(
+        0.0, 0.0, 1920.0, 1080.0,
+    )]);
+    session.overlay_geometry = crate::session::OverlayGeometry {
+        x: 1500.0,
+        y: 780.0,
+        width: 478.0,
+        height: 356.0,
+        click_through: false,
+    };
+    let mut app = TrueSightGuiApp::new(session, None, None);
+    let ctx = egui::Context::default();
+    app.overlay_viewport_sync.begin_wm_gesture();
+
+    let run_tick = |app: &mut TrueSightGuiApp, events: Vec<egui::Event>| {
+        let mut raw_input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(478.0, 356.0))),
+            events,
+            ..Default::default()
+        };
+        raw_input.viewports.insert(
+            egui::ViewportId::ROOT,
+            egui::ViewportInfo {
+                monitor_size: Some(vec2(1920.0, 1080.0)),
+                native_pixels_per_point: Some(1.0),
+                outer_rect: Some(Rect::from_min_size(pos2(1500.0, 780.0), vec2(478.0, 356.0))),
+                inner_rect: Some(Rect::from_min_size(pos2(1500.0, 780.0), vec2(478.0, 356.0))),
+                ..Default::default()
+            },
+        );
+        ctx.run(raw_input, |vctx| {
+            app.sync_live_overlay_viewport_geometry(vctx);
+        })
+        .viewport_output
+        .get(&egui::ViewportId::ROOT)
+        .map(|v| v.commands.clone())
+        .unwrap_or_default()
+    };
+
+    for _ in 0..8 {
+        let cmds = run_tick(&mut app, Vec::new());
+        assert!(!cmds.iter().any(|c| matches!(
+            c,
+            egui::ViewportCommand::OuterPosition(_) | egui::ViewportCommand::InnerSize(_)
+        )));
+    }
+
+    // Cursor leave (`PointerGone` / WM_MOUSELEAVE) during a held pause must NOT end the native grab.
+    for tick in 0..6 {
+        let events = if tick == 0 {
+            vec![egui::Event::PointerGone]
+        } else {
+            Vec::new()
+        };
+        let cmds = run_tick(&mut app, events);
+        assert!(
+            !cmds.iter().any(|c| matches!(
+                c,
+                egui::ViewportCommand::OuterPosition(_) | egui::ViewportCommand::InnerSize(_)
+            )),
+            "tick {tick}: PointerGone without button release must keep clamp suppressed: {cmds:?}"
+        );
+    }
+
+    // Windows WM_SIZING consumes WM_LBUTTONUP when exiting modal resize; cursor motion resumes instead.
+    let mut post_move_cmds = Vec::new();
+    for tick in 0..6 {
+        let events = if tick == 0 {
+            vec![egui::Event::PointerMoved(pos2(20.0, 20.0))]
+        } else {
+            Vec::new()
+        };
+        post_move_cmds.extend(run_tick(&mut app, events));
+    }
+    assert!(
+        post_move_cmds
+            .iter()
+            .any(|c| matches!(c, egui::ViewportCommand::OuterPosition(_))),
+        "resumed pointer motion after WM exit must settle and clamp once: {post_move_cmds:?}"
+    );
+}
+
+#[test]
+fn live_overlay_viewport_suppresses_unannounced_continuous_os_resize_motion() {
+    let mut session = AppSession::new().unwrap();
+    session.overlay_mode = true;
+    session.set_known_monitors(vec![crate::session::MonitorRect::new(
+        0.0, 0.0, 1920.0, 1080.0,
+    )]);
+    session.overlay_geometry = crate::session::OverlayGeometry {
+        x: 1540.0,
+        y: 800.0,
+        width: 380.0,
+        height: 230.0,
+        click_through: false,
+    };
+    let mut app = TrueSightGuiApp::new(session, None, None);
+    let ctx = egui::Context::default();
+
+    let run_sync_tick = |app: &mut TrueSightGuiApp, w: f32, h: f32| {
+        let mut raw_input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(w, h))),
+            ..Default::default()
+        };
+        raw_input.viewports.insert(
+            egui::ViewportId::ROOT,
+            egui::ViewportInfo {
+                monitor_size: Some(vec2(1920.0, 1080.0)),
+                native_pixels_per_point: Some(1.0),
+                outer_rect: Some(Rect::from_min_size(pos2(1540.0, 800.0), vec2(w, h))),
+                inner_rect: Some(Rect::from_min_size(pos2(1540.0, 800.0), vec2(w, h))),
+                ..Default::default()
+            },
+        );
+        ctx.run(raw_input, |vctx| {
+            app.sync_live_overlay_viewport_geometry(vctx);
+        })
+        .viewport_output
+        .get(&egui::ViewportId::ROOT)
+        .map(|v| v.commands.clone())
+        .unwrap_or_default()
+    };
+
+    // Frame 0 baseline inside monitor, frames 1..5 simulate continuous native OS border resize
+    // past the right/bottom edge without going through our resize handle.
+    let _ = run_sync_tick(&mut app, 380.0, 230.0);
+    let mut late_motion_cmds = Vec::new();
+    for step in 1..=5 {
+        let w = 380.0 + (step as f32) * 16.0;
+        let h = 230.0 + (step as f32) * 16.0;
+        let cmds = run_sync_tick(&mut app, w, h);
+        if step >= 2 {
+            late_motion_cmds.extend(cmds);
+        }
+    }
+    assert!(
+        !late_motion_cmds.iter().any(|c| matches!(
+            c,
+            egui::ViewportCommand::OuterPosition(_) | egui::ViewportCommand::InnerSize(_)
+        )),
+        "continuous OS resize motion must pause corrective commands rather than vibrating: {late_motion_cmds:?}"
+    );
+}
+
+#[test]
+fn live_overlay_viewport_fractional_dpi_and_boundary_clamp_do_not_oscillate() {
+    for ppp in [1.25_f32, 1.5_f32, 1.75_f32] {
+        let mon_w_px = (1920.0_f32 * ppp).round();
+        let mon_h_px = (1080.0_f32 * ppp).round();
+        let mut session = AppSession::new().unwrap();
+        session.overlay_mode = true;
+        session.set_known_monitors(vec![crate::session::MonitorRect::new(
+            0.0, 0.0, mon_w_px, mon_h_px,
+        )]);
+        // Active Dota capture strip on top of the monitor, forcing lower clamp boundary.
+        session.set_active_capture_strip_rect(Some((
+            (180.0 * ppp).round(),
+            (20.0 * ppp).round(),
+            (1560.0 * ppp).round(),
+            (72.0 * ppp).round(),
+        )));
+        session.overlay_geometry = crate::session::OverlayGeometry {
+            x: 1545.0,
+            y: 45.0,
+            width: 391.0,
+            height: 241.0,
+            click_through: false,
+        };
+        let mut app = TrueSightGuiApp::new(session, None, None);
+        let ctx = egui::Context::default();
+
+        // Simulate Win32 integer-pixel SetWindowPos quantization + 1px DWM outer vs inner delta.
+        let quantize = |v: f32| (v * ppp).floor() / ppp;
+        let mut live_x = quantize(1545.3);
+        let mut live_y = quantize(45.2);
+        let mut live_w = quantize(391.4);
+        let mut live_h = quantize(241.3);
+        let mut total_pos_cmds = 0usize;
+        let mut total_size_cmds = 0usize;
+
+        for tick in 0..15 {
+            let dwm_pad = if tick % 2 == 0 { 1.0 / ppp } else { 0.0 };
+            let mut raw_input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(live_w, live_h))),
+                ..Default::default()
+            };
+            raw_input.viewports.insert(
+                egui::ViewportId::ROOT,
+                egui::ViewportInfo {
+                    monitor_size: Some(vec2(mon_w_px / ppp, mon_h_px / ppp)),
+                    native_pixels_per_point: Some(ppp),
+                    outer_rect: Some(Rect::from_min_size(
+                        pos2(live_x, live_y),
+                        vec2(live_w + dwm_pad, live_h + dwm_pad),
+                    )),
+                    inner_rect: Some(Rect::from_min_size(
+                        pos2(live_x, live_y),
+                        vec2(live_w, live_h),
+                    )),
+                    ..Default::default()
+                },
+            );
+            let out = ctx.run(raw_input, |vctx| {
+                app.sync_live_overlay_viewport_geometry(vctx);
+            });
+            let cmds = out
+                .viewport_output
+                .get(&egui::ViewportId::ROOT)
+                .map(|v| v.commands.clone())
+                .unwrap_or_default();
+            for cmd in cmds {
+                match cmd {
+                    egui::ViewportCommand::OuterPosition(p) => {
+                        total_pos_cmds += 1;
+                        live_x = quantize(p.x);
+                        live_y = quantize(p.y);
+                    }
+                    egui::ViewportCommand::InnerSize(s) => {
+                        total_size_cmds += 1;
+                        live_w = quantize(s.x);
+                        live_h = quantize(s.y);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        assert!(
+            total_pos_cmds <= 1,
+            "ppp={ppp}: fractional DPI quantization must converge with <=1 OuterPosition command, emitted {total_pos_cmds}"
+        );
+        assert!(
+            total_size_cmds <= 1,
+            "ppp={ppp}: fractional DPI quantization must converge with <=1 InnerSize command, emitted {total_size_cmds}"
+        );
+    }
+}
+
+#[test]
 fn gemstone_micro_grain_texture_is_deterministic_tileable_and_subtle() {
     let img_a = super::surfaces::generate_micro_grain_image();
     let img_b = super::surfaces::generate_micro_grain_image();

@@ -94,125 +94,6 @@ pub(super) fn build_overlay_viewport_builder(
 }
 
 impl TrueSightGuiApp {
-    /// Reads live overlay viewport position, size, and monitor bounds, clamps them against
-    /// the active monitor and top-bar capture strip, enforces any correction via viewport commands,
-    /// and persists updated geometry to `ui_config.toml`.
-    pub(super) fn sync_live_overlay_viewport_geometry(&mut self, vctx: &egui::Context) {
-        if !self.native_monitors_probed
-            && self.session.known_monitors.is_empty()
-            && self.session.active_monitor_rect.is_none()
-        {
-            self.session.refresh_native_monitors();
-            self.native_monitors_probed = true;
-        }
-
-        if self.overlay_wm_gesture_cooldown > 0 {
-            self.overlay_wm_gesture_cooldown -= 1;
-        }
-
-        let zoom_factor = vctx.zoom_factor();
-        let (vp_monitor_size, vp_outer_rect, vp_inner_rect, vp_native_ppp, ctx_ppp, screen_rect) =
-            vctx.input(|i| {
-                let vp = i.viewport();
-                (
-                    vp.monitor_size,
-                    vp.outer_rect,
-                    vp.inner_rect,
-                    vp.native_pixels_per_point,
-                    i.pixels_per_point(),
-                    i.screen_rect(),
-                )
-            });
-        let ppp = crate::session::AppSession::resolve_effective_pixels_per_point(
-            vp_native_ppp,
-            ctx_ppp,
-            zoom_factor,
-        );
-
-        let fallback_monitor_size_pts = vp_monitor_size
-            .map(|s| (s.x, s.y))
-            .filter(|(w, h)| *w > 0.0 && *h > 0.0);
-        let fallback_monitor_size_px = fallback_monitor_size_pts.map(|(w, h)| (w * ppp, h * ppp));
-
-        let is_post_draft = self.session.is_post_draft_build_view();
-        let active_geom = self.session.active_overlay_geometry();
-        let (min_w_pts, min_h_pts) = if is_post_draft {
-            (220.0, 104.0)
-        } else {
-            (280.0, 160.0)
-        };
-
-        let has_live_position = vp_outer_rect.is_some() || vp_inner_rect.is_some();
-        let (x, y) = vp_outer_rect
-            .or(vp_inner_rect)
-            .map(|r| (r.min.x, r.min.y))
-            .unwrap_or((active_geom.x, active_geom.y));
-
-        let live_screen_size = {
-            let s = screen_rect.size();
-            (s.x > 0.0 && s.y > 0.0).then_some((s.x, s.y))
-        };
-        let (width, height) = vp_inner_rect
-            .or(vp_outer_rect)
-            .map(|r| (r.width(), r.height()))
-            .or(live_screen_size)
-            .unwrap_or((active_geom.width, active_geom.height));
-
-        let candidate_pts = OverlayGeometry {
-            x,
-            y,
-            width,
-            height,
-            click_through: active_geom.click_through,
-        };
-        let candidate_px = candidate_pts.scale_to_desktop_pixels(ppp);
-        let monitor_rect_px = self.session.resolve_monitor_for_overlay(candidate_px);
-        let clamped_px =
-            crate::session::AppSession::clamp_overlay_geometry_with_optional_monitor_min_scaled(
-                candidate_px,
-                monitor_rect_px,
-                fallback_monitor_size_px,
-                self.session.active_capture_strip_rect,
-                ppp,
-                min_w_pts,
-                min_h_pts,
-            );
-        let clamped_pts = clamped_px.scale_to_egui_points(ppp);
-
-        // Avoid sending corrective position/size commands while a drag/resize is armed or settling.
-        let actively_interacting = self.overlay_drag_armed.is_some()
-            || self.overlay_resize_armed.is_some()
-            || self.overlay_wm_gesture_cooldown > 0
-            || vctx.input(|i| i.pointer.primary_down());
-        if !actively_interacting {
-            if has_live_position
-                && ((clamped_pts.x - candidate_pts.x).abs() > 0.5
-                    || (clamped_pts.y - candidate_pts.y).abs() > 0.5)
-            {
-                vctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
-                    clamped_pts.x,
-                    clamped_pts.y,
-                )));
-            }
-            if (clamped_pts.width - candidate_pts.width).abs() > 0.5
-                || (clamped_pts.height - candidate_pts.height).abs() > 0.5
-            {
-                vctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
-                    clamped_pts.width,
-                    clamped_pts.height,
-                )));
-            }
-
-            if (clamped_pts.x - active_geom.x).abs() > 0.5
-                || (clamped_pts.y - active_geom.y).abs() > 0.5
-                || (clamped_pts.width - active_geom.width).abs() > 0.5
-                || (clamped_pts.height - active_geom.height).abs() > 0.5
-            {
-                self.session.set_active_overlay_geometry(clamped_pts);
-            }
-        }
-    }
-
     /// Renders the compact overlay panel for both draft-phase and post-draft item build views.
     pub(super) fn render_overlay_panel(&mut self, ui: &mut egui::Ui) -> OverlayPanelOutput {
         self.render_overlay_panel_with_host(ui, OverlayHostMode::Viewport)
@@ -805,7 +686,7 @@ impl TrueSightGuiApp {
                         {
                             drag_started = true;
                             self.overlay_drag_armed = None;
-                            self.overlay_wm_gesture_cooldown = 2;
+                            self.overlay_viewport_sync.begin_wm_gesture();
                             ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
                             ui.ctx().stop_dragging();
                             ui.ctx()
@@ -816,7 +697,7 @@ impl TrueSightGuiApp {
                         {
                             resize_started = true;
                             self.overlay_resize_armed = None;
-                            self.overlay_wm_gesture_cooldown = 2;
+                            self.overlay_viewport_sync.begin_wm_gesture();
                             ui.ctx()
                                 .send_viewport_cmd(egui::ViewportCommand::BeginResize(
                                     egui::ResizeDirection::SouthEast,

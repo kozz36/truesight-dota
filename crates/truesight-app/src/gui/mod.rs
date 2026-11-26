@@ -11,6 +11,7 @@ mod overlay_build;
 mod overlay_layer_tests;
 #[cfg(any(target_os = "linux", test))]
 mod overlay_raster;
+mod overlay_sync;
 mod suggested_table;
 mod surfaces;
 mod team_card;
@@ -94,7 +95,7 @@ pub struct TrueSightGuiApp {
     pub(super) overlay_passthrough_repaint_frames: u8,
     pub(super) overlay_drag_armed: Option<egui::Pos2>,
     pub(super) overlay_resize_armed: Option<egui::Pos2>,
-    pub(super) overlay_wm_gesture_cooldown: u8,
+    pub(super) overlay_viewport_sync: overlay_sync::OverlayViewportSyncState,
     pub(super) last_overlay_is_post_draft: Option<bool>,
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     overlay_backend: overlay_backend::OverlayBackendKind,
@@ -189,7 +190,7 @@ impl TrueSightGuiApp {
             overlay_passthrough_repaint_frames: 0,
             overlay_drag_armed: None,
             overlay_resize_armed: None,
-            overlay_wm_gesture_cooldown: 0,
+            overlay_viewport_sync: overlay_sync::OverlayViewportSyncState::default(),
             last_overlay_is_post_draft: None,
             overlay_backend: overlay_backend::OverlayBackendKind::EframeViewport,
             overlay_ctx: egui::Context::default(),
@@ -688,7 +689,7 @@ impl TrueSightGuiApp {
             self.overlay_passthrough_repaint_frames = 0;
             self.overlay_drag_armed = None;
             self.overlay_resize_armed = None;
-            self.overlay_wm_gesture_cooldown = 0;
+            self.overlay_viewport_sync.reset();
             self.last_overlay_is_post_draft = None;
         }
 
