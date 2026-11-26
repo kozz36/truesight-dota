@@ -5500,3 +5500,49 @@ fn set_ally_faction_clears_stale_build_view_hero_and_refreshes_uncached_team_ite
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+#[test]
+fn pass_hotkey_parses_formats_portal_triggers_and_persists_in_ui_config() {
+    use crate::session::{PassHotkey, PassHotkeyKey};
+    use truesight_adapters::sync::LocalCacheManager;
+
+    let def = PassHotkey::default();
+    assert_eq!(def.format_label(), "Ctrl+Shift+T");
+    assert_eq!(def.to_portal_trigger(), "CTRL+SHIFT+t");
+
+    let parsed = PassHotkey::parse("ctrl + alt + f10").expect("Ctrl+Alt+F10 must parse");
+    assert_eq!(
+        parsed,
+        PassHotkey {
+            ctrl: true,
+            alt: true,
+            shift: false,
+            key: PassHotkeyKey::F10,
+        }
+    );
+    assert_eq!(parsed.format_label(), "Ctrl+Alt+F10");
+    assert_eq!(parsed.to_portal_trigger(), "CTRL+ALT+F10");
+
+    // Reject unmodified keys so single-key Dota 2 bindings can never be hijacked.
+    assert_eq!(PassHotkey::parse("T"), None);
+    assert_eq!(PassHotkey::parse("F9"), None);
+    assert_eq!(PassHotkey::parse("Ctrl+"), None);
+    assert_eq!(PassHotkey::parse(""), None);
+
+    let tmp_dir = std::env::temp_dir().join(format!("ts_hotkey_cfg_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    let cfg_path = tmp_dir.join("config.toml");
+    let mgr = LocalCacheManager::with_optional_account(tmp_dir.clone(), None);
+    let mut session = AppSession::with_cache_and_config(mgr, Some(cfg_path.clone())).unwrap();
+    assert_eq!(session.pass_hotkey, PassHotkey::default());
+
+    let custom = PassHotkey::parse("Ctrl+Alt+K").unwrap();
+    session.set_pass_hotkey(custom);
+    let mgr2 = LocalCacheManager::with_optional_account(tmp_dir.clone(), None);
+    let reloaded = AppSession::with_cache_and_config(mgr2, Some(cfg_path)).unwrap();
+    assert_eq!(reloaded.pass_hotkey, custom);
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
