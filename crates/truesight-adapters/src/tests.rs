@@ -2104,7 +2104,7 @@ fn alt_portrait_atlas_loads_verified_variants_and_rejects_malformed_headers() {
     let alt_atlas = parse_hero_alt_atlas().expect("embedded alt portrait atlas must load");
     assert_eq!(alt_atlas.width, 64);
     assert_eq!(alt_atlas.height, 36);
-    assert_eq!(alt_atlas.entries.len(), 49);
+    assert_eq!(alt_atlas.entries.len(), 54);
 
     let count_for = |id: u16| -> usize {
         alt_atlas
@@ -2125,6 +2125,23 @@ fn alt_portrait_atlas_loads_verified_variants_and_rejects_malformed_headers() {
         "Crystal Maiden must include alt1 and persona1"
     );
     assert_eq!(count_for(91), 1, "Io/Wisp must include Companion Cube alt");
+    assert_eq!(
+        count_for(2),
+        2,
+        "Axe must include Axe Unleashed and Automaton Persona"
+    );
+    assert_eq!(count_for(10), 1, "Morphling must include Automaton Persona");
+    assert_eq!(
+        count_for(99),
+        1,
+        "Bristleback must include Automaton Persona"
+    );
+    assert_eq!(
+        count_for(104),
+        2,
+        "Legion Commander must include Blades of Voth Domosh and Automaton Persona"
+    );
+    assert_eq!(count_for(111), 1, "Oracle must include Automaton Persona");
 
     assert!(parse_hero_alt_atlas_from_slice(b"NOPE").is_none());
     let mut bad_magic = crate::hero_alt_atlas::HERO_ALT_ATLAS_BYTES[..10].to_vec();
@@ -2300,7 +2317,7 @@ fn vision_catalog_matches_all_arcana_and_persona_portraits_across_layouts() {
 }
 
 #[test]
-fn vision_pickphase_and_ingame_adapter_detect_all_49_arcana_and_persona_variants() {
+fn vision_pickphase_and_ingame_adapter_detect_all_54_arcana_and_persona_variants() {
     use crate::hero_alt_atlas::parse_hero_alt_atlas;
     use crate::vision::{
         HeroVisionCatalog, RgbFrame, ScreenFrameSource, TopBarSlotRect, VisionCaptureAdapter,
