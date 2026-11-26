@@ -93,6 +93,8 @@ pub(super) struct HeroTextureSet {
 pub(super) struct GuiTextureCache {
     pub(super) initialized: bool,
     pub(super) gem: Option<TextureHandle>,
+    pub(super) grain: Option<TextureHandle>,
+    pub(super) glow: Option<TextureHandle>,
     pub(super) heroes: HashMap<HeroId, HeroTextureSet>,
     pub(super) items: HashMap<ItemId, TextureHandle>,
 }
@@ -103,6 +105,24 @@ impl GuiTextureCache {
             return;
         }
         self.initialized = true;
+        let grain_img = super::surfaces::generate_micro_grain_image();
+        let grain_tex = ctx.load_texture(
+            "truesight_gem_grain",
+            grain_img,
+            super::surfaces::micro_grain_texture_options(),
+        );
+        super::surfaces::store_gem_grain_texture_id(ctx, grain_tex.id());
+        self.grain = Some(grain_tex);
+
+        let glow_img = super::surfaces::generate_radial_glow_image();
+        let glow_tex = ctx.load_texture(
+            "truesight_gem_glow",
+            glow_img,
+            super::surfaces::radial_glow_texture_options(),
+        );
+        super::surfaces::store_gem_glow_texture_id(ctx, glow_tex.id());
+        self.glow = Some(glow_tex);
+
         if let Some(atlas) = parse_hero_atlas() {
             let gem_img =
                 egui::ColorImage::from_rgb([atlas.gem_width, atlas.gem_height], &atlas.gem_rgb);
@@ -195,32 +215,49 @@ pub(super) fn uv_square_crop() -> Rect {
     uv_aspect_crop(vec2(1.0, 1.0))
 }
 
+fn hud_card_with_mode(
+    ui: &mut egui::Ui,
+    fill_height: bool,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) -> Rect {
+    let radius = CornerRadius::same(5);
+    let bg_idx = ui.painter().add(Shape::Noop);
+    let prepared = egui::Frame::NONE
+        .fill(Color32::TRANSPARENT)
+        .stroke(Stroke::NONE)
+        .corner_radius(radius)
+        .inner_margin(Margin::same(10))
+        .show(ui, |ui| {
+            if fill_height {
+                ui.set_min_size(ui.available_size());
+            } else {
+                ui.set_min_width(ui.available_width());
+            }
+            add_contents(ui);
+        });
+    let rect = prepared.response.rect;
+    let grain_id = super::surfaces::gem_grain_texture_id(ui.ctx());
+    let glow_id = super::surfaces::gem_glow_texture_id(ui.ctx());
+    ui.painter().set(
+        bg_idx,
+        super::surfaces::build_gemstone_card_background(rect, grain_id, glow_id, radius),
+    );
+    ui.painter().rect_stroke(
+        rect,
+        radius,
+        Stroke::new(1.0_f32, P_LINE),
+        StrokeKind::Inside,
+    );
+    paint_hud_corner_ticks(ui.painter(), rect.shrink(1.0), P_GEM);
+    rect
+}
+
 pub(super) fn hud_card(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) -> Rect {
-    let frame = egui::Frame::NONE
-        .fill(P_INDIGO_1)
-        .stroke(Stroke::new(1.0_f32, P_LINE))
-        .corner_radius(CornerRadius::same(2))
-        .inner_margin(Margin::same(10));
-    let prepared = frame.show(ui, |ui| {
-        ui.set_min_width(ui.available_width());
-        add_contents(ui);
-    });
-    paint_hud_corner_ticks(ui.painter(), prepared.response.rect, P_GEM);
-    prepared.response.rect
+    hud_card_with_mode(ui, false, add_contents)
 }
 
 pub(super) fn hud_card_fill(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) -> Rect {
-    let frame = egui::Frame::NONE
-        .fill(P_INDIGO_1)
-        .stroke(Stroke::new(1.0_f32, P_LINE))
-        .corner_radius(CornerRadius::same(2))
-        .inner_margin(Margin::same(10));
-    let prepared = frame.show(ui, |ui| {
-        ui.set_min_size(ui.available_size());
-        add_contents(ui);
-    });
-    paint_hud_corner_ticks(ui.painter(), prepared.response.rect, P_GEM);
-    prepared.response.rect
+    hud_card_with_mode(ui, true, add_contents)
 }
 
 pub(super) fn hud_modal_frame(ctx: &egui::Context) -> egui::Frame {
@@ -327,12 +364,14 @@ pub(super) fn paint_item_icon_with_fallback(
             );
         }
     }
-    painter.rect_stroke(
-        rect,
-        0.0,
-        Stroke::new(1.0_f32, border_color),
-        StrokeKind::Inside,
-    );
+    if border_color != Color32::TRANSPARENT {
+        painter.rect_stroke(
+            rect,
+            0.0,
+            Stroke::new(1.0_f32, border_color),
+            StrokeKind::Inside,
+        );
+    }
 }
 
 pub(super) fn paint_item_icon_named(

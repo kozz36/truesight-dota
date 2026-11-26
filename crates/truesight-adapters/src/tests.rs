@@ -2104,7 +2104,7 @@ fn alt_portrait_atlas_loads_verified_variants_and_rejects_malformed_headers() {
     let alt_atlas = parse_hero_alt_atlas().expect("embedded alt portrait atlas must load");
     assert_eq!(alt_atlas.width, 64);
     assert_eq!(alt_atlas.height, 36);
-    assert_eq!(alt_atlas.entries.len(), 49);
+    assert_eq!(alt_atlas.entries.len(), 54);
 
     let count_for = |id: u16| -> usize {
         alt_atlas
@@ -2125,6 +2125,23 @@ fn alt_portrait_atlas_loads_verified_variants_and_rejects_malformed_headers() {
         "Crystal Maiden must include alt1 and persona1"
     );
     assert_eq!(count_for(91), 1, "Io/Wisp must include Companion Cube alt");
+    assert_eq!(
+        count_for(2),
+        2,
+        "Axe must include Axe Unleashed and Automaton Persona"
+    );
+    assert_eq!(count_for(10), 1, "Morphling must include Automaton Persona");
+    assert_eq!(
+        count_for(99),
+        1,
+        "Bristleback must include Automaton Persona"
+    );
+    assert_eq!(
+        count_for(104),
+        2,
+        "Legion Commander must include Blades of Voth Domosh and Automaton Persona"
+    );
+    assert_eq!(count_for(111), 1, "Oracle must include Automaton Persona");
 
     assert!(parse_hero_alt_atlas_from_slice(b"NOPE").is_none());
     let mut bad_magic = crate::hero_alt_atlas::HERO_ALT_ATLAS_BYTES[..10].to_vec();
@@ -2300,7 +2317,7 @@ fn vision_catalog_matches_all_arcana_and_persona_portraits_across_layouts() {
 }
 
 #[test]
-fn vision_pickphase_and_ingame_adapter_detect_all_49_arcana_and_persona_variants() {
+fn vision_pickphase_and_ingame_adapter_detect_all_54_arcana_and_persona_variants() {
     use crate::hero_alt_atlas::parse_hero_alt_atlas;
     use crate::vision::{
         HeroVisionCatalog, RgbFrame, ScreenFrameSource, TopBarSlotRect, VisionCaptureAdapter,
@@ -8494,4 +8511,95 @@ fn pickphase_ranked_reveal_sequence_and_shorter_cards_detect_spirit_breaker_and_
             assert!(locked.contains(&(Side::Enemies, 1, HeroId(14)))); // Pudge
         }
     }
+}
+
+#[test]
+fn pickphase_ranked_medal_banner_and_slanted_cards_detect_luna_last_pick_without_phantoms() {
+    use crate::vision::{
+        HeroVisionCatalog, RgbFrame, ScreenFrameSource, VisionCaptureAdapter,
+        compute_pickphase_topbar_slot_rects, parse_ppm_p6, pickphase_upper_core_rect,
+    };
+    use std::collections::VecDeque;
+    use truesight_core::domain::Side;
+    use truesight_core::ports::{DraftEvent, DraftEventSource};
+
+    let (rad_2k, dire_2k) = compute_pickphase_topbar_slot_rects(2560, 1440);
+    let core_2k = pickphase_upper_core_rect(rad_2k[0]);
+    assert_eq!(rad_2k[0].x, 292, "Radiant slot 0 must align at +12px");
+    assert_eq!(rad_2k[0].width, 126, "PickPhase width must cover 126px");
+    assert_eq!(dire_2k[0].x, 1477, "Dire slot 0 must align at +2px");
+    assert_eq!(core_2k.height, 50, "Upper core must preserve 22/36 of 82px");
+
+    struct QueueSource(VecDeque<RgbFrame>);
+    impl ScreenFrameSource for QueueSource {
+        fn capture_frame(&mut self) -> Result<Option<RgbFrame>, truesight_core::ports::PortError> {
+            Ok(self.0.pop_front())
+        }
+    }
+
+    let load_ranked_strip = |ppm: &[u8]| -> RgbFrame {
+        let strip = parse_ppm_p6(ppm).expect("anonymized Ranked 2-2-1 topbar PPM must decode");
+        assert_eq!((strip.width, strip.height), (1279, 47));
+        RgbFrame::with_source_height(strip.width, strip.height, 722, strip.rgb)
+    };
+
+    // Anonymized top-bar-only captures (y = 0..47, no player names) from the live Ranked 2-2-1
+    // session where the previous 118px (+18/+8) PickPhase crop missed Luna (#48) on Wave 3.
+    let w1 = load_ranked_strip(include_bytes!("../tests/fixtures/ranked_221_w1.ppm"));
+    let w2 = load_ranked_strip(include_bytes!("../tests/fixtures/ranked_221_w2.ppm"));
+    let w3 = load_ranked_strip(include_bytes!("../tests/fixtures/ranked_221_w3.ppm"));
+
+    let catalog = HeroVisionCatalog::from_embedded().expect("vision catalog must load");
+    let frames = VecDeque::from([w1.clone(), w1, w2.clone(), w2, w3.clone(), w3]);
+    let mut adapter = VisionCaptureAdapter::new(QueueSource(frames), catalog);
+
+    let poll_two_frames_sorted = |ad: &mut VisionCaptureAdapter<QueueSource>| {
+        let mut wave = Vec::new();
+        for _ in 0..2 {
+            for ev in ad.poll_events().unwrap() {
+                if let DraftEvent::PickDetected {
+                    side,
+                    slot,
+                    hero_id,
+                    ..
+                } = ev
+                {
+                    wave.push((side, slot, hero_id));
+                }
+            }
+        }
+        wave.sort_by_key(|(side, slot, id)| (*side as u8, *slot, id.0));
+        wave
+    };
+
+    assert_eq!(
+        poll_two_frames_sorted(&mut adapter),
+        vec![
+            (Side::Enemies, 1, HeroId(72)),
+            (Side::Enemies, 4, HeroId(5)),
+        ],
+        "Wave 1 must emit exactly the 2 Dire picks with 0 empty-slot phantoms"
+    );
+
+    assert_eq!(
+        poll_two_frames_sorted(&mut adapter),
+        vec![
+            (Side::Allies, 0, HeroId(104)),
+            (Side::Allies, 1, HeroId(30)),
+            (Side::Allies, 2, HeroId(87)),
+            (Side::Allies, 4, HeroId(35)),
+            (Side::Enemies, 2, HeroId(57)),
+            (Side::Enemies, 3, HeroId(41)),
+        ],
+        "Wave 2 must emit exact 6 new picks without prematching open Radiant slot 3 or Dire slot 0"
+    );
+
+    assert_eq!(
+        poll_two_frames_sorted(&mut adapter),
+        vec![
+            (Side::Allies, 3, HeroId(48)),
+            (Side::Enemies, 0, HeroId(21)),
+        ],
+        "Wave 3 must lock last-pick Luna (#48) in Radiant slot 3 and Windranger (#21) in Dire slot 0"
+    );
 }

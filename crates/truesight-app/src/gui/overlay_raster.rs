@@ -7,6 +7,7 @@ struct RasterTexture {
     height: usize,
     pixels: Vec<Color32>,
     linear: bool,
+    repeat: bool,
 }
 
 impl RasterTexture {
@@ -14,20 +15,34 @@ impl RasterTexture {
         if self.width == 0 || self.height == 0 || self.pixels.is_empty() {
             return Color32::WHITE;
         }
-        let u = u.clamp(0.0, 1.0);
-        let v = v.clamp(0.0, 1.0);
+        let (u, v) = if self.repeat {
+            (u.rem_euclid(1.0), v.rem_euclid(1.0))
+        } else {
+            (u.clamp(0.0, 1.0), v.clamp(0.0, 1.0))
+        };
         if !self.linear || (self.width == 1 && self.height == 1) {
             let tx = ((u * self.width as f32).floor() as usize).min(self.width - 1);
             let ty = ((v * self.height as f32).floor() as usize).min(self.height - 1);
             return self.pixels[ty * self.width + tx];
         }
 
-        let fx = (u * self.width as f32 - 0.5).clamp(0.0, (self.width - 1) as f32);
-        let fy = (v * self.height as f32 - 0.5).clamp(0.0, (self.height - 1) as f32);
-        let x0 = fx.floor() as usize;
-        let y0 = fy.floor() as usize;
-        let x1 = (x0 + 1).min(self.width - 1);
-        let y1 = (y0 + 1).min(self.height - 1);
+        let fx = if self.repeat {
+            (u * self.width as f32 - 0.5).rem_euclid(self.width as f32)
+        } else {
+            (u * self.width as f32 - 0.5).clamp(0.0, (self.width - 1) as f32)
+        };
+        let fy = if self.repeat {
+            (v * self.height as f32 - 0.5).rem_euclid(self.height as f32)
+        } else {
+            (v * self.height as f32 - 0.5).clamp(0.0, (self.height - 1) as f32)
+        };
+        let x0 = (fx.floor() as usize).min(self.width - 1);
+        let y0 = (fy.floor() as usize).min(self.height - 1);
+        let (x1, y1) = if self.repeat {
+            ((x0 + 1) % self.width, (y0 + 1) % self.height)
+        } else {
+            ((x0 + 1).min(self.width - 1), (y0 + 1).min(self.height - 1))
+        };
         let wx = fx - x0 as f32;
         let wy = fy - y0 as f32;
 
@@ -109,6 +124,7 @@ impl OverlayRasterizer {
         for (id, image_delta) in &delta.set {
             let egui::ImageData::Color(img) = &image_delta.image;
             let linear = image_delta.options.magnification == TextureFilter::Linear;
+            let repeat = image_delta.options.wrap_mode == egui::TextureWrapMode::Repeat;
             if let Some([pos_x, pos_y]) = image_delta.pos
                 && let Some(existing) = self.textures.get_mut(id)
             {
@@ -130,6 +146,7 @@ impl OverlayRasterizer {
                     }
                 }
                 existing.linear = linear;
+                existing.repeat = repeat;
             } else {
                 self.textures.insert(
                     *id,
@@ -138,6 +155,7 @@ impl OverlayRasterizer {
                         height: img.size[1],
                         pixels: img.pixels.clone(),
                         linear,
+                        repeat,
                     },
                 );
             }

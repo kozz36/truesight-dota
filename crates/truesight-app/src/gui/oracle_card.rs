@@ -167,7 +167,13 @@ impl TrueSightGuiApp {
                 for (idx, (label, val_pct, sub)) in edges.iter().enumerate() {
                     let top_col = tone_for_user(*val_pct, 1.0).color();
                     let fr = egui::Frame::NONE
-                        .fill(P_INDIGO_2)
+                        .fill(Color32::from_rgba_unmultiplied(
+                            P_INDIGO_2.r(),
+                            P_INDIGO_2.g(),
+                            P_INDIGO_2.b(),
+                            95,
+                        ))
+                        .corner_radius(egui::CornerRadius::same(3))
                         .inner_margin(Margin::symmetric(
                             if compact_w { 5 } else { 8 },
                             if compact_h { 5 } else { 7 },
@@ -217,10 +223,15 @@ impl TrueSightGuiApp {
             let thumb_row_h = if compact_h { 20.0_f32 } else { 26.0_f32 };
             let thumb_gap = if compact_w { 2.0_f32 } else { 3.0_f32 };
             ui.columns(2, |cols| {
-                // Draft Order Box
-                egui::Frame::NONE
-                    .fill(P_INDIGO_2)
-                    .stroke(Stroke::new(1.0_f32, P_INDIGO_3))
+                // Draft Order Strip
+                let order_fr = egui::Frame::NONE
+                    .fill(Color32::from_rgba_unmultiplied(
+                        P_INDIGO_2.r(),
+                        P_INDIGO_2.g(),
+                        P_INDIGO_2.b(),
+                        72,
+                    ))
+                    .corner_radius(egui::CornerRadius::same(4))
                     .inner_margin(Margin::symmetric(
                         if compact_w { 6 } else { 8 },
                         if compact_h { 4 } else { 6 },
@@ -307,11 +318,27 @@ impl TrueSightGuiApp {
                             },
                         );
                     });
+                let or = order_fr.response.rect;
+                cols[0].painter().line_segment(
+                    [
+                        pos2(or.min.x + 2.0, or.min.y),
+                        pos2(or.max.x - 2.0, or.min.y),
+                    ],
+                    Stroke::new(
+                        1.0_f32,
+                        Color32::from_rgba_unmultiplied(P_LINE.r(), P_LINE.g(), P_LINE.b(), 95),
+                    ),
+                );
 
-                // Bans Box
-                egui::Frame::NONE
-                    .fill(P_INDIGO_2)
-                    .stroke(Stroke::new(1.0_f32, P_INDIGO_3))
+                // Bans Strip
+                let bans_fr = egui::Frame::NONE
+                    .fill(Color32::from_rgba_unmultiplied(
+                        P_INDIGO_2.r(),
+                        P_INDIGO_2.g(),
+                        P_INDIGO_2.b(),
+                        72,
+                    ))
+                    .corner_radius(egui::CornerRadius::same(4))
                     .inner_margin(Margin::symmetric(
                         if compact_w { 6 } else { 8 },
                         if compact_h { 4 } else { 6 },
@@ -407,6 +434,17 @@ impl TrueSightGuiApp {
                             },
                         );
                     });
+                let br = bans_fr.response.rect;
+                cols[1].painter().line_segment(
+                    [
+                        pos2(br.min.x + 2.0, br.min.y),
+                        pos2(br.max.x - 2.0, br.min.y),
+                    ],
+                    Stroke::new(
+                        1.0_f32,
+                        Color32::from_rgba_unmultiplied(P_LINE.r(), P_LINE.g(), P_LINE.b(), 95),
+                    ),
+                );
             });
 
             // 6. Active Slot / Ban Search Bar (inline inside Oracle when active), or Enemy Scout strip
@@ -461,7 +499,13 @@ impl TrueSightGuiApp {
 
         let strip_compact = compact_h || ui.available_width() < 460.0;
         let fr = egui::Frame::NONE
-            .fill(P_INDIGO_2)
+            .fill(Color32::from_rgba_unmultiplied(
+                P_INDIGO_2.r(),
+                P_INDIGO_2.g(),
+                P_INDIGO_2.b(),
+                90,
+            ))
+            .corner_radius(egui::CornerRadius::same(3))
             .inner_margin(Margin::symmetric(
                 if strip_compact { 8 } else { 10 },
                 if strip_compact { 5 } else { 7 },
@@ -566,8 +610,17 @@ impl TrueSightGuiApp {
         let gap = if compact_w { 4.0_f32 } else { 5.0_f32 };
 
         egui::Frame::NONE
-            .fill(P_INDIGO_2)
-            .stroke(Stroke::new(1.0_f32, P_DIRE_DEEP))
+            .fill(Color32::from_rgba_unmultiplied(
+                P_INDIGO_2.r(),
+                P_INDIGO_2.g(),
+                P_INDIGO_2.b(),
+                95,
+            ))
+            .corner_radius(egui::CornerRadius::same(4))
+            .stroke(Stroke::new(
+                1.0_f32,
+                Color32::from_rgba_unmultiplied(P_DIRE_DEEP.r(), P_DIRE_DEEP.g(), P_DIRE_DEEP.b(), 145),
+            ))
             .inner_margin(Margin::symmetric(if compact_w { 6 } else { 8 }, 4))
             .show(ui, |ui| {
                 let inner_w = ui.available_width();
@@ -706,7 +759,13 @@ impl TrueSightGuiApp {
         };
 
         egui::Frame::NONE
-            .fill(P_INDIGO_2)
+            .fill(Color32::from_rgba_unmultiplied(
+                P_INDIGO_2.r(),
+                P_INDIGO_2.g(),
+                P_INDIGO_2.b(),
+                120,
+            ))
+            .corner_radius(egui::CornerRadius::same(4))
             .stroke(Stroke::new(1.0_f32, P_GEM))
             .inner_margin(Margin::symmetric(8, 6))
             .show(ui, |ui| {

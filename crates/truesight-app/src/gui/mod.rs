@@ -13,6 +13,7 @@ mod overlay_layer_tests;
 mod overlay_raster;
 mod overlay_sync;
 mod suggested_table;
+mod surfaces;
 mod team_card;
 #[cfg(test)]
 mod tests;
@@ -33,7 +34,7 @@ use eframe::egui::{
 };
 use theme::{
     GuiTextureCache, P_GEM, P_GEM_DEEP, P_INDIGO_1, P_INDIGO_2, P_INDIGO_3, P_LINE, P_SILVER,
-    P_VOID, hud_modal_frame, paint_hud_corner_ticks,
+    P_VOID, hud_modal_frame,
 };
 use truesight_adapters::gsi::BoundedGsiListener;
 use truesight_adapters::sync::{AccountLinkConfig, normalize_steam32_id, save_account_config};
@@ -57,10 +58,7 @@ enum PickerTarget {
     Ban,
 }
 
-// =============================================================================
 // Main Application State & eframe::App Implementation
-// =============================================================================
-
 pub struct TrueSightGuiApp {
     session: AppSession,
     gsi_listener: Option<BoundedGsiListener>,
@@ -664,7 +662,7 @@ impl TrueSightGuiApp {
             }
             if let Some(r) = &acct_resp {
                 let painter = ctx.layer_painter(r.response.layer_id);
-                paint_hud_corner_ticks(&painter, r.response.rect, P_GEM);
+                surfaces::paint_modal_gemstone_accents(&painter, r.response.rect);
                 if let Some((apply_r, close_r)) = r.inner {
                     rects.account_apply_button = apply_r;
                     rects.account_close_button = close_r;

@@ -42,6 +42,11 @@ pub struct VariantSelection {
     pub variant_item_id: ItemId,
 }
 
+pub const DEFAULT_OVERLAY_OPACITY: f32 = 0.58;
+pub const MIN_OVERLAY_OPACITY: f32 = 0.35;
+pub const MAX_OVERLAY_OPACITY: f32 = 0.95;
+
+/// Active UI presentation state and persisted configuration backing the desktop/CLI views.
 pub struct AppSession {
     pub draft: DraftState,
     pub matrix: MatchupMatrix,
@@ -91,6 +96,7 @@ pub struct AppSession {
     pub overlay_mode: bool,
     pub overlay_geometry: OverlayGeometry,
     pub build_overlay_geometry: OverlayGeometry,
+    pub overlay_opacity: f32,
     pub active_monitor_rect: Option<MonitorRect>,
     pub known_monitors: Vec<MonitorRect>,
     pub active_capture_strip_rect: Option<(f32, f32, f32, f32)>,
@@ -248,6 +254,7 @@ impl AppSession {
             overlay_mode: ui_cfg.overlay_mode,
             overlay_geometry: ui_cfg.overlay_geometry,
             build_overlay_geometry: ui_cfg.build_overlay_geometry,
+            overlay_opacity: Self::sanitize_overlay_opacity(ui_cfg.overlay_opacity),
             active_monitor_rect: None,
             known_monitors: Vec::new(),
             active_capture_strip_rect: None,
@@ -272,6 +279,7 @@ impl AppSession {
             self.overlay_mode = ui_cfg.overlay_mode;
             self.overlay_geometry = ui_cfg.overlay_geometry;
             self.build_overlay_geometry = ui_cfg.build_overlay_geometry;
+            self.overlay_opacity = Self::sanitize_overlay_opacity(ui_cfg.overlay_opacity);
             self.ui_language = ui_cfg.ui_language;
             if is_stratz_exp_expired(resolved_exp, now) {
                 self.cache_mgr.stratz_api_token = None;
@@ -1293,6 +1301,7 @@ impl AppSession {
                 overlay_mode: self.overlay_mode,
                 overlay_geometry: self.overlay_geometry,
                 build_overlay_geometry: self.build_overlay_geometry,
+                overlay_opacity: self.overlay_opacity,
                 ui_language: self.ui_language,
             };
             if let Err(err) = save_ui_config_to_dir(dir, &cfg) {
@@ -2043,6 +2052,21 @@ impl AppSession {
         self.set_overlay_geometry_for_view(self.is_post_draft_build_view(), geom);
     }
 
+    /// Sanitizes an overlay glass opacity value to `[MIN_OVERLAY_OPACITY, MAX_OVERLAY_OPACITY]`.
+    pub fn sanitize_overlay_opacity(opacity: f32) -> f32 {
+        if !opacity.is_finite() {
+            DEFAULT_OVERLAY_OPACITY
+        } else {
+            opacity.clamp(MIN_OVERLAY_OPACITY, MAX_OVERLAY_OPACITY)
+        }
+    }
+
+    /// Updates and persists the compact overlay glass opacity (`0.35..=0.95`).
+    pub fn set_overlay_opacity(&mut self, opacity: f32) {
+        self.overlay_opacity = Self::sanitize_overlay_opacity(opacity);
+        let _ = self.persist_ui_config();
+    }
+
     /// Persists the onboarding dismissal preference when config persistence is enabled.
     pub fn set_onboarding_dismissed(&mut self, dismissed: bool) -> Result<(), String> {
         self.onboarding_dismissed = dismissed;
@@ -2290,6 +2314,7 @@ pub struct UiConfig {
     pub overlay_mode: bool,
     pub overlay_geometry: OverlayGeometry,
     pub build_overlay_geometry: OverlayGeometry,
+    pub overlay_opacity: f32,
     pub ui_language: UiLanguage,
 }
 
@@ -2302,6 +2327,7 @@ impl Default for UiConfig {
             overlay_mode: false,
             overlay_geometry: OverlayGeometry::default(),
             build_overlay_geometry: OverlayGeometry::default_build(),
+            overlay_opacity: DEFAULT_OVERLAY_OPACITY,
             ui_language: UiLanguage::default(),
         }
     }
@@ -2485,6 +2511,11 @@ pub fn load_ui_config_from_dir(config_dir: &Path) -> UiConfig {
                 }
             }
             "overlay_click_through" => cfg.overlay_geometry.click_through = val == "true",
+            "overlay_opacity" => {
+                if let Ok(op) = val.parse::<f32>() {
+                    cfg.overlay_opacity = AppSession::sanitize_overlay_opacity(op);
+                }
+            }
             "ui_language" => {
                 if let Some(lang) = UiLanguage::parse(val) {
                     cfg.ui_language = lang;
@@ -2550,6 +2581,10 @@ pub fn save_ui_config_to_dir(config_dir: &Path, cfg: &UiConfig) -> Result<(), St
     body.push_str(&format!(
         "build_overlay_height = {}\n",
         cfg.build_overlay_geometry.height
+    ));
+    body.push_str(&format!(
+        "overlay_opacity = {:.2}\n",
+        AppSession::sanitize_overlay_opacity(cfg.overlay_opacity)
     ));
     body.push_str(&format!(
         "ui_language = \"{}\"\n",

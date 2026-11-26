@@ -3815,8 +3815,27 @@ fn active_build_hero_evicts_stale_local_hero_and_persists_independent_build_over
     let reloaded = AppSession::with_cache_and_config(reloaded_mgr, Some(cfg_path)).unwrap();
     assert_eq!(reloaded.overlay_geometry, picks_geom);
     assert_eq!(reloaded.build_overlay_geometry, build_geom);
+    assert!(
+        (reloaded.overlay_opacity - crate::session::DEFAULT_OVERLAY_OPACITY).abs() < 1e-4,
+        "default overlay opacity must initialize to {}",
+        crate::session::DEFAULT_OVERLAY_OPACITY
+    );
 
-    // 3. Stale local_player_hero must update when slot hero is replaced or evicted, never staying stuck.
+    // 3. Custom overlay glass opacity persists and clamps out-of-range / NaN values safely.
+    let mut cfg_session = reloaded;
+    cfg_session.set_overlay_opacity(0.52);
+    assert!((cfg_session.overlay_opacity - 0.52).abs() < 1e-4);
+    cfg_session.set_overlay_opacity(0.10);
+    assert!((cfg_session.overlay_opacity - crate::session::MIN_OVERLAY_OPACITY).abs() < 1e-4);
+    cfg_session.set_overlay_opacity(1.50);
+    assert!((cfg_session.overlay_opacity - crate::session::MAX_OVERLAY_OPACITY).abs() < 1e-4);
+    cfg_session.set_overlay_opacity(f32::NAN);
+    assert!((cfg_session.overlay_opacity - crate::session::DEFAULT_OVERLAY_OPACITY).abs() < 1e-4);
+    cfg_session.set_overlay_opacity(0.54);
+    let persisted = load_ui_config_from_dir(&tmp_dir);
+    assert!((persisted.overlay_opacity - 0.54).abs() < 1e-4);
+
+    // 4. Stale local_player_hero must update when slot hero is replaced or evicted, never staying stuck.
     session.set_slot_manual(Side::Allies, 3, HeroId(121)); // Grimstroke Pos 4
     session.local_player_hero = Some(HeroId(121));
     assert_eq!(
