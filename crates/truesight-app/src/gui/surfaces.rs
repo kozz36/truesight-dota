@@ -426,6 +426,75 @@ pub(super) fn paint_overlay_glass_frame(painter: &egui::Painter, rect: Rect) {
     paint_hud_corner_ticks(painter, rect.shrink(1.0), P_GEM);
 }
 
+#[inline]
+pub(super) fn translucent(c: Color32, alpha: u8) -> Color32 {
+    Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), alpha)
+}
+
+/// Renders a translucent matrix/header placeholder cell with optional centered label.
+pub(super) fn paint_empty_matrix_slot(
+    painter: &egui::Painter,
+    rect: Rect,
+    fill_alpha: u8,
+    border_alpha: u8,
+    label: Option<&str>,
+    font_size: f32,
+) {
+    painter.rect_filled(rect, CornerRadius::same(2), translucent(P_VOID, fill_alpha));
+    painter.rect_stroke(
+        rect,
+        CornerRadius::same(2),
+        Stroke::new(1.0_f32, translucent(super::theme::P_LINE, border_alpha)),
+        egui::StrokeKind::Inside,
+    );
+    if let Some(txt) = label {
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            txt,
+            egui::FontId::proportional(font_size),
+            super::theme::P_SILVER,
+        );
+    }
+}
+
+/// Localized dark obsidian scrim alpha behind compact overlay labels/stats so small text stays
+/// WCAG AA legible over bright game scenes while preserving surrounding translucent glass.
+pub(super) const OVERLAY_TEXT_SCRIM_ALPHA: u8 = 216;
+/// High-contrast coral-red used for `<50%` stats inside compact overlay text scrims (`>= 4.5:1` AA).
+pub(super) const OVERLAY_DIRE_TEXT: Color32 = Color32::from_rgb(255, 132, 122);
+
+/// Wraps compact overlay typography or stat rows in a localized dark scrim backing.
+pub(super) fn overlay_text_scrim(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::NONE
+        .fill(Color32::from_rgba_unmultiplied(
+            P_VOID.r(),
+            P_VOID.g(),
+            P_VOID.b(),
+            OVERLAY_TEXT_SCRIM_ALPHA,
+        ))
+        .corner_radius(CornerRadius::same(3))
+        .inner_margin(egui::Margin::symmetric(4, 1))
+        .show(ui, add_contents);
+}
+
+/// Renders a single small label inside [`overlay_text_scrim`] with consistent contrast backing.
+pub(super) fn overlay_scrim_label(
+    ui: &mut egui::Ui,
+    text: impl Into<String>,
+    size: f32,
+    strong: bool,
+    color: Color32,
+) {
+    overlay_text_scrim(ui, |ui| {
+        let mut rt = egui::RichText::new(text).size(size).color(color);
+        if strong {
+            rt = rt.strong();
+        }
+        ui.label(rt);
+    });
+}
+
 /// Paints top crystal specular glint and corner ticks on HUD modals (`OPTIONS`, `ACCOUNT`, `QUICK GUIDE`).
 pub(super) fn paint_modal_gemstone_accents(painter: &egui::Painter, rect: Rect) {
     let inset = rect.shrink(1.5);

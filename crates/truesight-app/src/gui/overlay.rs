@@ -1,11 +1,12 @@
 use super::TrueSightGuiApp;
 use super::overlay_backend::OverlayHostMode;
+use super::surfaces::{paint_empty_matrix_slot, translucent};
 use super::theme::*;
 use super::viewmodel::compute_overlay_summary;
 use crate::session::OverlayGeometry;
 use eframe::egui::{
-    self, Align, Align2, Color32, CornerRadius, FontId, Layout, Margin, Rect, RichText, Sense,
-    Stroke, StrokeKind, Vec2, pos2, vec2,
+    self, Align, Color32, CornerRadius, Layout, Margin, Rect, RichText, Sense, Stroke, StrokeKind,
+    Vec2, pos2, vec2,
 };
 use truesight_core::domain::{ItemId, Role, TEAM_SIZE};
 
@@ -17,37 +18,6 @@ fn paint_monitor_switch_icon(painter: &egui::Painter, rect: Rect, color: Color32
     painter.rect_stroke(back, 1.0, stroke, StrokeKind::Inside);
     painter.rect_filled(front, 1.0, P_INDIGO_2);
     painter.rect_stroke(front, 1.0, stroke, StrokeKind::Inside);
-}
-
-#[inline]
-fn translucent(c: Color32, alpha: u8) -> Color32 {
-    Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), alpha)
-}
-
-fn paint_empty_matrix_slot(
-    painter: &egui::Painter,
-    rect: Rect,
-    fill_alpha: u8,
-    border_alpha: u8,
-    label: Option<&str>,
-    font_size: f32,
-) {
-    painter.rect_filled(rect, CornerRadius::same(2), translucent(P_VOID, fill_alpha));
-    painter.rect_stroke(
-        rect,
-        CornerRadius::same(2),
-        Stroke::new(1.0_f32, translucent(P_LINE, border_alpha)),
-        StrokeKind::Inside,
-    );
-    if let Some(txt) = label {
-        painter.text(
-            rect.center(),
-            Align2::CENTER_CENTER,
-            txt,
-            FontId::proportional(font_size),
-            P_SILVER,
-        );
-    }
 }
 
 fn overlay_icon_button(
@@ -318,44 +288,48 @@ impl TrueSightGuiApp {
                         drag_hit_rect = drag_hit_rect.union(gem_r);
                     }
 
-                    let title_resp = ui.add(
-                        egui::Label::new(
-                            RichText::new(tr.overlay_title)
-                                .size(9.5)
-                                .strong()
-                                .color(P_GEM),
-                        )
-                        .sense(Sense::hover()),
-                    );
-                    drag_hit_rect = if drag_hit_rect == Rect::NOTHING {
-                        grip_rect.union(title_resp.rect)
-                    } else {
-                        drag_hit_rect.union(grip_rect).union(title_resp.rect)
-                    };
-                    if interactive {
-                        title_resp
-                            .on_hover_cursor(if drag_active {
-                                egui::CursorIcon::Grabbing
-                            } else {
-                                egui::CursorIcon::Grab
-                            })
-                            .on_hover_text(tr.overlay_drag_hover);
-                    }
-
                     let win_col = if summary.projected_ally_win_pct >= 50.0 {
                         P_GEM
                     } else {
-                        P_DIRE
+                        super::surfaces::OVERLAY_DIRE_TEXT
                     };
-                    ui.label(
-                        RichText::new(format!(
-                            "{} {:.1}%",
-                            tr.overlay_win_prefix, summary.projected_ally_win_pct
-                        ))
-                        .size(10.0)
-                        .strong()
-                        .color(win_col),
-                    );
+                    super::surfaces::overlay_text_scrim(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            let title_resp = ui.add(
+                                egui::Label::new(
+                                    RichText::new(tr.overlay_title)
+                                        .size(9.5)
+                                        .strong()
+                                        .color(P_GEM),
+                                )
+                                .sense(Sense::hover()),
+                            );
+                            drag_hit_rect = if drag_hit_rect == Rect::NOTHING {
+                                grip_rect.union(title_resp.rect)
+                            } else {
+                                drag_hit_rect.union(grip_rect).union(title_resp.rect)
+                            };
+                            if interactive {
+                                title_resp
+                                    .on_hover_cursor(if drag_active {
+                                        egui::CursorIcon::Grabbing
+                                    } else {
+                                        egui::CursorIcon::Grab
+                                    })
+                                    .on_hover_text(tr.overlay_drag_hover);
+                            }
+                            ui.label(
+                                RichText::new(format!(
+                                    "{} {:.1}%",
+                                    tr.overlay_win_prefix, summary.projected_ally_win_pct
+                                ))
+                                .size(10.0)
+                                .strong()
+                                .color(win_col),
+                            );
+                        });
+                    });
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 3.0;
@@ -514,50 +488,62 @@ impl TrueSightGuiApp {
                             Layout::top_down(Align::Min),
                             |ui| {
                                 ui.spacing_mut().item_spacing.y = 2.0;
-                                ui.label(
-                                    RichText::new(format!(
+                                super::surfaces::overlay_scrim_label(
+                                    ui,
+                                    format!(
                                         "TOP {} PICKS",
                                         summary.target_role.label().to_ascii_uppercase()
-                                    ))
-                                    .size(9.0)
-                                    .strong()
-                                    .color(P_SILVER),
+                                    ),
+                                    9.0,
+                                    true,
+                                    P_SILVER,
                                 );
                                 if summary.top_suggestions.is_empty() {
-                                    ui.label(
-                                        RichText::new(tr.overlay_no_suggestions)
-                                            .size(9.5)
-                                            .color(P_MUTED),
+                                    super::surfaces::overlay_scrim_label(
+                                        ui,
+                                        tr.overlay_no_suggestions,
+                                        9.5,
+                                        false,
+                                        P_SILVER,
                                     );
                                 } else {
                                     for (idx, (hid, name, win_pct)) in
                                         summary.top_suggestions.iter().take(max_picks).enumerate()
                                     {
-                                        let col = if *win_pct >= 50.0 { P_GEM } else { P_DIRE };
+                                        let col = if *win_pct >= 50.0 {
+                                            P_GEM
+                                        } else {
+                                            super::surfaces::OVERLAY_DIRE_TEXT
+                                        };
                                         let htex = textures.heroes.get(hid).map(|s| &s.color);
-                                        ui.horizontal(|ui| {
-                                            ui.spacing_mut().item_spacing.x = 4.0;
-                                            paint_portrait_16_9(
-                                                ui,
-                                                htex,
-                                                vec2(26.0, 14.6),
-                                                P_GEM_DEEP,
-                                                1.0,
-                                            );
-                                            ui.add(
-                                                egui::Label::new(
-                                                    RichText::new(format!("{}. {name}", idx + 1))
+                                        super::surfaces::overlay_text_scrim(ui, |ui| {
+                                            ui.horizontal(|ui| {
+                                                ui.spacing_mut().item_spacing.x = 4.0;
+                                                paint_portrait_16_9(
+                                                    ui,
+                                                    htex,
+                                                    vec2(26.0, 14.6),
+                                                    P_GEM_DEEP,
+                                                    1.0,
+                                                );
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        RichText::new(format!(
+                                                            "{}. {name}",
+                                                            idx + 1
+                                                        ))
                                                         .size(9.5)
                                                         .color(P_GLINT),
-                                                )
-                                                .truncate(),
-                                            );
-                                            ui.label(
-                                                RichText::new(format!("{win_pct:.1}%"))
-                                                    .size(9.5)
-                                                    .strong()
-                                                    .color(col),
-                                            );
+                                                    )
+                                                    .truncate(),
+                                                );
+                                                ui.label(
+                                                    RichText::new(format!("{win_pct:.1}%"))
+                                                        .size(9.5)
+                                                        .strong()
+                                                        .color(col),
+                                                );
+                                            });
                                         });
                                     }
                                 }
@@ -565,11 +551,12 @@ impl TrueSightGuiApp {
                         );
 
                         ui.vertical(|ui| {
-                            ui.label(
-                                RichText::new(tr.overlay_cnt_label)
-                                    .size(9.0)
-                                    .strong()
-                                    .color(P_SILVER),
+                            super::surfaces::overlay_scrim_label(
+                                ui,
+                                tr.overlay_cnt_label,
+                                9.0,
+                                true,
+                                P_SILVER,
                             );
                             ui.spacing_mut().item_spacing = vec2(grid_gap, grid_gap);
 

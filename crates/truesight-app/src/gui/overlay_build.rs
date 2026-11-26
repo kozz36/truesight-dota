@@ -82,36 +82,41 @@ impl TrueSightGuiApp {
 
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 5.0;
-            ui.label(
-                RichText::new(format!("T = {}", format_clock(summary.game_time_secs)))
-                    .size(9.0)
-                    .strong()
-                    .color(P_CYAN),
-            );
-            if let Some((hero_id, role)) = self.session.active_build_hero() {
-                let hero_name = self
-                    .session
-                    .matrix
-                    .hero(hero_id)
-                    .map(|h| h.display_name.clone())
-                    .unwrap_or_else(|| format!("Hero #{}", hero_id.0));
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(format!("{hero_name} · P{}", role.index() + 1))
+            super::surfaces::overlay_text_scrim(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 5.0;
+                    ui.label(
+                        RichText::new(format!("T = {}", format_clock(summary.game_time_secs)))
                             .size(9.0)
                             .strong()
-                            .color(P_SILVER),
-                    )
-                    .truncate(),
-                );
-            } else {
-                ui.label(
-                    RichText::new(tr.overlay_item_build_label)
-                        .size(9.0)
-                        .strong()
-                        .color(P_SILVER),
-                );
-            }
+                            .color(P_CYAN),
+                    );
+                    if let Some((hero_id, role)) = self.session.active_build_hero() {
+                        let hero_name = self
+                            .session
+                            .matrix
+                            .hero(hero_id)
+                            .map(|h| h.display_name.clone())
+                            .unwrap_or_else(|| format!("Hero #{}", hero_id.0));
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(format!("{hero_name} · P{}", role.index() + 1))
+                                    .size(9.0)
+                                    .strong()
+                                    .color(P_SILVER),
+                            )
+                            .truncate(),
+                        );
+                    } else {
+                        ui.label(
+                            RichText::new(tr.overlay_item_build_label)
+                                .size(9.0)
+                                .strong()
+                                .color(P_SILVER),
+                        );
+                    }
+                });
+            });
             if inline_starting {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     self.render_overlay_starting_icons(ui, start_items, true, textures);
@@ -121,10 +126,12 @@ impl TrueSightGuiApp {
 
         let Some(build) = &summary.build else {
             ui.add_space(4.0);
-            ui.label(
-                RichText::new(tr.overlay_pick_ally_hint)
-                    .size(9.5)
-                    .color(P_MUTED),
+            super::surfaces::overlay_scrim_label(
+                ui,
+                tr.overlay_pick_ally_hint,
+                9.5,
+                false,
+                P_SILVER,
             );
             return None;
         };
@@ -325,15 +332,9 @@ impl TrueSightGuiApp {
                 paint_chip(ui, id);
             }
             ui.add_space(2.0);
-            ui.add(
-                egui::Label::new(RichText::new("START").size(7.5).strong().color(P_SILVER))
-                    .extend(),
-            );
+            super::surfaces::overlay_scrim_label(ui, "START", 7.5, true, P_SILVER);
         } else {
-            ui.add(
-                egui::Label::new(RichText::new("START").size(7.5).strong().color(P_SILVER))
-                    .extend(),
-            );
+            super::surfaces::overlay_scrim_label(ui, "START", 7.5, true, P_SILVER);
             for &id in start_items.iter().take(5) {
                 paint_chip(ui, id);
             }

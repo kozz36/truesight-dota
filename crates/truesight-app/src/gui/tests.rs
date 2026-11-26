@@ -4421,3 +4421,75 @@ fn options_window_exposes_overlay_opacity_control_and_updates_session() {
         "options drawer must show live overlay glass percentage '58%'; painted texts: {texts:?}"
     );
 }
+
+#[test]
+fn overlay_small_text_scrim_clears_wcag_aa_contrast_over_white_backdrop_at_default_and_min_opacity()
+{
+    use super::theme::{P_CYAN, P_GLINT, P_NEUTRAL};
+    use crate::session::{DEFAULT_OVERLAY_OPACITY, MIN_OVERLAY_OPACITY};
+    use eframe::egui::Color32;
+
+    let blend_over = |fg: Color32, bg: Color32| -> Color32 {
+        let a = f32::from(fg.a()) / 255.0;
+        let ch = |f: u8, b: u8| -> u8 {
+            ((f32::from(f) * a + f32::from(b) * (1.0 - a)).round()).clamp(0.0, 255.0) as u8
+        };
+        Color32::from_rgb(ch(fg.r(), bg.r()), ch(fg.g(), bg.g()), ch(fg.b(), bg.b()))
+    };
+    let rel_luminance = |c: Color32| -> f32 {
+        let lin = |u: u8| -> f32 {
+            let v = f32::from(u) / 255.0;
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * lin(c.r()) + 0.7152 * lin(c.g()) + 0.0722 * lin(c.b())
+    };
+    let contrast_ratio = |a: Color32, b: Color32| -> f32 {
+        let la = rel_luminance(a);
+        let lb = rel_luminance(b);
+        let (hi, lo) = if la >= lb { (la, lb) } else { (lb, la) };
+        (hi + 0.05) / (lo + 0.05)
+    };
+
+    let scrim = Color32::from_rgba_unmultiplied(
+        P_VOID.r(),
+        P_VOID.g(),
+        P_VOID.b(),
+        super::surfaces::OVERLAY_TEXT_SCRIM_ALPHA,
+    );
+    for opacity in [DEFAULT_OVERLAY_OPACITY, MIN_OVERLAY_OPACITY] {
+        let glass_shape = super::surfaces::build_overlay_glass_background(
+            Rect::from_min_size(pos2(0.0, 0.0), vec2(320.0, 200.0)),
+            opacity,
+            None,
+            None,
+        );
+        let base_fill = match glass_shape {
+            egui::Shape::Vec(shapes) => match shapes.first() {
+                Some(egui::Shape::Rect(r)) => r.fill,
+                other => panic!("expected filled glass base rect, got {other:?}"),
+            },
+            other => panic!("expected Shape::Vec from glass background, got {other:?}"),
+        };
+        let glass_over_white = blend_over(base_fill, Color32::WHITE);
+        let scrim_over_white = blend_over(scrim, glass_over_white);
+
+        for (label, fg) in [
+            ("P_GLINT", P_GLINT),
+            ("P_SILVER", P_SILVER),
+            ("P_GEM", P_GEM),
+            ("P_CYAN", P_CYAN),
+            ("P_NEUTRAL", P_NEUTRAL),
+            ("OVERLAY_DIRE_TEXT", super::surfaces::OVERLAY_DIRE_TEXT),
+        ] {
+            let ratio = contrast_ratio(fg, scrim_over_white);
+            assert!(
+                ratio >= 4.5,
+                "opacity={opacity:.2}: {label} contrast {ratio:.2}:1 must meet WCAG AA >= 4.5:1 over white backdrop"
+            );
+        }
+    }
+}
