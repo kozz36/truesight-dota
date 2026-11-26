@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex, mpsc};
 
 #[cfg(test)]
 pub(super) use super::hotkey_portal::{
-    PORTAL_PREFERRED_TRIGGER, PortalLoopOutcome, portal_status_label, should_fallback_to_xwayland,
+    PORTAL_PREFERRED_TRIGGER, PortalLoopOutcome, portal_status_label, should_bind_on_startup,
+    should_fallback_to_xwayland, should_use_configure_shortcuts,
 };
 #[cfg(all(test, target_os = "linux"))]
 pub(super) use super::hotkey_portal::{
@@ -152,6 +153,8 @@ pub(super) struct GlobalHotkeyListener {
     rebind_in_flight: Arc<AtomicBool>,
     #[cfg(target_os = "linux")]
     portal_session: super::hotkey_portal::PortalSessionSlot,
+    #[cfg(target_os = "linux")]
+    portal_bound_in_session: Arc<AtomicBool>,
 }
 
 impl Drop for GlobalHotkeyListener {
@@ -165,14 +168,8 @@ impl Drop for GlobalHotkeyListener {
         #[cfg(target_os = "linux")]
         if let Ok(mut guard) = self.portal_session.lock()
             && let Some((conn, session_path)) = guard.take()
-            && let Ok(proxy) = zbus::blocking::Proxy::new(
-                &conn,
-                "org.freedesktop.portal.Desktop",
-                session_path,
-                "org.freedesktop.portal.Session",
-            )
         {
-            let _ = proxy.call::<_, _, ()>("Close", &());
+            super::hotkey_portal::close_portal_session(&conn, &session_path);
         }
     }
 }
@@ -203,6 +200,8 @@ impl GlobalHotkeyListener {
             rebind_in_flight: Arc::new(AtomicBool::new(false)),
             #[cfg(target_os = "linux")]
             portal_session: Arc::new(Mutex::new(None)),
+            #[cfg(target_os = "linux")]
+            portal_bound_in_session: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -235,6 +234,8 @@ impl GlobalHotkeyListener {
         let rebind_in_flight = Arc::new(AtomicBool::new(false));
         #[cfg(target_os = "linux")]
         let portal_session = Arc::new(Mutex::new(None));
+        #[cfg(target_os = "linux")]
+        let portal_bound_in_session = Arc::new(AtomicBool::new(false));
 
         #[cfg(target_os = "windows")]
         let (platform_name, is_wayland_portal, manager, registered_hotkey) = {
@@ -274,6 +275,7 @@ impl GlobalHotkeyListener {
                     Arc::clone(&active_hotkey),
                     false,
                     Arc::clone(&rebind_in_flight),
+                    Arc::clone(&portal_bound_in_session),
                 );
                 ("Wayland Portal", true, None, None)
             } else if std::env::var_os("DISPLAY").is_some() {
@@ -305,6 +307,8 @@ impl GlobalHotkeyListener {
             rebind_in_flight,
             #[cfg(target_os = "linux")]
             portal_session,
+            #[cfg(target_os = "linux")]
+            portal_bound_in_session,
         }
     }
 
@@ -380,19 +384,47 @@ impl GlobalHotkeyListener {
         {
             let existing = self.portal_session.lock().ok().and_then(|g| g.clone());
             if let Some((conn, session_path)) = existing {
+                let tx = self.tx.clone();
+                let stop = Arc::clone(&self.stop);
+                let portal_session = Arc::clone(&self.portal_session);
+                let active_hotkey = Arc::clone(&self.active_hotkey);
                 let status = Arc::clone(&self.status);
                 let in_flight = Arc::clone(&self.rebind_in_flight);
+                let bound_in_session = Arc::clone(&self.portal_bound_in_session);
                 let _ = std::thread::Builder::new()
                     .name("truesight-portal-rebind".into())
                     .spawn(move || {
-                        let _ = super::hotkey_portal::rebind_existing_portal_session(
+                        let res = super::hotkey_portal::rebind_existing_portal_session(
                             &conn,
                             &session_path,
                             preferred,
                             &status,
+                            &bound_in_session,
                         );
-                        in_flight.store(false, Ordering::Release);
-                        ctx.request_repaint();
+                        if matches!(
+                            res,
+                            Ok(super::hotkey_portal::RebindSessionResult::NeedsFreshSession)
+                        ) {
+                            super::hotkey_portal::close_portal_session(&conn, &session_path);
+                            if let Ok(mut guard) = portal_session.lock() {
+                                *guard = None;
+                            }
+                            bound_in_session.store(false, Ordering::Release);
+                            super::hotkey_portal::spawn_wayland_portal_listener(
+                                tx,
+                                ctx,
+                                status,
+                                stop,
+                                portal_session,
+                                active_hotkey,
+                                true,
+                                in_flight,
+                                bound_in_session,
+                            );
+                        } else {
+                            in_flight.store(false, Ordering::Release);
+                            ctx.request_repaint();
+                        }
                     });
             } else {
                 super::hotkey_portal::spawn_wayland_portal_listener(
@@ -404,6 +436,7 @@ impl GlobalHotkeyListener {
                     Arc::clone(&self.active_hotkey),
                     true,
                     Arc::clone(&self.rebind_in_flight),
+                    Arc::clone(&self.portal_bound_in_session),
                 );
             }
             true

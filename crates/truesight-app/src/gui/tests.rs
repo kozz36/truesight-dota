@@ -5060,3 +5060,28 @@ fn options_window_shows_wayland_configure_shortcut_button_and_custom_recorder() 
         "options window must render Wayland CONFIGURE SHORTCUT button; texts={texts:?}"
     );
 }
+
+#[test]
+fn portal_v2_shortcut_routing_and_startup_bind_decisions() {
+    use super::hotkey::{should_bind_on_startup, should_use_configure_shortcuts};
+
+    assert!(!should_use_configure_shortcuts(0));
+    assert!(!should_use_configure_shortcuts(1));
+    assert!(should_use_configure_shortcuts(2));
+    assert!(should_use_configure_shortcuts(3));
+
+    // Startup must always bind when forced or when no shortcut entry is listed yet.
+    assert!(should_bind_on_startup(true, true, false, 2));
+    assert!(should_bind_on_startup(false, false, false, 1));
+    assert!(should_bind_on_startup(false, false, false, 2));
+
+    // When already listed with an active trigger on Portal v2, bind cleanly on startup so
+    // KDE KGlobalAccel keeps Activated signals active without prompting.
+    assert!(should_bind_on_startup(false, true, true, 2));
+
+    // When listed with empty/unbound trigger (`none,none`) or on Portal v1, skip startup prompt
+    // unless force_bind is requested.
+    assert!(!should_bind_on_startup(false, true, false, 2));
+    assert!(!should_bind_on_startup(false, true, true, 1));
+    assert!(!should_bind_on_startup(false, true, false, 1));
+}

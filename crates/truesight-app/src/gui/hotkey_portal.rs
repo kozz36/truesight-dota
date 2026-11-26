@@ -25,6 +25,33 @@ pub(super) fn portal_status_label(assigned_trigger: Option<&str>, fallback_label
     }
 }
 
+/// Returns `true` when the active XDG GlobalShortcuts portal interface supports v2
+/// `ConfigureShortcuts` for re-opening the compositor shortcut UI on an existing session.
+pub(super) fn should_use_configure_shortcuts(portal_version: u32) -> bool {
+    portal_version >= 2
+}
+
+/// Decides whether startup should call `BindShortcuts` for the new portal session.
+///
+/// Calls `BindShortcuts` when explicitly forced, when no shortcut is stored yet, or when a v2
+/// portal already has a user-assigned trigger (so the session activates without prompting). Skips
+/// when the shortcut is listed with an empty (`none,none`) trigger so users are not surprised at launch.
+pub(super) fn should_bind_on_startup(
+    force_bind: bool,
+    shortcut_listed: bool,
+    has_assigned_trigger: bool,
+    portal_version: u32,
+) -> bool {
+    force_bind || !shortcut_listed || (has_assigned_trigger && portal_version >= 2)
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RebindSessionResult {
+    Done,
+    NeedsFreshSession,
+}
+
 /// Result of running the Wayland XDG GlobalShortcuts portal session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum PortalLoopOutcome {
@@ -179,12 +206,63 @@ fn portal_wait_response(
 }
 
 #[cfg(target_os = "linux")]
+pub(super) fn close_portal_session(
+    conn: &zbus::blocking::Connection,
+    session_path: &zbus::zvariant::OwnedObjectPath,
+) {
+    if let Ok(proxy) = zbus::blocking::Proxy::new(
+        conn,
+        PORTAL_DEST,
+        session_path.as_str(),
+        "org.freedesktop.portal.Session",
+    ) {
+        let _ = proxy.call::<_, _, ()>("Close", &());
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn call_bind_shortcuts(
+    conn: &zbus::blocking::Connection,
+    unique: &str,
+    portal: &zbus::blocking::Proxy<'_>,
+    session_path: &zbus::zvariant::OwnedObjectPath,
+    req_tok: &str,
+    preferred_trigger: &str,
+) -> Result<
+    (
+        u32,
+        std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
+    ),
+    PortalLoopOutcome,
+> {
+    use std::collections::HashMap;
+    use zbus::zvariant::Value;
+
+    portal_wait_response(conn, unique, req_tok, &|tok| {
+        let mut shortcut_props: HashMap<&str, Value<'_>> = HashMap::new();
+        shortcut_props.insert(
+            "description",
+            Value::from("Toggle TrueSight Overlay Click-Through"),
+        );
+        shortcut_props.insert("preferred_trigger", Value::from(preferred_trigger));
+        let shortcuts = vec![(SHORTCUT_ID, shortcut_props)];
+        let mut opts: HashMap<&str, Value<'_>> = HashMap::new();
+        opts.insert("handle_token", Value::from(tok));
+        portal.call(
+            "BindShortcuts",
+            &(session_path.as_ref(), shortcuts, "", opts),
+        )
+    })
+}
+
+#[cfg(target_os = "linux")]
 pub(super) fn rebind_existing_portal_session(
     conn: &zbus::blocking::Connection,
     session_path: &zbus::zvariant::OwnedObjectPath,
     preferred: PassHotkey,
     status: &Arc<Mutex<String>>,
-) -> Result<(), PortalLoopOutcome> {
+    bound_in_session: &Arc<AtomicBool>,
+) -> Result<RebindSessionResult, PortalLoopOutcome> {
     use std::collections::HashMap;
     use zbus::blocking::Proxy;
     use zbus::zvariant::Value;
@@ -196,36 +274,47 @@ pub(super) fn rebind_existing_portal_session(
         .as_str()
         .trim_start_matches(':')
         .replace('.', "_");
-    let seq = REBIND_TOKEN_SEQ.fetch_add(1, Ordering::Relaxed);
-    let req_tok = format!("truesight_rebind_{}_{seq}", std::process::id());
     let portal = Proxy::new(conn, PORTAL_DEST, PORTAL_PATH, PORTAL_IFACE).map_err(unavailable)?;
+    let portal_version: u32 = portal.get_property("version").unwrap_or(1);
     let trigger = preferred.to_portal_trigger();
-    let (code, res) = portal_wait_response(conn, &unique, &req_tok, &|tok| {
-        let mut shortcut_props: HashMap<&str, Value<'_>> = HashMap::new();
-        shortcut_props.insert(
-            "description",
-            Value::from("Toggle TrueSight Overlay Click-Through"),
-        );
-        shortcut_props.insert("preferred_trigger", Value::from(trigger.as_str()));
-        let shortcuts = vec![(SHORTCUT_ID, shortcut_props)];
-        let mut opts: HashMap<&str, Value<'_>> = HashMap::new();
-        opts.insert("handle_token", Value::from(tok));
-        portal.call(
-            "BindShortcuts",
-            &(session_path.as_ref(), shortcuts, "", opts),
-        )
-    })?;
 
-    if code == 0 {
-        let assigned = res
-            .get("shortcuts")
-            .and_then(|val| inspect_portal_shortcuts_value(val, SHORTCUT_ID).1);
-        set_status(
-            status,
-            portal_status_label(assigned.as_deref(), &preferred.format_label()),
-        );
+    let bind_once = |seq_tag: &str| -> Result<(), PortalLoopOutcome> {
+        let seq = REBIND_TOKEN_SEQ.fetch_add(1, Ordering::Relaxed);
+        let req_tok = format!("truesight_{seq_tag}_{}_{seq}", std::process::id());
+        let (code, res) =
+            call_bind_shortcuts(conn, &unique, &portal, session_path, &req_tok, &trigger)?;
+        if code == 0 {
+            bound_in_session.store(true, Ordering::Release);
+            let assigned = res
+                .get("shortcuts")
+                .and_then(|val| inspect_portal_shortcuts_value(val, SHORTCUT_ID).1);
+            set_status(
+                status,
+                portal_status_label(assigned.as_deref(), &preferred.format_label()),
+            );
+        }
+        Ok(())
+    };
+
+    if should_use_configure_shortcuts(portal_version) {
+        if !bound_in_session.load(Ordering::Acquire) {
+            bind_once("prebind")?;
+        }
+        let cfg_opts: HashMap<&str, Value<'_>> = HashMap::new();
+        if portal
+            .call::<_, _, ()>("ConfigureShortcuts", &(session_path.as_ref(), "", cfg_opts))
+            .is_ok()
+        {
+            return Ok(RebindSessionResult::Done);
+        }
+        return Ok(RebindSessionResult::NeedsFreshSession);
     }
-    Ok(())
+
+    if bound_in_session.load(Ordering::Acquire) {
+        return Ok(RebindSessionResult::NeedsFreshSession);
+    }
+    bind_once("rebind")?;
+    Ok(RebindSessionResult::Done)
 }
 
 #[cfg(target_os = "linux")]
@@ -239,6 +328,7 @@ pub(super) fn spawn_wayland_portal_listener(
     active_hotkey: Arc<Mutex<PassHotkey>>,
     force_bind: bool,
     rebind_in_flight: Arc<AtomicBool>,
+    bound_in_session: Arc<AtomicBool>,
 ) {
     let _ = std::thread::Builder::new()
         .name("truesight-global-hotkey".into())
@@ -252,6 +342,7 @@ pub(super) fn spawn_wayland_portal_listener(
                 &active_hotkey,
                 force_bind,
                 &rebind_in_flight,
+                &bound_in_session,
             );
             rebind_in_flight.store(false, Ordering::Release);
             let fallback_lbl = active_fallback_label(&active_hotkey);
@@ -284,6 +375,7 @@ fn run_wayland_portal_loop(
     active_hotkey: &Arc<Mutex<PassHotkey>>,
     force_bind: bool,
     rebind_in_flight: &Arc<AtomicBool>,
+    bound_in_session: &Arc<AtomicBool>,
 ) -> PortalLoopOutcome {
     match run_wayland_portal_loop_inner(
         tx,
@@ -294,6 +386,7 @@ fn run_wayland_portal_loop(
         active_hotkey,
         force_bind,
         rebind_in_flight,
+        bound_in_session,
     ) {
         Ok(()) => PortalLoopOutcome::Finished,
         Err(outcome) => outcome,
@@ -311,6 +404,7 @@ fn run_wayland_portal_loop_inner(
     active_hotkey: &Arc<Mutex<PassHotkey>>,
     force_bind: bool,
     rebind_in_flight: &Arc<AtomicBool>,
+    bound_in_session: &Arc<AtomicBool>,
 ) -> Result<(), PortalLoopOutcome> {
     use std::collections::HashMap;
     use zbus::blocking::{Connection, Proxy};
@@ -327,6 +421,7 @@ fn run_wayland_portal_loop_inner(
         .replace('.', "_");
     let pid = std::process::id();
     let portal = Proxy::new(&conn, PORTAL_DEST, PORTAL_PATH, PORTAL_IFACE).map_err(unavailable)?;
+    let portal_version: u32 = portal.get_property("version").unwrap_or(1);
 
     let mut token_seq = 0_u32;
     let mut next_token = |prefix: &str| {
@@ -368,6 +463,7 @@ fn run_wayland_portal_loop_inner(
     let session_path = OwnedObjectPath::try_from(session_handle_str)
         .map_err(|e| PortalLoopOutcome::Unavailable(e.to_string()))?;
 
+    bound_in_session.store(false, Ordering::Release);
     if let Ok(mut guard) = portal_session.lock() {
         *guard = Some((conn.clone(), session_path.clone()));
     }
@@ -386,43 +482,47 @@ fn run_wayland_portal_loop_inner(
         (shortcut_listed, assigned_trigger) = inspect_portal_shortcuts_value(val, SHORTCUT_ID);
     }
 
-    if force_bind || !shortcut_listed {
+    if should_bind_on_startup(
+        force_bind,
+        shortcut_listed,
+        assigned_trigger.is_some(),
+        portal_version,
+    ) {
         let preferred_trigger = active_hotkey
             .lock()
             .map(|h| h.to_portal_trigger())
             .unwrap_or_else(|_| PORTAL_PREFERRED_TRIGGER.to_string());
         let bind_req_tok = next_token("bind");
-        let (bind_code, bind_res) = portal_wait_response(&conn, &unique, &bind_req_tok, &|tok| {
-            let mut shortcut_props: HashMap<&str, Value<'_>> = HashMap::new();
-            shortcut_props.insert(
-                "description",
-                Value::from("Toggle TrueSight Overlay Click-Through"),
-            );
-            shortcut_props.insert("preferred_trigger", Value::from(preferred_trigger.as_str()));
-            let shortcuts = vec![(SHORTCUT_ID, shortcut_props)];
-            let mut opts: HashMap<&str, Value<'_>> = HashMap::new();
-            opts.insert("handle_token", Value::from(tok));
-            portal.call(
-                "BindShortcuts",
-                &(session_path.as_ref(), shortcuts, "", opts),
-            )
-        })?;
-        rebind_in_flight.store(false, Ordering::Release);
+        let (bind_code, bind_res) = call_bind_shortcuts(
+            &conn,
+            &unique,
+            &portal,
+            &session_path,
+            &bind_req_tok,
+            &preferred_trigger,
+        )?;
         if bind_code == 1 {
+            rebind_in_flight.store(false, Ordering::Release);
             return Err(PortalLoopOutcome::Cancelled);
         }
         if bind_code != 0 {
+            rebind_in_flight.store(false, Ordering::Release);
             return Err(PortalLoopOutcome::Unavailable(format!(
                 "BindShortcuts portal response {bind_code}"
             )));
         }
+        bound_in_session.store(true, Ordering::Release);
         if let Some(val) = bind_res.get("shortcuts") {
             let (_, bind_trigger) = inspect_portal_shortcuts_value(val, SHORTCUT_ID);
             assigned_trigger = bind_trigger;
         }
-    } else {
-        rebind_in_flight.store(false, Ordering::Release);
+        if force_bind && should_use_configure_shortcuts(portal_version) && shortcut_listed {
+            let cfg_opts: HashMap<&str, Value<'_>> = HashMap::new();
+            let _ = portal
+                .call::<_, _, ()>("ConfigureShortcuts", &(session_path.as_ref(), "", cfg_opts));
+        }
     }
+    rebind_in_flight.store(false, Ordering::Release);
 
     let fallback_lbl = active_fallback_label(active_hotkey);
     set_status(
