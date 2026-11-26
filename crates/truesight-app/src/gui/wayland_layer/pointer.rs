@@ -115,6 +115,12 @@ impl ResizePacer {
         Some(next)
     }
 
+    pub(in crate::gui) fn on_configured(&mut self, configured: (u32, u32)) {
+        if self.frame_in_flight.is_some() {
+            self.frame_in_flight = Some(configured);
+        }
+    }
+
     pub(in crate::gui) fn on_frame_committed(
         &mut self,
         committed: (u32, u32),

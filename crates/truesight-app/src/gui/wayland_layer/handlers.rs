@@ -190,6 +190,9 @@ impl LayerShellHandler for WaylandLayerState {
                 .max(active.min_h)
                 .min(MAX_OVERLAY_H);
             active.configured = true;
+            if let InteractionMode::Resizing { ref mut pacer, .. } = active.interaction {
+                pacer.on_configured((active.width, active.height));
+            }
             Some((active.width, active.height, active.scale))
         } else {
             None

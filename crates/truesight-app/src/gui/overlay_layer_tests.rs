@@ -1192,6 +1192,25 @@ fn resize_pacer_coalesces_in_flight_motion_and_advances_on_commit() {
     assert_eq!(pacer.on_motion((420, 255), (424, 258)), Some((424, 258)));
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn resize_pacer_advances_after_compositor_adjusted_configure() {
+    use super::wayland_layer::ResizePacer;
+
+    let mut pacer = ResizePacer::new();
+    // Initial configure before any motion must remain idle.
+    pacer.on_configured((380, 230));
+    assert_eq!(pacer.on_motion((380, 230), (450, 260)), Some((450, 260)));
+
+    // Queue a newer pointer motion while (450, 260) is in flight, then simulate compositor
+    // clamping configure to (440, 260).
+    assert_eq!(pacer.on_motion((450, 260), (460, 270)), None);
+    pacer.on_configured((440, 260));
+
+    // Committing the compositor-accepted (440, 260) frame must advance to the queued (460, 270).
+    assert_eq!(pacer.on_frame_committed((440, 260)), Some((460, 270)));
+}
+
 #[test]
 fn rasterizer_fast_paths_match_uniform_uv_flipped_glow_and_repeat_grain() {
     let mut raster = OverlayRasterizer::new();
