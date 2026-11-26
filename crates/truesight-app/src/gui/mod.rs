@@ -1,4 +1,5 @@
 mod build_bar;
+mod dota_watch;
 mod hotkey;
 mod i18n;
 mod matrix_card;
@@ -123,6 +124,7 @@ pub struct TrueSightGuiApp {
     #[cfg(target_os = "linux")]
     wayland_logical_outputs: Vec<overlay_backend::LogicalOutputBounds>,
     hotkey_listener: Option<hotkey::GlobalHotkeyListener>,
+    dota_watcher: Option<dota_watch::DotaProcessWatcher>,
 }
 
 impl Drop for TrueSightGuiApp {
@@ -212,6 +214,7 @@ impl TrueSightGuiApp {
             #[cfg(target_os = "linux")]
             wayland_logical_outputs: Vec::new(),
             hotkey_listener: None,
+            dota_watcher: None,
         }
     }
 
@@ -429,6 +432,7 @@ impl TrueSightGuiApp {
 
         self.session
             .poll_live_sources(self.gsi_listener.as_mut(), self.vision_worker.as_mut());
+        self.sync_dota_watcher();
         self.poll_stratz_clipboard_watcher();
         self.poll_stratz_clipboard_paste();
         if self
@@ -450,7 +454,7 @@ impl TrueSightGuiApp {
         {
             for action in actions {
                 if action == hotkey::GlobalHotkeyAction::ToggleOverlayPass
-                    && self.session.overlay_mode
+                    && self.session.is_overlay_visible()
                 {
                     let next = !self.session.overlay_geometry.click_through;
                     self.set_overlay_click_through_live(ctx, next);
@@ -460,11 +464,10 @@ impl TrueSightGuiApp {
         }
         let f8_root = Self::is_non_repeating_key_pressed(ctx, egui::Key::F8);
         if f8_root {
-            let next = !self.session.overlay_mode;
-            self.session.set_overlay_mode(next);
+            self.session.toggle_overlay_shortcut();
         }
         if !pass_toggled_this_frame
-            && self.session.overlay_mode
+            && self.session.is_overlay_visible()
             && Self::is_pass_shortcut_pressed(ctx)
         {
             let next = !self.session.overlay_geometry.click_through;
@@ -682,7 +685,7 @@ impl TrueSightGuiApp {
         #[cfg(not(target_os = "linux"))]
         let handled_wayland_layer = false;
 
-        if !handled_wayland_layer && self.session.overlay_mode {
+        if !handled_wayland_layer && self.session.is_overlay_visible() {
             self.render_viewport_overlay(ctx, f8_root, pass_toggled_this_frame);
         } else if !handled_wayland_layer {
             self.overlay_applied_click_through = None;
@@ -840,20 +843,10 @@ impl eframe::App for TrueSightGuiApp {
     }
 }
 
-/// Builds the desktop viewport configuration with low-resolution bounds, Wayland `app_id`, and the Gem icon.
-/// Keeps the native minimum independent of `MIN_UNSCROLLED_*` so 150% DPI scaling on 1280x720 displays
-/// (`640*1.5 = 960`, `440*1.5 = 660`) fits comfortably within the physical screen work area.
-pub(super) fn build_viewport_builder() -> egui::ViewportBuilder {
-    let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([1180.0, 700.0])
-        .with_min_inner_size([640.0, 440.0])
-        .with_app_id("truesight-dota")
-        .with_title("TrueSight Dota — 5v5 Live Draft Oracle");
-    if let Some(icon) = theme::build_gem_window_icon() {
-        viewport = viewport.with_icon(std::sync::Arc::new(icon));
-    }
-    viewport
-}
+#[cfg(test)]
+pub(crate) use top_bar::build_viewport_builder;
+#[cfg(not(test))]
+use top_bar::build_viewport_builder;
 
 pub fn run_gui(
     session: AppSession,
@@ -890,6 +883,7 @@ pub fn run_gui(
                 app.overlay_backend = detected_backend;
             }
             app.hotkey_listener = Some(hotkey::GlobalHotkeyListener::start(cc.egui_ctx.clone()));
+            app.dota_watcher = Some(dota_watch::DotaProcessWatcher::start(cc.egui_ctx.clone()));
             Ok(Box::new(app))
         }),
     )

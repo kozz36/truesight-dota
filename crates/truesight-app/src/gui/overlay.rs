@@ -734,7 +734,7 @@ impl TrueSightGuiApp {
             self.cycle_overlay_monitor(ui.ctx(), host_mode);
         }
         if exit_overlay {
-            self.session.set_overlay_mode(false);
+            self.session.dismiss_overlay();
             ui.ctx().request_repaint();
         }
         if let Some((primary_id, var_id)) = clicked_variant {

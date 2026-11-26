@@ -626,14 +626,14 @@ impl super::TrueSightGuiApp {
                     });
                 }
                 LayerEvent::Closed => {
-                    self.session.set_overlay_mode(false);
+                    self.session.dismiss_overlay();
                     self.reset_wayland_layer_surface_state();
                     main_ctx.request_repaint();
                 }
             }
         }
 
-        if !self.session.overlay_mode {
+        if !self.session.is_overlay_visible() {
             if self.wayland_layer_visible {
                 if let Some(handle) = self.wayland_layer.as_ref() {
                     handle.send(LayerCommand::Hide);
@@ -719,8 +719,8 @@ impl super::TrueSightGuiApp {
                 });
         });
 
-        // Clicking the close button inside the overlay turns off overlay mode immediately.
-        if !self.session.overlay_mode {
+        // Clicking the close button inside the overlay turns off overlay visibility immediately.
+        if !self.session.is_overlay_visible() {
             if self.wayland_layer_visible {
                 if let Some(handle) = self.wayland_layer.as_ref() {
                     handle.send(LayerCommand::Hide);
@@ -835,7 +835,7 @@ impl super::TrueSightGuiApp {
             self.last_overlay_is_post_draft = Some(is_post_draft);
 
             if !f8_root && Self::is_non_repeating_key_pressed(vctx, egui::Key::F8) {
-                self.session.set_overlay_mode(false);
+                self.session.dismiss_overlay();
                 ctx.request_repaint();
             }
             if !pass_toggled_this_frame && Self::is_pass_shortcut_pressed(vctx) {

@@ -5500,3 +5500,62 @@ fn set_ally_faction_clears_stale_build_view_hero_and_refreshes_uncached_team_ite
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+#[test]
+fn auto_overlay_lifecycle_follows_dota_while_manual_pin_stays_always_on() {
+    use crate::session::{UiConfig, load_ui_config_from_dir, save_ui_config_to_dir};
+
+    assert!(UiConfig::default().auto_overlay_with_dota);
+
+    let tmp_dir = std::env::temp_dir().join(format!("ts_auto_ov_cfg_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    let cfg_path = tmp_dir.join("config.toml");
+    let mgr =
+        truesight_adapters::sync::LocalCacheManager::with_optional_account(tmp_dir.clone(), None);
+    let mut session = AppSession::with_cache_and_config(mgr, Some(cfg_path.clone())).unwrap();
+    assert!(session.auto_overlay_with_dota);
+    assert!(!session.overlay_mode);
+    assert!(!session.is_overlay_visible());
+
+    // Launch Dota -> overlay auto-enables; close Dota -> overlay closes automatically.
+    assert!(session.set_dota_process_running(true));
+    assert!(session.is_overlay_visible());
+    assert!(session.set_dota_process_running(false));
+    assert!(!session.is_overlay_visible());
+
+    // Manual dismiss (`X` / `F8`) while Dota is running suppresses auto-open only until Dota exits.
+    session.set_dota_process_running(true);
+    assert!(session.is_overlay_visible());
+    session.dismiss_overlay();
+    assert!(!session.is_overlay_visible());
+    assert!(!session.set_dota_process_running(true));
+    assert!(!session.is_overlay_visible());
+    session.set_dota_process_running(false);
+    session.set_dota_process_running(true);
+    assert!(session.is_overlay_visible());
+
+    // Disabling the Options toggle hides auto-opened overlay and persists cleanly.
+    session.set_auto_overlay_with_dota(false);
+    assert!(!session.is_overlay_visible());
+    let loaded = load_ui_config_from_dir(&tmp_dir);
+    assert!(!loaded.auto_overlay_with_dota);
+    save_ui_config_to_dir(&tmp_dir, &loaded).unwrap();
+
+    // Re-enabling auto-overlay while Dota is still closed keeps overlay hidden.
+    session.set_dota_process_running(false);
+    session.set_auto_overlay_with_dota(true);
+    assert!(!session.is_overlay_visible());
+
+    // Manual pin (`COMPACT OVERLAY: ON` button) keeps overlay ALWAYS visible even when Dota closes
+    // and even when auto-overlay is turned off.
+    session.set_overlay_mode(true);
+    assert!(session.is_overlay_visible());
+    session.set_dota_process_running(false);
+    assert!(session.is_overlay_visible());
+    session.set_auto_overlay_with_dota(false);
+    assert!(session.is_overlay_visible());
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
