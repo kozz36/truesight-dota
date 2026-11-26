@@ -228,8 +228,13 @@ impl TrueSightGuiApp {
                         key,
                         pressed: true,
                         repeat: false,
+                        modifiers,
                         ..
                     } if *key == target
+                        && !modifiers.ctrl
+                        && !modifiers.alt
+                        && !modifiers.shift
+                        && !modifiers.command
                 )
             })
         })

@@ -5085,3 +5085,150 @@ fn portal_v2_shortcut_routing_and_startup_bind_decisions() {
     assert!(!should_bind_on_startup(false, true, true, 1));
     assert!(!should_bind_on_startup(false, true, false, 1));
 }
+
+#[test]
+fn modified_f8_pass_hotkey_toggles_click_through_without_closing_overlay() {
+    use crate::session::PassHotkey;
+
+    let mut app = TrueSightGuiApp::new(make_5v5_gui_session(), None, None);
+    app.onboarding_open = false;
+    app.session.overlay_mode = true;
+    app.session.set_overlay_click_through(false);
+    app.session
+        .set_pass_hotkey(PassHotkey::parse("Ctrl+F8").unwrap());
+
+    let ctx = egui::Context::default();
+    let viewport = vec2(1280.0, 800.0);
+    let ctrl = egui::Modifiers {
+        ctrl: true,
+        ..Default::default()
+    };
+
+    // Sending Ctrl+F8 must NOT toggle overlay visibility; it must trigger PASS only.
+    for pressed in [true, false] {
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), viewport)),
+                modifiers: ctrl,
+                events: vec![egui::Event::Key {
+                    key: egui::Key::F8,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers: ctrl,
+                }],
+                ..Default::default()
+            },
+            |ctx| {
+                app.render_frame(ctx);
+            },
+        );
+    }
+    assert!(
+        app.session.overlay_mode,
+        "Ctrl+F8 must keep overlay open instead of triggering unmodified F8 visibility toggle"
+    );
+    assert!(
+        app.session.overlay_geometry.click_through,
+        "Ctrl+F8 must toggle PASS click-through ON"
+    );
+
+    // Sending unmodified F8 still closes the overlay cleanly.
+    for pressed in [true, false] {
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), viewport)),
+                events: vec![egui::Event::Key {
+                    key: egui::Key::F8,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ctx| {
+                app.render_frame(ctx);
+            },
+        );
+    }
+    assert!(
+        !app.session.overlay_mode,
+        "unmodified F8 must close the overlay"
+    );
+}
+
+#[test]
+fn recording_pass_hotkey_consumes_capture_keypress_without_toggling_overlay() {
+    use crate::session::PassHotkey;
+
+    let mut app = TrueSightGuiApp::new(make_5v5_gui_session(), None, None);
+    app.onboarding_open = false;
+    app.options_open = true;
+    app.hotkey_recording = true;
+    app.session.overlay_mode = true;
+    app.session.set_overlay_click_through(false);
+
+    let ctx = egui::Context::default();
+    let viewport = vec2(1280.0, 800.0);
+    let send_key = |key: egui::Key, modifiers: egui::Modifiers, app: &mut TrueSightGuiApp| {
+        for pressed in [true, false] {
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), viewport)),
+                    modifiers,
+                    events: vec![egui::Event::Key {
+                        key,
+                        physical_key: None,
+                        pressed,
+                        repeat: false,
+                        modifiers,
+                    }],
+                    ..Default::default()
+                },
+                |ctx| {
+                    app.render_frame(ctx);
+                },
+            );
+        }
+    };
+
+    let ctrl_alt = egui::Modifiers {
+        ctrl: true,
+        alt: true,
+        ..Default::default()
+    };
+    send_key(egui::Key::K, ctrl_alt, &mut app);
+    assert_eq!(
+        app.session.pass_hotkey,
+        PassHotkey::parse("Ctrl+Alt+K").unwrap()
+    );
+    assert!(!app.hotkey_recording);
+    assert!(
+        !app.session.overlay_geometry.click_through,
+        "capture keypress Ctrl+Alt+K must NOT immediately toggle click-through on the capture frame"
+    );
+
+    // Next Ctrl+Alt+K press activates the newly recorded binding.
+    send_key(egui::Key::K, ctrl_alt, &mut app);
+    assert!(
+        app.session.overlay_geometry.click_through,
+        "subsequent Ctrl+Alt+K press must toggle click-through ON"
+    );
+
+    // Also test recording Ctrl+F8 while overlay is open: must neither close overlay nor toggle PASS.
+    app.hotkey_recording = true;
+    app.session.set_overlay_click_through(false);
+    let ctrl = egui::Modifiers {
+        ctrl: true,
+        ..Default::default()
+    };
+    send_key(egui::Key::F8, ctrl, &mut app);
+    assert_eq!(
+        app.session.pass_hotkey,
+        PassHotkey::parse("Ctrl+F8").unwrap()
+    );
+    assert!(!app.hotkey_recording);
+    assert!(app.session.overlay_mode);
+    assert!(!app.session.overlay_geometry.click_through);
+}

@@ -517,6 +517,7 @@ pub(super) fn init_desktop_manager(
 impl TrueSightGuiApp {
     pub(super) fn handle_pass_hotkey_frame(&mut self, ctx: &egui::Context) -> (bool, bool) {
         let mut pass_toggled_this_frame = false;
+        let mut captured_this_frame = false;
         if !self.options_open {
             self.hotkey_recording = false;
         }
@@ -528,11 +529,13 @@ impl TrueSightGuiApp {
                         let _ = listener.update_hotkey(ctx, captured);
                     }
                     self.hotkey_recording = false;
+                    captured_this_frame = true;
                     self.status_banner =
                         format!("Pass-through hotkey: {}", captured.format_label());
                 }
                 Some(Err(_escaped)) => {
                     self.hotkey_recording = false;
+                    captured_this_frame = true;
                 }
                 None => {}
             }
@@ -549,6 +552,9 @@ impl TrueSightGuiApp {
                     pass_toggled_this_frame = true;
                 }
             }
+        }
+        if captured_this_frame {
+            return (true, true);
         }
         let f8_root =
             !self.hotkey_recording && Self::is_non_repeating_key_pressed(ctx, egui::Key::F8);
