@@ -4492,4 +4492,58 @@ fn overlay_small_text_scrim_clears_wcag_aa_contrast_over_white_backdrop_at_defau
             );
         }
     }
+
+    let ctx = egui::Context::default();
+    let out = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(160.0, 80.0))),
+            ..Default::default()
+        },
+        |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                super::surfaces::paint_empty_matrix_slot(
+                    ui.painter(),
+                    Rect::from_min_size(pos2(8.0, 8.0), vec2(26.0, 26.0)),
+                    36,
+                    120,
+                    Some("A1"),
+                    8.5,
+                );
+                super::surfaces::paint_empty_matrix_slot(
+                    ui.painter(),
+                    Rect::from_min_size(pos2(40.0, 8.0), vec2(26.0, 26.0)),
+                    36,
+                    120,
+                    Some("E1"),
+                    8.5,
+                );
+            });
+        },
+    );
+    fn collect_fills(shape: &egui::Shape, out: &mut Vec<Color32>) {
+        match shape {
+            egui::Shape::Rect(r) if r.fill != Color32::TRANSPARENT => out.push(r.fill),
+            egui::Shape::Vec(v) => v.iter().for_each(|s| collect_fills(s, out)),
+            _ => {}
+        }
+    }
+    let mut fills = Vec::new();
+    for clipped in &out.shapes {
+        collect_fills(&clipped.shape, &mut fills);
+    }
+    let scrim_count = fills
+        .iter()
+        .filter(|c| {
+            **c == Color32::from_rgba_unmultiplied(
+                P_VOID.r(),
+                P_VOID.g(),
+                P_VOID.b(),
+                super::surfaces::OVERLAY_TEXT_SCRIM_ALPHA,
+            )
+        })
+        .count();
+    assert_eq!(
+        scrim_count, 2,
+        "both labeled empty matrix headers (A1, E1) must paint an opaque-enough dark scrim backing; fills={fills:?}"
+    );
 }

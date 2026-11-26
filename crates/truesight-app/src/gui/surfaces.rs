@@ -448,11 +448,22 @@ pub(super) fn paint_empty_matrix_slot(
         egui::StrokeKind::Inside,
     );
     if let Some(txt) = label {
-        painter.text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            txt,
+        let galley = painter.layout_no_wrap(
+            txt.to_string(),
             egui::FontId::proportional(font_size),
+            super::theme::P_SILVER,
+        );
+        let max_sz = rect.shrink(1.0).size().max(egui::vec2(1.0, 1.0));
+        let badge_sz = (galley.size() + egui::vec2(4.0, 2.0)).min(max_sz);
+        let badge_rect = Rect::from_center_size(rect.center(), badge_sz);
+        painter.rect_filled(
+            badge_rect,
+            CornerRadius::same(2),
+            translucent(P_VOID, OVERLAY_TEXT_SCRIM_ALPHA),
+        );
+        painter.galley(
+            badge_rect.center() - galley.size() * 0.5,
+            galley,
             super::theme::P_SILVER,
         );
     }
