@@ -1,7 +1,12 @@
+#[cfg(target_os = "linux")]
 use super::hotkey::{GlobalHotkeyAction, PASS_HOTKEY_LABEL, init_desktop_manager, set_status};
+#[cfg(target_os = "linux")]
 use crate::session::PassHotkey;
+#[cfg(target_os = "linux")]
 use eframe::egui;
+#[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+#[cfg(target_os = "linux")]
 use std::sync::{Arc, Mutex, mpsc};
 
 /// Default XDG GlobalShortcuts `preferred_trigger` syntax (`https://specifications.freedesktop.org/shortcuts/latest/`).
