@@ -4897,3 +4897,286 @@ fn overlay_small_text_scrim_clears_wcag_aa_contrast_over_white_backdrop_at_defau
         "both labeled empty matrix headers (A1, E1) must paint an opaque-enough dark scrim backing; fills={fills:?}"
     );
 }
+
+#[test]
+fn build_bar_p1_p5_selector_switches_build_view_without_mutating_local_hero() {
+    let mut session = make_5v5_gui_session();
+    session.clear_slot_manual(truesight_core::domain::Side::Allies, 1);
+    let local_hero = session.draft.allies[0]
+        .expect("slot 0 must hold initial ally")
+        .hero_id;
+    session.local_player_hero = Some(local_hero);
+    session.owned_items_owner = Some(local_hero);
+    session.toggle_post_draft_build_view();
+    let mut app = TrueSightGuiApp::new(session, None, None);
+    let ctx = egui::Context::default();
+
+    let run_build_bar = |app: &mut TrueSightGuiApp, events: Vec<egui::Event>| {
+        let mut captured = None;
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(900.0, 500.0))),
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    captured = Some(app.render_item_build_card(ui));
+                });
+            },
+        );
+        captured.expect("render_item_build_card output")
+    };
+    let click_build_bar = |app: &mut TrueSightGuiApp, pos: egui::Pos2| {
+        for pressed in [true, false] {
+            let _ = run_build_bar(
+                app,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::default(),
+                    },
+                ],
+            );
+        }
+    };
+
+    let out = run_build_bar(&mut app, Vec::new());
+    let p3_rect = out.ally_role_buttons[2];
+    let p2_rect = out.ally_role_buttons[1];
+    assert_ne!(
+        p3_rect,
+        Rect::NOTHING,
+        "picked P3 button must have valid rect"
+    );
+    assert_ne!(
+        p2_rect,
+        Rect::NOTHING,
+        "empty P2 button must have valid rect"
+    );
+
+    // Click empty P2 slot: disabled, must NOT change build_view_hero.
+    click_build_bar(&mut app, p2_rect.center());
+    assert_eq!(app.session.build_view_hero, None);
+
+    // Click picked P3: switches build_view_hero while preserving local_player_hero & owner.
+    click_build_bar(&mut app, p3_rect.center());
+    let expected_p3 = app.session.draft.allies[2].map(|p| p.hero_id);
+    assert_eq!(app.session.build_view_hero, expected_p3);
+    assert_eq!(app.session.local_player_hero, Some(local_hero));
+    assert_eq!(app.session.owned_items_owner, Some(local_hero));
+    assert_eq!(
+        app.session.draft.allies[0].map(|p| p.hero_id),
+        Some(local_hero)
+    );
+}
+
+#[test]
+fn overlay_build_p1_p5_selector_switches_build_view_and_preserves_local_identity() {
+    use truesight_core::domain::HeroId;
+
+    let mut session = make_5v5_gui_session();
+    session.local_player_hero = Some(HeroId(1));
+    session.owned_items_owner = Some(HeroId(1));
+    session.overlay_mode = true;
+    session.toggle_post_draft_build_view();
+    let mut app = TrueSightGuiApp::new(session, None, None);
+    let ctx = egui::Context::default();
+
+    let run_overlay = |app: &mut TrueSightGuiApp, events: Vec<egui::Event>| {
+        let mut captured = None;
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(440.0, 210.0))),
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    captured = Some(app.render_overlay_panel(ui));
+                });
+            },
+        );
+        captured.expect("render_overlay_panel output")
+    };
+
+    let out = run_overlay(&mut app, Vec::new());
+    let p3_rect = out.build_ally_buttons[2];
+    assert_ne!(
+        p3_rect,
+        Rect::NOTHING,
+        "overlay build view must expose P1..P5 ally buttons"
+    );
+
+    for pressed in [true, false] {
+        let _ = run_overlay(
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(p3_rect.center()),
+                egui::Event::PointerButton {
+                    pos: p3_rect.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+    }
+    let expected_p3 = app.session.draft.allies[2].map(|p| p.hero_id);
+    assert_eq!(app.session.build_view_hero, expected_p3);
+    assert_eq!(app.session.local_player_hero, Some(HeroId(1)));
+    assert_eq!(app.session.owned_items_owner, Some(HeroId(1)));
+}
+
+#[test]
+fn overlay_header_faction_swap_button_toggles_ally_faction() {
+    use truesight_core::domain::Faction;
+
+    let mut session = make_5v5_gui_session();
+    session.overlay_mode = true;
+    assert_eq!(session.draft.ally_faction, Faction::Radiant);
+    let mut app = TrueSightGuiApp::new(session, None, None);
+    let ctx = egui::Context::default();
+
+    let run_overlay = |app: &mut TrueSightGuiApp, events: Vec<egui::Event>| {
+        let mut captured = None;
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(420.0, 240.0))),
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    captured = Some(app.render_overlay_panel(ui));
+                });
+            },
+        );
+        captured.expect("render_overlay_panel output")
+    };
+
+    let out = run_overlay(&mut app, Vec::new());
+    assert_ne!(
+        out.faction_swap_button,
+        Rect::NOTHING,
+        "overlay header must expose Radiant/Dire faction swap button"
+    );
+    for pressed in [true, false] {
+        let _ = run_overlay(
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(out.faction_swap_button.center()),
+                egui::Event::PointerButton {
+                    pos: out.faction_swap_button.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+    }
+    assert_eq!(
+        app.session.draft.ally_faction,
+        Faction::Dire,
+        "clicking overlay faction swap button must toggle Radiant -> Dire"
+    );
+}
+
+#[test]
+fn overlay_picks_matrix_and_build_phases_center_when_space_allows() {
+    assert_eq!(super::overlay::centered_leading_space(200.0, 140.0), 30.0);
+    assert_eq!(super::overlay::centered_leading_space(120.0, 140.0), 0.0);
+
+    // 1. Picks overlay: 5x5 CNT matrix is horizontally centered between TOP PICKS and right edge.
+    let mut session = make_5v5_gui_session();
+    session.overlay_mode = true;
+    let mut app = TrueSightGuiApp::new(session, None, None);
+    let ctx = egui::Context::default();
+    let mut picks_out = None;
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(580.0, 260.0))),
+            ..Default::default()
+        },
+        |ctx| {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE)
+                .show(ctx, |ui| {
+                    picks_out = Some(app.render_overlay_panel(ui));
+                });
+        },
+    );
+    let picks_out = picks_out.expect("picks overlay output");
+    let zone_left = picks_out.picks_col_rect.max.x + 8.0;
+    let zone_right = picks_out.rect.max.x - 8.0;
+    let left_margin = picks_out.matrix_rect.min.x - zone_left;
+    let right_margin = zone_right - picks_out.matrix_rect.max.x;
+    assert!(
+        (left_margin - right_margin).abs() <= 3.0,
+        "picks matrix should be horizontally centered in right zone: left_margin={left_margin:.1}, right_margin={right_margin:.1}, zone=({zone_left:.1}..{zone_right:.1}), matrix={:?}",
+        picks_out.matrix_rect
+    );
+
+    // 2. Build overlay: EARLY > CORE > LATE phase strip centers when wide, stays left-aligned when narrow.
+    app.session.toggle_post_draft_build_view();
+    let mut wide_build = None;
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(620.0, 200.0))),
+            ..Default::default()
+        },
+        |ctx| {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE)
+                .show(ctx, |ui| {
+                    wide_build = Some(app.render_overlay_panel(ui));
+                });
+        },
+    );
+    let wide_build = wide_build.expect("wide build overlay output");
+    let phases_rect = wide_build
+        .build_phases_rect
+        .expect("build_phases_rect must be present");
+    let inner_left = wide_build.rect.min.x + 8.0;
+    let inner_right = wide_build.rect.max.x - 8.0;
+    let b_left = phases_rect.min.x - inner_left;
+    let b_right = inner_right - phases_rect.max.x;
+    assert!(
+        b_left > 10.0 && (b_left - b_right).abs() <= 4.0,
+        "wide build phases ({:?}) should be centered inside panel ({:?}): b_left={b_left:.1}, b_right={b_right:.1}",
+        phases_rect,
+        wide_build.rect
+    );
+
+    // 3. Narrow Build overlay preserves zero-clamped leading space (`centered_leading_space == 0.0`
+    //    when content exceeds width) so horizontal scrolling stays left-aligned without clipping.
+    let mut narrow_build = None;
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(220.0, 120.0))),
+            ..Default::default()
+        },
+        |ctx| {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE)
+                .show(ctx, |ui| {
+                    narrow_build = Some(app.render_overlay_panel(ui));
+                });
+        },
+    );
+    let narrow_build = narrow_build.expect("narrow build overlay output");
+    let narrow_phases = narrow_build
+        .build_phases_rect
+        .expect("narrow build_phases_rect must be present");
+    let narrow_avail = (narrow_build.rect.width() - 16.0).max(0.0);
+    let expected_lead = super::overlay::centered_leading_space(narrow_avail, narrow_phases.width());
+    let actual_lead = narrow_phases.min.x - (narrow_build.rect.min.x + 8.0);
+    assert!(
+        (actual_lead - expected_lead).abs() <= 2.5,
+        "narrow build phases ({:?}) leading offset {actual_lead:.1} must match centered_leading_space={expected_lead:.1}",
+        narrow_phases
+    );
+}

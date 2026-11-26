@@ -124,6 +124,12 @@ fn hero_role_affinity(matrix: &MatchupMatrix, hero_id: HeroId, role: Role) -> f3
     }
 }
 
+fn normalized_inventory_signature(items: &[ItemId]) -> Vec<u16> {
+    let mut ids: Vec<u16> = items.iter().map(|id| id.0).collect();
+    ids.sort_unstable();
+    ids
+}
+
 struct RoleAssignmentSearch<'a> {
     matrix: &'a MatchupMatrix,
     heroes: &'a [HeroId],
@@ -1014,10 +1020,16 @@ impl AppSession {
                 if let Some(owner_id) = explicit_owner.or(self.local_player_hero) {
                     self.owned_items_owner = Some(owner_id);
                 }
-                self.owned_items = item_slugs
+                let new_items: Vec<ItemId> = item_slugs
                     .iter()
                     .filter_map(|slug| self.item_repo.item_by_slug(slug).map(|e| e.id))
                     .collect();
+                let inventory_changed = normalized_inventory_signature(&new_items)
+                    != normalized_inventory_signature(&self.owned_items);
+                self.owned_items = new_items;
+                if inventory_changed {
+                    self.build_view_hero = None;
+                }
             }
             DraftEvent::DraftReset => {
                 self.reset_draft();
