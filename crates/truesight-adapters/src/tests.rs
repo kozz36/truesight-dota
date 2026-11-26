@@ -8500,7 +8500,7 @@ fn pickphase_ranked_reveal_sequence_and_shorter_cards_detect_spirit_breaker_and_
 fn pickphase_ranked_medal_banner_and_slanted_cards_detect_luna_last_pick_without_phantoms() {
     use crate::vision::{
         HeroVisionCatalog, RgbFrame, ScreenFrameSource, VisionCaptureAdapter,
-        compute_pickphase_topbar_slot_rects, parse_hero_atlas, pickphase_upper_core_rect,
+        compute_pickphase_topbar_slot_rects, parse_ppm_p6, pickphase_upper_core_rect,
     };
     use std::collections::VecDeque;
     use truesight_core::domain::Side;
@@ -8520,144 +8520,26 @@ fn pickphase_ranked_medal_banner_and_slanted_cards_detect_luna_last_pick_without
         }
     }
 
-    let atlas = parse_hero_atlas().expect("embedded hero atlas must load");
+    let load_ranked_strip = |ppm: &[u8]| -> RgbFrame {
+        let strip = parse_ppm_p6(ppm).expect("anonymized Ranked 2-2-1 topbar PPM must decode");
+        assert_eq!((strip.width, strip.height), (1279, 47));
+        RgbFrame::with_source_height(strip.width, strip.height, 722, strip.rgb)
+    };
+
+    // Anonymized top-bar-only captures (y = 0..47, no player names) from the live Ranked 2-2-1
+    // session where the previous 118px (+18/+8) PickPhase crop missed Luna (#48) on Wave 3.
+    let w1 = load_ranked_strip(include_bytes!("../tests/fixtures/ranked_221_w1.ppm"));
+    let w2 = load_ranked_strip(include_bytes!("../tests/fixtures/ranked_221_w2.ppm"));
+    let w3 = load_ranked_strip(include_bytes!("../tests/fixtures/ranked_221_w3.ppm"));
+
     let catalog = HeroVisionCatalog::from_embedded().expect("vision catalog must load");
-    let rad_colors = [
-        [52_u8, 118, 255],
-        [102, 255, 192],
-        [191, 0, 191],
-        [243, 240, 11],
-        [255, 107, 0],
-    ];
-    let dire_colors = [
-        [254_u8, 134, 194],
-        [161, 180, 71],
-        [101, 217, 247],
-        [0, 131, 33],
-        [164, 105, 0],
-    ];
+    let frames = VecDeque::from([w1.clone(), w1, w2.clone(), w2, w3.clone(), w3]);
+    let mut adapter = VisionCaptureAdapter::new(QueueSource(frames), catalog);
 
-    for (fw, vh, strip_h) in [
-        (2560_usize, 1440_usize, 116_usize),
-        (1280_usize, 720_usize, 64_usize),
-    ] {
-        let sx = fw as f32 / 2560.0;
-        let sy = vh as f32 / 1440.0;
-
-        let paint_ranked_frame =
-            |rad_picks: &[Option<u16>; 5], dire_picks: &[Option<u16>; 5]| -> RgbFrame {
-                let mut rgb = vec![16_u8; fw * strip_h * 3];
-                for (is_rad, slot_picks, base_x, pad_x, colors) in [
-                    (true, rad_picks, 280_usize, 12.0_f32, rad_colors),
-                    (false, dire_picks, 1475_usize, 2.0_f32, dire_colors),
-                ] {
-                    let bar_h = (8.0 * sy).round().max(1.0) as usize;
-                    let bar_w = (140.0 * sx).round().max(1.0) as usize;
-                    let card_y0 = (9.0 * sy).round() as usize;
-                    let card_h = (82.0 * sy).round().max(1.0) as usize;
-                    let card_w = (126.0 * sx).round().max(1.0) as usize;
-                    let clear_rows = ((card_h as f32) * (23.0 / 36.0)).round() as usize;
-
-                    for (slot, maybe_hid) in slot_picks.iter().enumerate() {
-                        let bar_x0 = ((base_x as f32 + slot as f32 * 165.0) * sx).round() as usize;
-                        for py in 0..bar_h {
-                            for px in bar_x0..(bar_x0 + bar_w).min(fw) {
-                                let idx = (py * fw + px) * 3;
-                                rgb[idx..idx + 3].copy_from_slice(&colors[slot]);
-                            }
-                        }
-
-                        let slot_x0 = bar_x0;
-                        let slot_w = (144.0 * sx).round().max(1.0) as usize;
-                        let dp_x0 = (114.0 * sx).round() as usize;
-                        let dp_x1 = (132.0 * sx).round() as usize;
-                        let dp_y0 = (44.0 * sy).round() as usize;
-                        if let Some(hid) = maybe_hid {
-                            let hero_rgb = &atlas.heroes[&HeroId(*hid)];
-                            for dy in 0..card_h {
-                                // Paint a bright Ranked medal & Dota Plus banner across the bottom 11/36 of the card.
-                                if dy >= clear_rows {
-                                    for dx in 0..slot_w {
-                                        let px = (slot_x0 + dx).min(fw - 1);
-                                        let py = (card_y0 + dy).min(strip_h - 1);
-                                        let d = (py * fw + px) * 3;
-                                        let is_gold = (dx + dy) % 5 < 2;
-                                        rgb[d] = if is_gold { 210 } else { 155 };
-                                        rgb[d + 1] = if is_gold { 182 } else { 165 };
-                                        rgb[d + 2] = if is_gold { 96 } else { 180 };
-                                    }
-                                    continue;
-                                }
-                                let sy_src = (dy * atlas.hero_height) / card_h;
-                                for dx in 0..slot_w {
-                                    let outer_frame = if is_rad {
-                                        dx < (8.0 * sx).round() as usize
-                                            || dx
-                                                >= ((134.0 - (dy as f32 / sy) * 0.10) * sx).round()
-                                                    as usize
-                                    } else {
-                                        dx < ((dy as f32 / sy) * 0.08 * sx).round() as usize
-                                            || dx >= (130.0 * sx).round() as usize
-                                    };
-                                    let px = (slot_x0 + dx).min(fw - 1);
-                                    let py = (card_y0 + dy).min(strip_h - 1);
-                                    let d = (py * fw + px) * 3;
-                                    if outer_frame {
-                                        rgb[d] = 18;
-                                        rgb[d + 1] = 22;
-                                        rgb[d + 2] = 28;
-                                        continue;
-                                    }
-                                    // Lower-right Dota Plus tier emblem overlapping dy=42..57, dx=102..138.
-                                    if dy >= dp_y0 && dx >= dp_x0 && dx <= dp_x1 {
-                                        rgb[d] = 225;
-                                        rgb[d + 1] = 200;
-                                        rgb[d + 2] = 48;
-                                        continue;
-                                    }
-                                    let rel_dx = dx
-                                        .saturating_sub((pad_x * sx).round() as usize)
-                                        .min(card_w - 1);
-                                    let sx_src = (rel_dx * atlas.hero_width) / card_w;
-                                    let s = (sy_src * atlas.hero_width + sx_src) * 3;
-                                    rgb[d..d + 3].copy_from_slice(&hero_rgb[s..s + 3]);
-                                }
-                            }
-                        } else {
-                            for py in card_y0..(card_y0 + card_h).min(strip_h) {
-                                for px in slot_x0..(slot_x0 + slot_w).min(fw) {
-                                    let idx = (py * fw + px) * 3;
-                                    rgb[idx] = 22;
-                                    rgb[idx + 1] = 26;
-                                    rgb[idx + 2] = 34;
-                                }
-                            }
-                        }
-                    }
-                }
-                RgbFrame::with_source_height(fw, strip_h, vh, rgb)
-            };
-
-        // Mirrors real Ranked 2-2-1 capture sequence: Wave 1 (2 Dire picks), Wave 2 (9 picked,
-        // Radiant Pos 3 open), and Last Pick (Luna #48 revealed in Radiant slot 3).
-        let w1 = paint_ranked_frame(
-            &[None, None, None, None, None],
-            &[None, Some(72), None, None, Some(5)],
-        );
-        let w2 = paint_ranked_frame(
-            &[Some(104), Some(30), Some(87), None, Some(35)],
-            &[None, Some(72), Some(57), Some(41), Some(5)],
-        );
-        let w3 = paint_ranked_frame(
-            &[Some(104), Some(30), Some(87), Some(48), Some(35)],
-            &[Some(21), Some(72), Some(57), Some(41), Some(5)],
-        );
-
-        let frames = VecDeque::from([w1.clone(), w1, w2.clone(), w2, w3.clone(), w3]);
-        let mut adapter = VisionCaptureAdapter::new(QueueSource(frames), catalog.clone());
-        let mut detected = Vec::new();
-        for _ in 0..6 {
-            for ev in adapter.poll_events().unwrap() {
+    let poll_two_frames_sorted = |ad: &mut VisionCaptureAdapter<QueueSource>| {
+        let mut wave = Vec::new();
+        for _ in 0..2 {
+            for ev in ad.poll_events().unwrap() {
                 if let DraftEvent::PickDetected {
                     side,
                     slot,
@@ -8665,19 +8547,42 @@ fn pickphase_ranked_medal_banner_and_slanted_cards_detect_luna_last_pick_without
                     ..
                 } = ev
                 {
-                    detected.push((side, slot, hero_id));
+                    wave.push((side, slot, hero_id));
                 }
             }
         }
+        wave.sort_by_key(|(side, slot, id)| (*side as u8, *slot, id.0));
+        wave
+    };
 
-        assert!(
-            detected.contains(&(Side::Allies, 3, HeroId(48))),
-            "{fw}x{vh}: Ranked last-pick Luna (#48) in Radiant slot 3 must be detected; got {detected:?}"
-        );
-        assert_eq!(
-            detected.len(),
-            10,
-            "{fw}x{vh}: all 10 Ranked picks must lock with 0 empty-slot phantoms; got {detected:?}"
-        );
-    }
+    assert_eq!(
+        poll_two_frames_sorted(&mut adapter),
+        vec![
+            (Side::Enemies, 1, HeroId(72)),
+            (Side::Enemies, 4, HeroId(5)),
+        ],
+        "Wave 1 must emit exactly the 2 Dire picks with 0 empty-slot phantoms"
+    );
+
+    assert_eq!(
+        poll_two_frames_sorted(&mut adapter),
+        vec![
+            (Side::Allies, 0, HeroId(104)),
+            (Side::Allies, 1, HeroId(30)),
+            (Side::Allies, 2, HeroId(87)),
+            (Side::Allies, 4, HeroId(35)),
+            (Side::Enemies, 2, HeroId(57)),
+            (Side::Enemies, 3, HeroId(41)),
+        ],
+        "Wave 2 must emit exact 6 new picks without prematching open Radiant slot 3 or Dire slot 0"
+    );
+
+    assert_eq!(
+        poll_two_frames_sorted(&mut adapter),
+        vec![
+            (Side::Allies, 3, HeroId(48)),
+            (Side::Enemies, 0, HeroId(21)),
+        ],
+        "Wave 3 must lock last-pick Luna (#48) in Radiant slot 3 and Windranger (#21) in Dire slot 0"
+    );
 }
