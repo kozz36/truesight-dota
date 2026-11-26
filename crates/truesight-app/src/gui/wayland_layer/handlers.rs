@@ -201,7 +201,9 @@ impl LayerShellHandler for WaylandLayerState {
                 height,
                 scale,
             });
-            self.commit_pending_frame();
+            if self.commit_pending_frame() {
+                self.advance_queued_resize();
+            }
         }
     }
 }

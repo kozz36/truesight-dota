@@ -35,6 +35,112 @@ pub(super) fn map_wayland_button(button: u32) -> Option<egui::PointerButton> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::gui) struct PendingSetGeometry {
+    pub(in crate::gui) is_post_draft: bool,
+    pub(in crate::gui) x: i32,
+    pub(in crate::gui) y: i32,
+    pub(in crate::gui) width: u32,
+    pub(in crate::gui) height: u32,
+    pub(in crate::gui) min_w: u32,
+    pub(in crate::gui) min_h: u32,
+}
+
+/// Buffers view transitions (`LayerCommand::SetGeometry`) sent while a native pointer drag or
+/// resize is active so the gesture finishes cleanly under the view that started it and the target
+/// view geometry applies immediately on release.
+#[derive(Debug, Default, Clone, Copy)]
+pub(in crate::gui) struct DeferredGeometryQueue {
+    pending: Option<PendingSetGeometry>,
+}
+
+impl DeferredGeometryQueue {
+    pub(in crate::gui) fn clear(&mut self) {
+        self.pending = None;
+    }
+
+    pub(in crate::gui) fn on_set_geometry(
+        &mut self,
+        gesture_active: bool,
+        req: PendingSetGeometry,
+    ) -> Option<PendingSetGeometry> {
+        if gesture_active {
+            self.pending = Some(req);
+            None
+        } else {
+            self.pending = None;
+            Some(req)
+        }
+    }
+
+    pub(in crate::gui) fn on_gesture_finished(
+        &mut self,
+        gesture_active: bool,
+    ) -> Option<PendingSetGeometry> {
+        if gesture_active {
+            None
+        } else {
+            self.pending.take()
+        }
+    }
+}
+
+/// Coalesces high-rate Wayland pointer resize motions so at most one un-presented size transition
+/// is in flight at a time, preventing stale-dimension `PresentFrame` drops while animating smoothly.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(in crate::gui) struct ResizePacer {
+    frame_in_flight: Option<(u32, u32)>,
+    queued_size: Option<(u32, u32)>,
+}
+
+impl ResizePacer {
+    pub(in crate::gui) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(in crate::gui) fn on_motion(
+        &mut self,
+        current: (u32, u32),
+        next: (u32, u32),
+    ) -> Option<(u32, u32)> {
+        if self.frame_in_flight.is_some() {
+            self.queued_size = (next != current).then_some(next);
+            return None;
+        }
+        if next == current {
+            return None;
+        }
+        self.frame_in_flight = Some(next);
+        self.queued_size = None;
+        Some(next)
+    }
+
+    pub(in crate::gui) fn on_frame_committed(
+        &mut self,
+        committed: (u32, u32),
+    ) -> Option<(u32, u32)> {
+        if let Some(inflight) = self.frame_in_flight
+            && inflight != committed
+        {
+            return None;
+        }
+        if let Some(queued) = self.queued_size.take()
+            && queued != committed
+        {
+            self.frame_in_flight = Some(queued);
+            Some(queued)
+        } else {
+            self.frame_in_flight = None;
+            None
+        }
+    }
+
+    pub(in crate::gui) fn on_finish(&mut self, current: (u32, u32)) -> Option<(u32, u32)> {
+        self.frame_in_flight = None;
+        self.queued_size.take().filter(|&sz| sz != current)
+    }
+}
+
 impl WaylandLayerState {
     fn handle_anchored_pointer_events(
         &mut self,
@@ -125,6 +231,30 @@ impl WaylandLayerState {
             }
         }
         let _ = self.conn.flush();
+    }
+    pub(super) fn advance_queued_resize(&mut self) {
+        let next_event = if let Some(active) = self.active_surface.as_mut()
+            && let InteractionMode::Resizing { ref mut pacer, .. } = active.interaction
+            && let Some((w, h)) = pacer.on_frame_committed((active.width, active.height))
+        {
+            active.width = w;
+            active.height = h;
+            active.layer.set_size(active.width, active.height);
+            active.layer.commit();
+            Some(LayerEvent::GeometryChanged {
+                is_post_draft: active.is_post_draft,
+                x: active.output_origin.0 + active.margin_x,
+                y: active.output_origin.1 + active.margin_y,
+                width: active.width,
+                height: active.height,
+                persist: false,
+            })
+        } else {
+            None
+        };
+        if let Some(ev) = next_event {
+            self.emit(ev);
+        }
     }
 }
 
@@ -232,6 +362,7 @@ impl PointerHandler for WaylandLayerState {
                             InteractionMode::Resizing {
                                 start_local,
                                 start_size,
+                                ref mut pacer,
                             } => {
                                 let delta = (px - start_local.0, py - start_local.1);
                                 let next = compute_resize_step(
@@ -240,9 +371,11 @@ impl PointerHandler for WaylandLayerState {
                                     (active.min_w, active.min_h),
                                     (MAX_OVERLAY_W, MAX_OVERLAY_H),
                                 );
-                                if next != (active.width, active.height) {
-                                    active.width = next.0;
-                                    active.height = next.1;
+                                if let Some((w, h)) =
+                                    pacer.on_motion((active.width, active.height), next)
+                                {
+                                    active.width = w;
+                                    active.height = h;
                                     active.layer.set_size(active.width, active.height);
                                     active.layer.commit();
                                     pending_events.push(LayerEvent::GeometryChanged {
@@ -262,6 +395,15 @@ impl PointerHandler for WaylandLayerState {
                     }
                     PointerEventKind::Leave { .. } => {
                         if !matches!(active.interaction, InteractionMode::None) {
+                            if let InteractionMode::Resizing { ref mut pacer, .. } =
+                                active.interaction
+                                && let Some((w, h)) = pacer.on_finish((active.width, active.height))
+                            {
+                                active.width = w;
+                                active.height = h;
+                                active.layer.set_size(active.width, active.height);
+                                active.layer.commit();
+                            }
                             active.interaction = InteractionMode::None;
                             gesture_finished = true;
                             pending_events.push(LayerEvent::GeometryChanged {
@@ -284,6 +426,7 @@ impl PointerHandler for WaylandLayerState {
                                 active.interaction = InteractionMode::Resizing {
                                     start_local: (px, py),
                                     start_size: (active.width, active.height),
+                                    pacer: ResizePacer::new(),
                                 };
                                 continue;
                             }
@@ -308,6 +451,15 @@ impl PointerHandler for WaylandLayerState {
                         if button == BTN_LEFT
                             && !matches!(active.interaction, InteractionMode::None)
                         {
+                            if let InteractionMode::Resizing { ref mut pacer, .. } =
+                                active.interaction
+                                && let Some((w, h)) = pacer.on_finish((active.width, active.height))
+                            {
+                                active.width = w;
+                                active.height = h;
+                                active.layer.set_size(active.width, active.height);
+                                active.layer.commit();
+                            }
                             active.interaction = InteractionMode::None;
                             gesture_finished = true;
                             pending_events.push(LayerEvent::GeometryChanged {
