@@ -8603,3 +8603,28 @@ fn pickphase_ranked_medal_banner_and_slanted_cards_detect_luna_last_pick_without
         "Wave 3 must lock last-pick Luna (#48) in Radiant slot 3 and Windranger (#21) in Dire slot 0"
     );
 }
+
+#[test]
+fn dota_process_parsers_detect_exact_linux_comm_and_windows_tasklist_csv() {
+    use crate::dota_process::{parse_proc_comm_is_dota2, parse_tasklist_has_dota2};
+
+    assert!(parse_proc_comm_is_dota2("dota2\n"));
+    assert!(parse_proc_comm_is_dota2("dota2"));
+    assert!(!parse_proc_comm_is_dota2("dota2.exe\n"));
+    assert!(!parse_proc_comm_is_dota2("truesight-dota\n"));
+    assert!(!parse_proc_comm_is_dota2(""));
+
+    assert!(parse_tasklist_has_dota2(
+        "\"dota2.exe\",\"1234\",\"Console\",\"1\",\"1,234,560 K\"\r\n"
+    ));
+    assert!(parse_tasklist_has_dota2(
+        "\"Dota2.EXE\",\"55\",\"Console\",\"1\",\"500,000 K\"\n"
+    ));
+    assert!(!parse_tasklist_has_dota2(
+        "INFO: No tasks are running which match the specified criteria.\r\n"
+    ));
+    assert!(!parse_tasklist_has_dota2(
+        "\"notdota2.exe\",\"999\",\"Console\",\"1\",\"12,000 K\"\n"
+    ));
+    assert!(!parse_tasklist_has_dota2(""));
+}

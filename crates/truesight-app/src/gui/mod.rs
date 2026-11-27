@@ -1,4 +1,5 @@
 mod build_bar;
+mod dota_watch;
 mod hotkey;
 #[cfg(any(target_os = "linux", test))]
 mod hotkey_portal;
@@ -124,8 +125,11 @@ pub struct TrueSightGuiApp {
     ),
     #[cfg(target_os = "linux")]
     wayland_logical_outputs: Vec<overlay_backend::LogicalOutputBounds>,
+    #[cfg(target_os = "linux")]
+    wayland_outputs_unavailable: bool,
     hotkey_listener: Option<hotkey::GlobalHotkeyListener>,
     pub(super) hotkey_recording: bool,
+    dota_watcher: Option<dota_watch::DotaProcessWatcher>,
 }
 
 impl Drop for TrueSightGuiApp {
@@ -214,8 +218,11 @@ impl TrueSightGuiApp {
             wayland_last_hit_regions: (None, None),
             #[cfg(target_os = "linux")]
             wayland_logical_outputs: Vec::new(),
+            #[cfg(target_os = "linux")]
+            wayland_outputs_unavailable: false,
             hotkey_listener: None,
             hotkey_recording: false,
+            dota_watcher: None,
         }
     }
 
@@ -424,6 +431,7 @@ impl TrueSightGuiApp {
 
         self.session
             .poll_live_sources(self.gsi_listener.as_mut(), self.vision_worker.as_mut());
+        self.sync_dota_watcher();
         self.poll_stratz_clipboard_watcher();
         self.poll_stratz_clipboard_paste();
         if self
@@ -649,7 +657,7 @@ impl TrueSightGuiApp {
         #[cfg(not(target_os = "linux"))]
         let handled_wayland_layer = false;
 
-        if !handled_wayland_layer && self.session.overlay_mode {
+        if !handled_wayland_layer && self.session.is_overlay_visible() {
             self.render_viewport_overlay(ctx, f8_root, pass_toggled_this_frame);
         } else if !handled_wayland_layer {
             self.overlay_applied_click_through = None;
@@ -807,20 +815,10 @@ impl eframe::App for TrueSightGuiApp {
     }
 }
 
-/// Builds the desktop viewport configuration with low-resolution bounds, Wayland `app_id`, and the Gem icon.
-/// Keeps the native minimum independent of `MIN_UNSCROLLED_*` so 150% DPI scaling on 1280x720 displays
-/// (`640*1.5 = 960`, `440*1.5 = 660`) fits comfortably within the physical screen work area.
-pub(super) fn build_viewport_builder() -> egui::ViewportBuilder {
-    let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([1180.0, 700.0])
-        .with_min_inner_size([640.0, 440.0])
-        .with_app_id("truesight-dota")
-        .with_title("TrueSight Dota — 5v5 Live Draft Oracle");
-    if let Some(icon) = theme::build_gem_window_icon() {
-        viewport = viewport.with_icon(std::sync::Arc::new(icon));
-    }
-    viewport
-}
+#[cfg(test)]
+pub(crate) use top_bar::build_viewport_builder;
+#[cfg(not(test))]
+use top_bar::build_viewport_builder;
 
 pub fn run_gui(
     session: AppSession,
@@ -860,6 +858,7 @@ pub fn run_gui(
                 cc.egui_ctx.clone(),
                 app.session.pass_hotkey,
             ));
+            app.dota_watcher = Some(dota_watch::DotaProcessWatcher::start(cc.egui_ctx.clone()));
             Ok(Box::new(app))
         }),
     )

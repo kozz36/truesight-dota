@@ -5602,3 +5602,44 @@ fn overlay_picks_matrix_and_build_phases_center_when_space_allows() {
         narrow_phases
     );
 }
+
+#[test]
+fn options_window_renders_auto_overlay_toggle_without_low_res_overlap() {
+    let mut app = TrueSightGuiApp::new(make_5v5_gui_session(), None, None);
+    app.onboarding_open = false;
+    app.options_open = true;
+    let ctx = egui::Context::default();
+    let tr = super::i18n::strings(app.session.ui_language);
+
+    let mut out = None;
+    for _ in 0..2 {
+        out = Some(ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1180.0, 700.0))),
+                ..Default::default()
+            },
+            |ctx| {
+                let _ = app.render_options_window(ctx, 48.0);
+            },
+        ));
+    }
+    let out = out.expect("second pass options window output");
+    let mut texts = Vec::new();
+    for clipped in &out.shapes {
+        collect_painted_texts(&clipped.shape, &mut texts);
+    }
+    assert!(
+        texts.iter().any(|t| t.contains(tr.auto_overlay_label)),
+        "options window must render Auto-overlay toggle; texts={texts:?}"
+    );
+
+    // Must not overlap top_bar or overflow at minimum supported 640x440 resolution.
+    let r_min = render_at_viewport(&mut app, &ctx, vec2(640.0, 440.0));
+    let opts_rect = r_min.options_window.expect("OPTIONS open at 640x440");
+    assert!(
+        !opts_rect.intersects(r_min.top_bar) && opts_rect.max.y <= 440.0,
+        "OPTIONS {:?} must not collide with top_bar {:?} or overflow 640x440",
+        opts_rect,
+        r_min.top_bar
+    );
+}

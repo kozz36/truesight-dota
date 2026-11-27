@@ -549,7 +549,9 @@ impl TrueSightGuiApp {
             && !self.hotkey_recording
         {
             for action in actions {
-                if action == GlobalHotkeyAction::ToggleOverlayPass && self.session.overlay_mode {
+                if action == GlobalHotkeyAction::ToggleOverlayPass
+                    && self.session.is_overlay_visible()
+                {
                     let next = !self.session.overlay_geometry.click_through;
                     self.set_overlay_click_through_live(ctx, next);
                     pass_toggled_this_frame = true;
@@ -562,12 +564,11 @@ impl TrueSightGuiApp {
         let f8_root =
             !self.hotkey_recording && Self::is_non_repeating_key_pressed(ctx, egui::Key::F8);
         if f8_root {
-            let next = !self.session.overlay_mode;
-            self.session.set_overlay_mode(next);
+            self.session.toggle_overlay_shortcut();
         }
         if !pass_toggled_this_frame
             && !self.hotkey_recording
-            && self.session.overlay_mode
+            && self.session.is_overlay_visible()
             && is_pass_shortcut_pressed(ctx, self.session.pass_hotkey)
         {
             let next = !self.session.overlay_geometry.click_through;

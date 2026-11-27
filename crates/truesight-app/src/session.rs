@@ -94,6 +94,9 @@ pub struct AppSession {
     pub post_draft_view_override: Option<bool>,
     pub active_game_patch: String,
     pub overlay_mode: bool,
+    pub auto_overlay_with_dota: bool,
+    pub dota_process_running: bool,
+    pub auto_overlay_dismissed: bool,
     pub overlay_geometry: OverlayGeometry,
     pub build_overlay_geometry: OverlayGeometry,
     pub overlay_opacity: f32,
@@ -259,6 +262,9 @@ impl AppSession {
             post_draft_view_override: None,
             active_game_patch,
             overlay_mode: ui_cfg.overlay_mode,
+            auto_overlay_with_dota: ui_cfg.auto_overlay_with_dota,
+            dota_process_running: false,
+            auto_overlay_dismissed: false,
             overlay_geometry: ui_cfg.overlay_geometry,
             build_overlay_geometry: ui_cfg.build_overlay_geometry,
             overlay_opacity: Self::sanitize_overlay_opacity(ui_cfg.overlay_opacity),
@@ -285,6 +291,7 @@ impl AppSession {
             self.stratz_api_token = ui_cfg.stratz_api_token;
             self.stratz_token_exp = resolved_exp;
             self.overlay_mode = ui_cfg.overlay_mode;
+            self.auto_overlay_with_dota = ui_cfg.auto_overlay_with_dota;
             self.overlay_geometry = ui_cfg.overlay_geometry;
             self.build_overlay_geometry = ui_cfg.build_overlay_geometry;
             self.overlay_opacity = Self::sanitize_overlay_opacity(ui_cfg.overlay_opacity);
@@ -1314,6 +1321,7 @@ impl AppSession {
                 stratz_api_token: self.stratz_api_token.clone(),
                 stratz_token_exp: self.stratz_token_exp,
                 overlay_mode: self.overlay_mode,
+                auto_overlay_with_dota: self.auto_overlay_with_dota,
                 overlay_geometry: self.overlay_geometry,
                 build_overlay_geometry: self.build_overlay_geometry,
                 overlay_opacity: self.overlay_opacity,
@@ -2012,14 +2020,85 @@ impl AppSession {
         geom_px
     }
 
-    /// Enables or disables compact overlay mode and persists the preference.
+    /// Returns `true` when the compact overlay should be visible (pinned manually or auto-opened with Dota 2).
+    pub fn is_overlay_visible(&self) -> bool {
+        self.overlay_mode
+            || (self.auto_overlay_with_dota
+                && self.dota_process_running
+                && !self.auto_overlay_dismissed)
+    }
+
+    /// Enables or disables manual compact overlay pinning and persists the preference.
     pub fn set_overlay_mode(&mut self, enabled: bool) {
         self.overlay_mode = enabled;
-        if !enabled {
+        if enabled {
+            self.auto_overlay_dismissed = false;
+        } else if self.dota_process_running {
+            self.auto_overlay_dismissed = true;
+        }
+        if !self.is_overlay_visible() {
             self.overlay_geometry.click_through = false;
             self.build_overlay_geometry.click_through = false;
         }
         let _ = self.persist_ui_config();
+    }
+
+    /// Enables or disables automatic overlay visibility synced to the Dota 2 lifecycle and persists it.
+    pub fn set_auto_overlay_with_dota(&mut self, enabled: bool) {
+        self.auto_overlay_with_dota = enabled;
+        if enabled {
+            self.auto_overlay_dismissed = false;
+        }
+        if !self.is_overlay_visible() {
+            self.overlay_geometry.click_through = false;
+            self.build_overlay_geometry.click_through = false;
+        }
+        let _ = self.persist_ui_config();
+    }
+
+    fn clear_overlay_click_through_and_persist(&mut self) {
+        let had_click_through =
+            self.overlay_geometry.click_through || self.build_overlay_geometry.click_through;
+        self.overlay_geometry.click_through = false;
+        self.build_overlay_geometry.click_through = false;
+        if had_click_through {
+            let _ = self.persist_ui_config();
+        }
+    }
+
+    /// Updates Dota 2 process liveness and returns `true` when effective overlay visibility changes.
+    pub fn set_dota_process_running(&mut self, running: bool) -> bool {
+        let was_visible = self.is_overlay_visible();
+        self.dota_process_running = running;
+        if !running {
+            self.auto_overlay_dismissed = false;
+        }
+        let now_visible = self.is_overlay_visible();
+        if was_visible && !now_visible {
+            self.clear_overlay_click_through_and_persist();
+        }
+        was_visible != now_visible
+    }
+
+    /// Closes the active overlay for now, suppressing auto-reopen until Dota 2 exits and relaunches.
+    pub fn dismiss_overlay(&mut self) {
+        if self.dota_process_running {
+            self.auto_overlay_dismissed = true;
+        }
+        if self.overlay_mode {
+            self.set_overlay_mode(false);
+        } else if !self.is_overlay_visible() {
+            self.clear_overlay_click_through_and_persist();
+        }
+    }
+
+    /// Toggles overlay visibility from the `F8` shortcut across manual and auto-opened states.
+    pub fn toggle_overlay_shortcut(&mut self) {
+        if self.is_overlay_visible() {
+            self.dismiss_overlay();
+        } else {
+            self.set_overlay_mode(true);
+        }
     }
 
     /// Enables or disables mouse click-through on the overlay window and persists the preference.
@@ -2639,6 +2718,7 @@ pub struct UiConfig {
     pub stratz_api_token: Option<String>,
     pub stratz_token_exp: Option<u64>,
     pub overlay_mode: bool,
+    pub auto_overlay_with_dota: bool,
     pub overlay_geometry: OverlayGeometry,
     pub build_overlay_geometry: OverlayGeometry,
     pub overlay_opacity: f32,
@@ -2653,6 +2733,7 @@ impl Default for UiConfig {
             stratz_api_token: None,
             stratz_token_exp: None,
             overlay_mode: false,
+            auto_overlay_with_dota: true,
             overlay_geometry: OverlayGeometry::default(),
             build_overlay_geometry: OverlayGeometry::default_build(),
             overlay_opacity: DEFAULT_OVERLAY_OPACITY,
@@ -2797,6 +2878,7 @@ pub fn load_ui_config_from_dir(config_dir: &Path) -> UiConfig {
                 cfg.stratz_token_exp = val.parse::<u64>().ok();
             }
             "overlay_mode" => cfg.overlay_mode = val == "true",
+            "auto_overlay_with_dota" => cfg.auto_overlay_with_dota = val == "true",
             "overlay_x" => {
                 if let Ok(x) = val.parse::<f32>() {
                     cfg.overlay_geometry.x = x;
@@ -2889,6 +2971,10 @@ pub fn save_ui_config_to_dir(config_dir: &Path, cfg: &UiConfig) -> Result<(), St
 
     let mut body = format!("onboarding_dismissed = {}\n", cfg.onboarding_dismissed);
     body.push_str(&format!("overlay_mode = {}\n", cfg.overlay_mode));
+    body.push_str(&format!(
+        "auto_overlay_with_dota = {}\n",
+        cfg.auto_overlay_with_dota
+    ));
     body.push_str(&format!("overlay_x = {}\n", cfg.overlay_geometry.x));
     body.push_str(&format!("overlay_y = {}\n", cfg.overlay_geometry.y));
     body.push_str(&format!("overlay_width = {}\n", cfg.overlay_geometry.width));

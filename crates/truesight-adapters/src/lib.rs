@@ -1,3 +1,4 @@
+pub mod dota_process;
 pub mod gsi;
 pub mod hero_alt_atlas;
 mod item_catalog_data;

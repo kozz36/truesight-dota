@@ -10,12 +10,48 @@ pub(super) struct TargetOutputLayout {
     pub(super) scale: i32,
 }
 
+/// Builds a `LayerEvent::MonitorsUpdated` snapshot excluding a dying output (SCTK 0.20 calls
+/// `output_destroyed` before pruning `OutputState`). Reports `has_any_output` independently of
+/// optional `xdg-output` logical rectangles so the GUI waits at zero outputs and still recovers
+/// when a `wl_output` returns without logical bounds.
+pub(in crate::gui) fn build_monitors_updated_event(
+    all_output_ids: &[u32],
+    logical_outputs: Vec<LogicalOutputBounds>,
+    destroyed_output_id: Option<u32>,
+) -> LayerEvent {
+    let has_any_output = all_output_ids
+        .iter()
+        .any(|&id| destroyed_output_id != Some(id));
+    let outputs = logical_outputs
+        .into_iter()
+        .filter(|out| destroyed_output_id != Some(out.id))
+        .collect();
+    LayerEvent::MonitorsUpdated {
+        outputs,
+        has_any_output,
+    }
+}
+
 impl WaylandLayerState {
     pub(super) fn emit_monitors(&self) {
-        let monitors = self.logical_outputs();
-        if !monitors.is_empty() {
-            self.emit(LayerEvent::MonitorsUpdated(monitors));
-        }
+        self.emit_monitors_excluding(None);
+    }
+
+    pub(super) fn emit_monitors_excluding(&self, destroyed_output: Option<&wl_output::WlOutput>) {
+        let destroyed_id = destroyed_output
+            .and_then(|out| self.output_state.info(out))
+            .map(|info| info.id);
+        let all_ids: Vec<u32> = self
+            .output_state
+            .outputs()
+            .filter(|o| destroyed_output.is_none_or(|dead| o != dead))
+            .map(|o| self.output_state.info(&o).map_or(0, |i| i.id))
+            .collect();
+        self.emit(build_monitors_updated_event(
+            &all_ids,
+            self.logical_outputs(),
+            destroyed_id,
+        ));
     }
 
     pub(super) fn logical_outputs(&self) -> Vec<LogicalOutputBounds> {

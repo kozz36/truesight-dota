@@ -102,7 +102,10 @@ pub(super) enum LayerEvent {
         height: u32,
         persist: bool,
     },
-    MonitorsUpdated(Vec<LogicalOutputBounds>),
+    MonitorsUpdated {
+        outputs: Vec<LogicalOutputBounds>,
+        has_any_output: bool,
+    },
     PointerMoved {
         x: f32,
         y: f32,
@@ -596,7 +599,11 @@ impl super::TrueSightGuiApp {
                         self.session.overlay_geometry = geom;
                     }
                 }
-                LayerEvent::MonitorsUpdated(outputs) => {
+                LayerEvent::MonitorsUpdated {
+                    outputs,
+                    has_any_output,
+                } => {
+                    self.wayland_outputs_unavailable = !has_any_output;
                     self.wayland_logical_outputs = outputs;
                 }
                 LayerEvent::PointerMoved { x, y } => {
@@ -626,20 +633,24 @@ impl super::TrueSightGuiApp {
                     });
                 }
                 LayerEvent::Closed => {
-                    self.session.set_overlay_mode(false);
+                    // Compositor teardown (e.g. output unplugged) only drops the surface; keep
+                    // auto-overlay eligible so the next repaint recovers on an available output.
                     self.reset_wayland_layer_surface_state();
                     main_ctx.request_repaint();
                 }
             }
         }
 
-        if !self.session.overlay_mode {
+        if !self.session.is_overlay_visible() {
             if self.wayland_layer_visible {
                 if let Some(handle) = self.wayland_layer.as_ref() {
                     handle.send(LayerCommand::Hide);
                 }
                 self.reset_wayland_layer_surface_state();
             }
+            return;
+        }
+        if self.wayland_outputs_unavailable {
             return;
         }
 
@@ -719,8 +730,8 @@ impl super::TrueSightGuiApp {
                 });
         });
 
-        // Clicking the close button inside the overlay turns off overlay mode immediately.
-        if !self.session.overlay_mode {
+        // Clicking the close button inside the overlay turns off overlay visibility immediately.
+        if !self.session.is_overlay_visible() {
             if self.wayland_layer_visible {
                 if let Some(handle) = self.wayland_layer.as_ref() {
                     handle.send(LayerCommand::Hide);
@@ -835,7 +846,7 @@ impl super::TrueSightGuiApp {
             self.last_overlay_is_post_draft = Some(is_post_draft);
 
             if !f8_root && Self::is_non_repeating_key_pressed(vctx, egui::Key::F8) {
-                self.session.set_overlay_mode(false);
+                self.session.dismiss_overlay();
                 ctx.request_repaint();
             }
             if !pass_toggled_this_frame

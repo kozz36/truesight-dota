@@ -330,7 +330,7 @@ impl TrueSightGuiApp {
         let mut bracket_bar_rect = Rect::NOTHING;
         let mut overlay_pass_unlock_button = None;
         let show_pass_unlock =
-            self.session.overlay_mode && self.session.overlay_geometry.click_through;
+            self.session.is_overlay_visible() && self.session.overlay_geometry.click_through;
         let bar_rect = hud_card(ui, |ui| {
             let avail_w = ui.available_width();
             let compact = avail_w < 1120.0;
@@ -434,7 +434,8 @@ impl TrueSightGuiApp {
             .default_width(max_opt_w)
             .max_width(max_opt_w)
             .show(ctx, |ui| {
-                ui.spacing_mut().item_spacing.y = 3.0;
+                ui.spacing_mut().item_spacing.y = 2.5;
+                ui.spacing_mut().interact_size.y = 15.0;
 
                 ui.horizontal(|ui| {
                     ui.label(
@@ -740,6 +741,20 @@ impl TrueSightGuiApp {
                     }
                 });
 
+                let mut auto_overlay = self.session.auto_overlay_with_dota;
+                if ui
+                    .checkbox(
+                        &mut auto_overlay,
+                        RichText::new(tr.auto_overlay_label)
+                            .size(9.5)
+                            .color(P_SILVER),
+                    )
+                    .on_hover_text(tr.auto_overlay_hover)
+                    .changed()
+                {
+                    self.session.set_auto_overlay_with_dota(auto_overlay);
+                }
+
                 ui.horizontal(|ui| {
                     let demo_resp = ui.add(
                         egui::Button::new(
@@ -781,4 +796,19 @@ impl TrueSightGuiApp {
         }
         (win_rect, demo_btn_rect, lang_btn_rects)
     }
+}
+
+/// Builds the desktop viewport configuration with low-resolution bounds, Wayland `app_id`, and the Gem icon.
+/// Keeps the native minimum independent of `MIN_UNSCROLLED_*` so 150% DPI scaling on 1280x720 displays
+/// (`640*1.5 = 960`, `440*1.5 = 660`) fits comfortably within the physical screen work area.
+pub(crate) fn build_viewport_builder() -> egui::ViewportBuilder {
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([1180.0, 700.0])
+        .with_min_inner_size([640.0, 440.0])
+        .with_app_id("truesight-dota")
+        .with_title("TrueSight Dota — 5v5 Live Draft Oracle");
+    if let Some(icon) = super::theme::build_gem_window_icon() {
+        viewport = viewport.with_icon(std::sync::Arc::new(icon));
+    }
+    viewport
 }

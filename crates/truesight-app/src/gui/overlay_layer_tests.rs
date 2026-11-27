@@ -1371,3 +1371,225 @@ fn rasterizer_fast_paths_match_uniform_uv_flipped_glow_and_repeat_grain() {
         assert_ne!(bytes[(8) * 4], bytes[(10) * 4]);
     }
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn wayland_compositor_closed_keeps_auto_overlay_eligible_and_recovers_on_available_output() {
+    use super::overlay_backend::{LayerCommand, LayerEvent};
+    use super::wayland_layer::WaylandLayerHandle;
+
+    let mut session = AppSession::new().unwrap();
+    session.overlay_mode = false;
+    session.auto_overlay_with_dota = true;
+    session.set_dota_process_running(true);
+
+    let (cmd_tx, cmd_rx) =
+        smithay_client_toolkit::reexports::calloop::channel::channel::<LayerCommand>();
+    let (event_tx, event_rx) = std::sync::mpsc::channel::<LayerEvent>();
+
+    let mut app = TrueSightGuiApp::new(session, None, None);
+    app.overlay_backend = OverlayBackendKind::WaylandLayerShell;
+    app.wayland_layer = Some(WaylandLayerHandle::from_test_channels(cmd_tx, event_rx));
+
+    let main_ctx = egui::Context::default();
+    let drain_show_count = || -> usize {
+        let mut shows = 0;
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            if matches!(cmd, LayerCommand::Show { .. }) {
+                shows += 1;
+            }
+        }
+        shows
+    };
+
+    // Initial auto-open emits Show while Dota 2 is running.
+    app.step_wayland_layer_overlay(&main_ctx);
+    assert_eq!(drain_show_count(), 1, "initial step must show auto-overlay");
+    assert!(app.session.is_overlay_visible());
+
+    // Compositor teardown (`LayerEvent::Closed`) must reset layer surface state WITHOUT
+    // setting `auto_overlay_dismissed`, allowing immediate recovery on an available output.
+    event_tx.send(LayerEvent::Closed).unwrap();
+    app.step_wayland_layer_overlay(&main_ctx);
+    assert!(
+        app.session.is_overlay_visible(),
+        "compositor-driven Closed must keep auto-overlay eligible while Dota is running"
+    );
+    assert!(
+        !app.session.auto_overlay_dismissed,
+        "compositor Closed must not set session-long user dismissal"
+    );
+    assert_eq!(
+        drain_show_count(),
+        1,
+        "overlay must recover and emit Show after compositor Closed while outputs exist"
+    );
+
+    // When all outputs temporarily disappear on Wayland, wait until an output returns before showing.
+    event_tx
+        .send(LayerEvent::MonitorsUpdated {
+            outputs: Vec::new(),
+            has_any_output: false,
+        })
+        .unwrap();
+    event_tx.send(LayerEvent::Closed).unwrap();
+    app.step_wayland_layer_overlay(&main_ctx);
+    assert!(app.session.is_overlay_visible());
+    assert_eq!(
+        drain_show_count(),
+        0,
+        "must not respawn layer surface while compositor reports zero outputs"
+    );
+
+    event_tx
+        .send(LayerEvent::MonitorsUpdated {
+            outputs: vec![LogicalOutputBounds {
+                id: 1,
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            }],
+            has_any_output: true,
+        })
+        .unwrap();
+    app.step_wayland_layer_overlay(&main_ctx);
+    assert_eq!(
+        drain_show_count(),
+        1,
+        "auto-overlay must recover as soon as an output becomes available again"
+    );
+
+    // Explicit user dismissal (`X` / `F8`) still suppresses auto-reopen until Dota exits.
+    app.session.dismiss_overlay();
+    app.step_wayland_layer_overlay(&main_ctx);
+    assert!(!app.session.is_overlay_visible());
+    assert!(app.session.auto_overlay_dismissed);
+    assert_eq!(drain_show_count(), 0);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn wayland_presenter_last_output_destroyed_emits_empty_monitors_and_waits_for_recovery() {
+    use super::overlay_backend::{LayerCommand, LayerEvent};
+    use super::wayland_layer::{WaylandLayerHandle, build_monitors_updated_event};
+
+    let out1 = LogicalOutputBounds {
+        id: 1,
+        x: 0,
+        y: 0,
+        width: 1920,
+        height: 1080,
+    };
+    let out2 = LogicalOutputBounds {
+        id: 2,
+        x: 1920,
+        y: 0,
+        width: 2560,
+        height: 1440,
+    };
+
+    // SCTK 0.20 invokes output_destroyed while output 1 is still in OutputState:
+    // presenter must exclude output 1 and report zero available outputs.
+    let empty_ev = build_monitors_updated_event(&[1], vec![out1], Some(1));
+    assert!(matches!(
+        &empty_ev,
+        LayerEvent::MonitorsUpdated {
+            outputs,
+            has_any_output: false
+        } if outputs.is_empty()
+    ));
+
+    let mut session = AppSession::new().unwrap();
+    session.overlay_mode = false;
+    session.auto_overlay_with_dota = true;
+    session.set_dota_process_running(true);
+
+    let (cmd_tx, cmd_rx) =
+        smithay_client_toolkit::reexports::calloop::channel::channel::<LayerCommand>();
+    let (event_tx, event_rx) = std::sync::mpsc::channel::<LayerEvent>();
+
+    let mut app = TrueSightGuiApp::new(session, None, None);
+    app.overlay_backend = OverlayBackendKind::WaylandLayerShell;
+    app.wayland_layer = Some(WaylandLayerHandle::from_test_channels(cmd_tx, event_rx));
+
+    let main_ctx = egui::Context::default();
+    let drain_show_count = || -> usize {
+        let mut shows = 0;
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            if matches!(cmd, LayerCommand::Show { .. }) {
+                shows += 1;
+            }
+        }
+        shows
+    };
+
+    app.step_wayland_layer_overlay(&main_ctx);
+    assert_eq!(drain_show_count(), 1);
+
+    // Replay exact presenter-to-GUI events on last output unplug: output_destroyed then Closed.
+    event_tx.send(empty_ev).unwrap();
+    event_tx.send(LayerEvent::Closed).unwrap();
+    app.step_wayland_layer_overlay(&main_ctx);
+    assert!(app.session.is_overlay_visible());
+    assert!(!app.session.auto_overlay_dismissed);
+    assert_eq!(
+        drain_show_count(),
+        0,
+        "GUI must wait without re-creating layer while 0 outputs remain"
+    );
+
+    // Reconnect a wl_output WITHOUT optional xdg-output logical bounds: availability still clears
+    // wayland_outputs_unavailable so the fallback surface can reopen without logical rects.
+    let no_bounds_ev = build_monitors_updated_event(&[3], Vec::new(), None);
+    assert!(matches!(
+        &no_bounds_ev,
+        LayerEvent::MonitorsUpdated {
+            outputs,
+            has_any_output: true
+        } if outputs.is_empty()
+    ));
+    event_tx.send(no_bounds_ev).unwrap();
+    app.step_wayland_layer_overlay(&main_ctx);
+    assert!(app.wayland_logical_outputs.is_empty());
+    assert_eq!(
+        drain_show_count(),
+        1,
+        "GUI must recover when a wl_output reconnects without optional xdg-output bounds"
+    );
+
+    // Unplug again, then reconnect output 2 WITH logical bounds -> recovers too.
+    event_tx
+        .send(build_monitors_updated_event(&[3], Vec::new(), Some(3)))
+        .unwrap();
+    event_tx.send(LayerEvent::Closed).unwrap();
+    app.step_wayland_layer_overlay(&main_ctx);
+    assert_eq!(drain_show_count(), 0);
+
+    let new_ev = build_monitors_updated_event(&[2], vec![out2], None);
+    event_tx.send(new_ev).unwrap();
+    app.step_wayland_layer_overlay(&main_ctx);
+    assert_eq!(
+        drain_show_count(),
+        1,
+        "GUI must recover auto-overlay as soon as new_output reports an available output"
+    );
+
+    // Removing 1 of 2 outputs keeps output 2 available and immediately recovers after Closed.
+    let remaining_ev = build_monitors_updated_event(&[1, 2], vec![out1, out2], Some(1));
+    assert!(matches!(
+        &remaining_ev,
+        LayerEvent::MonitorsUpdated {
+            outputs,
+            has_any_output: true
+        } if outputs.len() == 1 && outputs[0].id == 2
+    ));
+    event_tx.send(remaining_ev).unwrap();
+    event_tx.send(LayerEvent::Closed).unwrap();
+    app.step_wayland_layer_overlay(&main_ctx);
+    assert_eq!(
+        drain_show_count(),
+        1,
+        "auto-overlay must immediately recover onto remaining output after Closed"
+    );
+}
