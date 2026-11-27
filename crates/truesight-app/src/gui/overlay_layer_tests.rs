@@ -1461,3 +1461,100 @@ fn wayland_compositor_closed_keeps_auto_overlay_eligible_and_recovers_on_availab
     assert!(app.session.auto_overlay_dismissed);
     assert_eq!(drain_show_count(), 0);
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn wayland_presenter_last_output_destroyed_emits_empty_monitors_and_waits_for_recovery() {
+    use super::overlay_backend::{LayerCommand, LayerEvent};
+    use super::wayland_layer::{WaylandLayerHandle, build_monitors_updated_event};
+
+    let out1 = LogicalOutputBounds {
+        id: 1,
+        x: 0,
+        y: 0,
+        width: 1920,
+        height: 1080,
+    };
+    let out2 = LogicalOutputBounds {
+        id: 2,
+        x: 1920,
+        y: 0,
+        width: 2560,
+        height: 1440,
+    };
+
+    // Uninitialized output (without logical_size yet) must not emit empty MonitorsUpdated.
+    assert!(build_monitors_updated_event(&[1], Vec::new(), None).is_none());
+
+    // SCTK 0.20 invokes output_destroyed while output 1 is still in OutputState:
+    // presenter must exclude output 1 and emit an empty monitor list.
+    let empty_ev = build_monitors_updated_event(&[1], vec![out1], Some(1))
+        .expect("destroying the last output must emit empty MonitorsUpdated");
+    assert!(matches!(&empty_ev, LayerEvent::MonitorsUpdated(v) if v.is_empty()));
+
+    let mut session = AppSession::new().unwrap();
+    session.overlay_mode = false;
+    session.auto_overlay_with_dota = true;
+    session.set_dota_process_running(true);
+
+    let (cmd_tx, cmd_rx) =
+        smithay_client_toolkit::reexports::calloop::channel::channel::<LayerCommand>();
+    let (event_tx, event_rx) = std::sync::mpsc::channel::<LayerEvent>();
+
+    let mut app = TrueSightGuiApp::new(session, None, None);
+    app.overlay_backend = OverlayBackendKind::WaylandLayerShell;
+    app.wayland_layer = Some(WaylandLayerHandle::from_test_channels(cmd_tx, event_rx));
+
+    let main_ctx = egui::Context::default();
+    let drain_show_count = || -> usize {
+        let mut shows = 0;
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            if matches!(cmd, LayerCommand::Show { .. }) {
+                shows += 1;
+            }
+        }
+        shows
+    };
+
+    app.step_wayland_layer_overlay(&main_ctx);
+    assert_eq!(drain_show_count(), 1);
+
+    // Replay exact presenter-to-GUI events on last output unplug: output_destroyed then Closed.
+    event_tx.send(empty_ev).unwrap();
+    event_tx.send(LayerEvent::Closed).unwrap();
+    app.step_wayland_layer_overlay(&main_ctx);
+    assert!(app.session.is_overlay_visible());
+    assert!(!app.session.auto_overlay_dismissed);
+    assert_eq!(
+        drain_show_count(),
+        0,
+        "GUI must wait without re-creating layer while 0 outputs remain"
+    );
+
+    // New output arrives -> presenter emits non-empty snapshot -> GUI recovers overlay.
+    let new_ev = build_monitors_updated_event(&[2], vec![out2], None)
+        .expect("adding output 2 must emit non-empty MonitorsUpdated");
+    event_tx.send(new_ev).unwrap();
+    app.step_wayland_layer_overlay(&main_ctx);
+    assert_eq!(
+        drain_show_count(),
+        1,
+        "GUI must recover auto-overlay as soon as new_output reports an available output"
+    );
+
+    // Removing 1 of 2 outputs keeps output 2 available and immediately recovers after Closed.
+    let remaining_ev = build_monitors_updated_event(&[1, 2], vec![out1, out2], Some(1))
+        .expect("removing 1 of 2 outputs must emit remaining output 2");
+    assert!(matches!(
+        &remaining_ev,
+        LayerEvent::MonitorsUpdated(v) if v.len() == 1 && v[0].id == 2
+    ));
+    event_tx.send(remaining_ev).unwrap();
+    event_tx.send(LayerEvent::Closed).unwrap();
+    app.step_wayland_layer_overlay(&main_ctx);
+    assert_eq!(
+        drain_show_count(),
+        1,
+        "auto-overlay must immediately recover onto remaining output after Closed"
+    );
+}

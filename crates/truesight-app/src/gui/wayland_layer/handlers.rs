@@ -146,9 +146,9 @@ impl OutputHandler for WaylandLayerState {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _output: wl_output::WlOutput,
+        output: wl_output::WlOutput,
     ) {
-        self.emit_monitors();
+        self.emit_monitors_excluding(Some(&output));
     }
 }
 

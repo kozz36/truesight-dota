@@ -2,6 +2,9 @@ mod handlers;
 mod output;
 mod pointer;
 
+#[cfg(test)]
+pub(super) use output::build_monitors_updated_event;
+
 use super::overlay_backend::{
     CrossMonitorTarget, LayerCommand, LayerEvent, OverlayRect, compute_drag_margin_step,
 };

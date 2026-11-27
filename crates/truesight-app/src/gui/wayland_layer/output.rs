@@ -10,11 +10,50 @@ pub(super) struct TargetOutputLayout {
     pub(super) scale: i32,
 }
 
+/// Builds a `LayerEvent::MonitorsUpdated` snapshot excluding a dying output (SCTK 0.20 calls
+/// `output_destroyed` before pruning `OutputState`). Always emits an empty list when zero
+/// outputs remain so the GUI waits for a new output before re-showing the layer surface.
+pub(in crate::gui) fn build_monitors_updated_event(
+    all_output_ids: &[u32],
+    logical_outputs: Vec<LogicalOutputBounds>,
+    destroyed_output_id: Option<u32>,
+) -> Option<LayerEvent> {
+    let remaining_output_count = all_output_ids
+        .iter()
+        .filter(|&&id| destroyed_output_id != Some(id))
+        .count();
+    let remaining_logical: Vec<LogicalOutputBounds> = logical_outputs
+        .into_iter()
+        .filter(|out| destroyed_output_id != Some(out.id))
+        .collect();
+    if remaining_output_count == 0 {
+        Some(LayerEvent::MonitorsUpdated(Vec::new()))
+    } else if !remaining_logical.is_empty() {
+        Some(LayerEvent::MonitorsUpdated(remaining_logical))
+    } else {
+        None
+    }
+}
+
 impl WaylandLayerState {
     pub(super) fn emit_monitors(&self) {
-        let monitors = self.logical_outputs();
-        if !monitors.is_empty() {
-            self.emit(LayerEvent::MonitorsUpdated(monitors));
+        self.emit_monitors_excluding(None);
+    }
+
+    pub(super) fn emit_monitors_excluding(&self, destroyed_output: Option<&wl_output::WlOutput>) {
+        let destroyed_id = destroyed_output
+            .and_then(|out| self.output_state.info(out))
+            .map(|info| info.id);
+        let all_ids: Vec<u32> = self
+            .output_state
+            .outputs()
+            .filter(|o| destroyed_output.is_none_or(|dead| o != dead))
+            .map(|o| self.output_state.info(&o).map_or(u32::MAX, |i| i.id))
+            .collect();
+        if let Some(ev) =
+            build_monitors_updated_event(&all_ids, self.logical_outputs(), destroyed_id)
+        {
+            self.emit(ev);
         }
     }
 
