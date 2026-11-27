@@ -5232,3 +5232,90 @@ fn recording_pass_hotkey_consumes_capture_keypress_without_toggling_overlay() {
     assert!(app.session.overlay_mode);
     assert!(!app.session.overlay_geometry.click_through);
 }
+
+#[test]
+fn recording_pass_hotkey_suppresses_queued_global_action_on_capture_frame() {
+    use super::hotkey::{GlobalHotkeyAction, GlobalHotkeyListener};
+    use crate::session::PassHotkey;
+
+    let mut app = TrueSightGuiApp::new(make_5v5_gui_session(), None, None);
+    let (tx, rx) = std::sync::mpsc::sync_channel(8);
+    app.hotkey_listener = Some(GlobalHotkeyListener::from_channel_for_test(
+        rx,
+        "Ctrl+Shift+T (Global)",
+    ));
+    app.onboarding_open = false;
+    app.options_open = true;
+    app.hotkey_recording = true;
+    app.session.overlay_mode = true;
+    app.session.set_overlay_click_through(false);
+
+    let ctx = egui::Context::default();
+    let viewport = vec2(1280.0, 800.0);
+    let ctrl_shift = egui::Modifiers {
+        ctrl: true,
+        shift: true,
+        ..Default::default()
+    };
+
+    // Re-record current Ctrl+Shift+T while the global shortcut thread also enqueues
+    // ToggleOverlayPass in the same frame: must save without toggling PASS.
+    tx.send(GlobalHotkeyAction::ToggleOverlayPass).unwrap();
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), viewport)),
+            modifiers: ctrl_shift,
+            events: vec![egui::Event::Key {
+                key: egui::Key::T,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: ctrl_shift,
+            }],
+            ..Default::default()
+        },
+        |ctx| {
+            app.render_frame(ctx);
+        },
+    );
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), viewport)),
+            modifiers: ctrl_shift,
+            events: vec![egui::Event::Key {
+                key: egui::Key::T,
+                physical_key: None,
+                pressed: false,
+                repeat: false,
+                modifiers: ctrl_shift,
+            }],
+            ..Default::default()
+        },
+        |ctx| {
+            app.render_frame(ctx);
+        },
+    );
+
+    assert_eq!(app.session.pass_hotkey, PassHotkey::default());
+    assert!(!app.hotkey_recording);
+    assert!(
+        !app.session.overlay_geometry.click_through,
+        "queued global ToggleOverlayPass on capture frame must NOT toggle PASS"
+    );
+
+    // Subsequent global action when not recording works normally.
+    tx.send(GlobalHotkeyAction::ToggleOverlayPass).unwrap();
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), viewport)),
+            ..Default::default()
+        },
+        |ctx| {
+            app.render_frame(ctx);
+        },
+    );
+    assert!(
+        app.session.overlay_geometry.click_through,
+        "subsequent global ToggleOverlayPass outside capture frame must toggle PASS ON"
+    );
+}

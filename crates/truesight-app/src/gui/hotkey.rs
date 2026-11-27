@@ -540,10 +540,13 @@ impl TrueSightGuiApp {
                 None => {}
             }
         }
+        // Always drain queued global actions so a shortcut pressed during capture cannot fire PASS on this or the next frame.
         if let Some(actions) = self
             .hotkey_listener
             .as_ref()
             .map(GlobalHotkeyListener::poll_actions)
+            && !captured_this_frame
+            && !self.hotkey_recording
         {
             for action in actions {
                 if action == GlobalHotkeyAction::ToggleOverlayPass && self.session.overlay_mode {
