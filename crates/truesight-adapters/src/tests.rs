@@ -7022,13 +7022,17 @@ fn stratz_item_query_omits_starting_time_and_aliases_all_four_brackets() {
         "diStart:",
         "diBoot:",
         "diFull:",
-        "matchLimit: 5",
+        "matchLimit: 1",
     ] {
         assert!(
             payload.contains(expected),
             "expected {expected:?} in payload: {payload}"
         );
     }
+    assert!(
+        !payload.contains("matchLimit: 5"),
+        "STRATZ itemFullPurchase query must not cap at matchLimit: 5: {payload}"
+    );
     assert!(
         !payload.contains("wasGiven") || !payload.contains("hgStart: itemStartingPurchase(heroId: 32, positionIds: [POSITION_2], bracketBasicIds: [HERALD_GUARDIAN]) { itemId time"),
         "starting item query must NOT request `time` on HeroItemStartingPurchaseType: {payload}"
@@ -7355,6 +7359,7 @@ fn sync_partial_stratz_buckets_keeps_opendota_fallback_for_uncovered_brackets() 
     let item_constants_json = r#"{
         "diffusal_blade": {"id": 174, "dname": "Diffusal Blade", "cost": 2500, "components": ["blade_of_alacrity", "robe"]},
         "disperser": {"id": 1097, "dname": "Disperser", "cost": 6100, "components": ["diffusal_blade", "eagle"]},
+        "greater_crit": {"id": 141, "dname": "Daedalus", "cost": 5100, "components": ["lesser_crit", "demon_edge"]},
         "manta": {"id": 147, "dname": "Manta Style", "cost": 4550, "components": ["yasha", "diadem"]},
         "butterfly": {"id": 139, "dname": "Butterfly", "cost": 4975, "components": ["eagle"]}
     }"#;
@@ -7368,7 +7373,8 @@ fn sync_partial_stratz_buckets_keeps_opendota_fallback_for_uncovered_brackets() 
                 "diBoot": [{"itemId": 63, "time": 420000, "matchCount": 1000, "winCount": 550}],
                 "diFull": [
                     {"itemId": 174, "time": 14, "matchCount": 1000, "winCount": 570},
-                    {"itemId": 1097, "time": 26, "matchCount": 900, "winCount": 540}
+                    {"itemId": 1097, "time": 26, "matchCount": 900, "winCount": 540},
+                    {"itemId": 141, "time": 31, "matchCount": 820, "winCount": 490}
                 ]
             }
         }
@@ -8788,5 +8794,369 @@ fn embedded_antimage_and_faceless_void_keep_core_skipped_after_final_late_buy() 
         fv_after_bfly.next_unowned_index, None,
         "embedded Faceless Void after buying final Late Butterfly (139) must show NEXT = None, not revert to Manta Style (147): {:?}",
         fv_after_bfly.steps
+    );
+}
+
+#[test]
+fn sparse_role_stratz_build_backfills_late_items_preserving_role_early_core_and_late_priority() {
+    use crate::item_repo::SeededItemMetaRepository;
+    use truesight_core::domain::{Bracket, HeroId, HeroItemStat, ItemId, ItemPhase, Role};
+    use truesight_core::math::recommend_item_build;
+    use truesight_core::ports::ItemMetaRepository;
+
+    let stat =
+        |item_id: u16, phase: ItemPhase, avg_time_mins: f32, mc: u32, wc: u32| HeroItemStat {
+            item_id: ItemId(item_id),
+            phase,
+            avg_time_mins,
+            match_count: mc,
+            win_count: wc,
+        };
+    let is_non_boot =
+        |id: ItemId| !matches!(id.0, 29 | 48 | 50 | 63 | 180 | 214 | 220 | 231 | 931 | 1953);
+
+    // 1. Monkey King Pos 2 (Mid) in Legend with sparse role stats:
+    // Treads (Early), Echo Sabre (Core), BKB (sole non-boot Late), and Boots of Travel (boot Late).
+    // Must backfill missing non-boot Late items from unroled MK Legend stats while keeping
+    // Mid Echo Sabre (252) and excluding unroled Carry Battle Fury (145).
+    let mut repo = SeededItemMetaRepository::new();
+    repo.custom_hero_stats.push((
+        HeroId(114),
+        Some(Role::Mid),
+        Some(Bracket::Legend),
+        vec![
+            stat(63, ItemPhase::Early, 6.5, 10876, 5650),
+            stat(252, ItemPhase::Core, 15.5, 7500, 3950),
+            stat(116, ItemPhase::Late, 25.0, 8768, 4650),
+            stat(48, ItemPhase::Late, 28.0, 1200, 620),
+        ],
+    ));
+    repo.custom_hero_stats.push((
+        HeroId(114),
+        None,
+        Some(Bracket::Legend),
+        vec![
+            stat(63, ItemPhase::Early, 6.5, 50000, 26000),
+            stat(145, ItemPhase::Core, 15.0, 45000, 23500),
+            stat(116, ItemPhase::Late, 24.5, 42000, 22500),
+            stat(160, ItemPhase::Late, 29.0, 38000, 21000),
+            stat(108, ItemPhase::Late, 27.0, 34000, 19000),
+            stat(139, ItemPhase::Late, 33.0, 28000, 16000),
+            stat(156, ItemPhase::Late, 37.0, 22000, 12500),
+        ],
+    ));
+
+    let mk_mid_stats = repo
+        .hero_item_stats(HeroId(114), Role::Mid, Bracket::Legend)
+        .expect("MK Mid stats should succeed");
+    assert!(
+        mk_mid_stats
+            .iter()
+            .any(|s| s.item_id == ItemId(252) && s.phase == ItemPhase::Core),
+        "role-specific Echo Sabre (252, Core) must be preserved: {mk_mid_stats:?}"
+    );
+    assert!(
+        !mk_mid_stats.iter().any(|s| s.item_id == ItemId(145)),
+        "unroled Battle Fury (145, Core) must NOT pollute Mid role build: {mk_mid_stats:?}"
+    );
+    for expected_late in [160_u16, 108, 139, 156] {
+        let row = mk_mid_stats
+            .iter()
+            .find(|s| s.item_id == ItemId(expected_late) && s.phase == ItemPhase::Late)
+            .unwrap_or_else(|| {
+                panic!("expected backfilled Late item {expected_late} in {mk_mid_stats:?}")
+            });
+        assert!(
+            row.match_count > 25 && row.match_count < 8768,
+            "backfilled Late item {expected_late} must scale below Mid BKB (8768) and stay above noise: {row:?}"
+        );
+    }
+
+    let mk_mid_build = recommend_item_build(
+        &repo,
+        HeroId(114),
+        Role::Mid,
+        Bracket::Legend,
+        &[None; 5],
+        &[],
+        0,
+    )
+    .expect("MK Mid build recommendation should succeed");
+    assert!(
+        mk_mid_build
+            .steps
+            .iter()
+            .any(|s| s.item_id == ItemId(252) && s.phase == ItemPhase::Core),
+        "recommended Mid build must keep Echo Sabre (252) Core: {:?}",
+        mk_mid_build.steps
+    );
+    assert!(
+        !mk_mid_build.steps.iter().any(
+            |s| s.item_id == ItemId(145) || s.variants.iter().any(|v| v.item_id == ItemId(145))
+        ),
+        "recommended Mid build must NOT contain unroled Battle Fury (145): {:?}",
+        mk_mid_build.steps
+    );
+    let non_boot_late_steps = mk_mid_build
+        .steps
+        .iter()
+        .filter(|s| s.phase == ItemPhase::Late && is_non_boot(s.item_id))
+        .count();
+    assert!(
+        non_boot_late_steps >= 3 && mk_mid_build.steps.iter().any(|s| s.item_id == ItemId(116)),
+        "sparse MK Mid build must surface >= 3 non-boot Late steps including BKB (116): {:?}",
+        mk_mid_build.steps
+    );
+
+    // 2. Embedded fallback when no unroled custom entry exists:
+    let mut embedded_fb_repo = SeededItemMetaRepository::new();
+    embedded_fb_repo.custom_hero_stats.push((
+        HeroId(1),
+        Some(Role::Offlane),
+        Some(Bracket::Legend),
+        vec![
+            stat(63, ItemPhase::Early, 7.0, 1200, 620),
+            stat(125, ItemPhase::Early, 9.0, 900, 460),
+            stat(116, ItemPhase::Late, 26.0, 1000, 520),
+        ],
+    ));
+    let am_off_stats = embedded_fb_repo
+        .hero_item_stats(HeroId(1), Role::Offlane, Bracket::Legend)
+        .expect("embedded fallback for sparse role should succeed");
+    let embedded_fb_non_boot_late = am_off_stats
+        .iter()
+        .filter(|s| s.phase == ItemPhase::Late && is_non_boot(s.item_id))
+        .count();
+    assert!(
+        embedded_fb_non_boot_late >= 2,
+        "sparse role with no unroled custom entry must backfill Late items from embedded hero stats: {am_off_stats:?}"
+    );
+
+    // 3. Non-sparse role (>= 2 non-boot Late items) must NOT merge unroled Late items:
+    let mut non_sparse_repo = SeededItemMetaRepository::new();
+    non_sparse_repo.custom_hero_stats.push((
+        HeroId(114),
+        Some(Role::Mid),
+        Some(Bracket::Legend),
+        vec![
+            stat(63, ItemPhase::Early, 6.5, 10876, 5650),
+            stat(252, ItemPhase::Core, 15.5, 7500, 3950),
+            stat(116, ItemPhase::Late, 25.0, 8768, 4650),
+            stat(160, ItemPhase::Late, 29.0, 3200, 1800),
+        ],
+    ));
+    non_sparse_repo.custom_hero_stats.push((
+        HeroId(114),
+        None,
+        Some(Bracket::Legend),
+        vec![
+            stat(116, ItemPhase::Late, 24.5, 42000, 22500),
+            stat(160, ItemPhase::Late, 29.0, 38000, 21000),
+            stat(139, ItemPhase::Late, 33.0, 28000, 16000),
+            stat(156, ItemPhase::Late, 37.0, 22000, 12500),
+        ],
+    ));
+    let non_sparse_stats = non_sparse_repo
+        .hero_item_stats(HeroId(114), Role::Mid, Bracket::Legend)
+        .expect("non-sparse role stats should succeed");
+    assert!(
+        !non_sparse_stats
+            .iter()
+            .any(|s| matches!(s.item_id.0, 139 | 156)),
+        "non-sparse role with >= 2 non-boot Late items must NOT merge unroled Late items: {non_sparse_stats:?}"
+    );
+}
+
+#[test]
+fn sparse_role_cache_backfills_from_unroled_stratz_and_opendota_without_extra_sync_calls() {
+    use crate::item_repo::SeededItemMetaRepository;
+    use crate::sync::LocalCacheManager;
+    use truesight_core::domain::{Bracket, HeroId, HeroItemStat, ItemId, ItemPhase, Role};
+    use truesight_core::math::recommend_item_build;
+    use truesight_core::ports::ItemMetaRepository;
+
+    let hero_stats_json = r#"[{"id": 114, "4_pick": 1000, "4_win": 530}]"#;
+    let item_constants_json = r#"{
+        "power_treads": {"id": 63, "dname": "Power Treads", "cost": 1400, "components": ["boots", "gloves", "belt_of_strength"]},
+        "echo_sabre": {"id": 252, "dname": "Echo Sabre", "cost": 2700, "components": ["ogre_axe", "oblivion_staff"]},
+        "black_king_bar": {"id": 116, "dname": "Black King Bar", "cost": 4050, "components": ["ogre_axe", "mithril_hammer"]},
+        "skadi": {"id": 160, "dname": "Eye of Skadi", "cost": 5300, "components": ["ultimate_orb", "point_booster"]},
+        "butterfly": {"id": 139, "dname": "Butterfly", "cost": 4975, "components": ["eagle", "talisman_of_evasion"]},
+        "satanic": {"id": 156, "dname": "Satanic", "cost": 5050, "components": ["reaver", "claymore"]}
+    }"#;
+
+    let make_4bracket_stratz = |full_items_json: &str| {
+        format!(
+            r#"{{
+                "data": {{
+                    "heroStats": {{
+                        "hgStart": [],
+                        "hgBoot": [{{"itemId": 63, "time": 420000, "matchCount": 1000, "winCount": 520}}],
+                        "hgFull": {full_items_json},
+                        "caStart": [],
+                        "caBoot": [{{"itemId": 63, "time": 410000, "matchCount": 1000, "winCount": 525}}],
+                        "caFull": {full_items_json},
+                        "laStart": [],
+                        "laBoot": [{{"itemId": 63, "time": 390000, "matchCount": 1000, "winCount": 530}}],
+                        "laFull": {full_items_json},
+                        "diStart": [],
+                        "diBoot": [{{"itemId": 63, "time": 370000, "matchCount": 1000, "winCount": 535}}],
+                        "diFull": {full_items_json}
+                    }}
+                }}
+            }}"#
+        )
+    };
+
+    let rich_unroled_payload = make_4bracket_stratz(
+        r#"[
+            {"itemId": 252, "time": 16, "matchCount": 30000, "winCount": 15800},
+            {"itemId": 116, "time": 25, "matchCount": 42000, "winCount": 22500},
+            {"itemId": 160, "time": 29, "matchCount": 36000, "winCount": 19800},
+            {"itemId": 139, "time": 33, "matchCount": 28000, "winCount": 15900},
+            {"itemId": 156, "time": 37, "matchCount": 22000, "winCount": 12400}
+        ]"#,
+    );
+    let sparse_role_payload = make_4bracket_stratz(
+        r#"[
+            {"itemId": 252, "time": 16, "matchCount": 7500, "winCount": 3950},
+            {"itemId": 116, "time": 26, "matchCount": 8768, "winCount": 4650}
+        ]"#,
+    );
+
+    // 1. Seed unroled STRATZ cache first, then sync sparse MK Pos 2:
+    // sync_from_sources_with_role_items must preserve the 1-request-per-(hero, role) contract
+    // (never issuing an extra None call) while SeededItemMetaRepository backfills Late steps.
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_stratz_sparse_role_cache_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    let mut mgr = LocalCacheManager::with_optional_account(tmp_dir.clone(), None);
+    mgr.stratz_api_token = Some("eyJhbGciOinone.eyJleHAiOjQxMDI0NDQ4MDB9.sig".to_string());
+    mgr.set_target_item_heroes(vec![HeroId(114)]);
+
+    mgr.sync_from_sources_with_role_items(
+        false,
+        1_795_000_000,
+        |url| match url {
+            "https://api.opendota.com/api/heroStats" => Ok(hero_stats_json.to_string()),
+            "https://api.opendota.com/api/constants/items" => Ok(item_constants_json.to_string()),
+            other => Err(truesight_core::ports::PortError(format!(
+                "unexpected URL: {other}"
+            ))),
+        },
+        |_token| Ok(r#"{"data":{"heroStats":{"matchUp":[]}}}"#.to_string()),
+        |_token, hero_id, role| {
+            assert_eq!(hero_id, 114);
+            assert_eq!(role, None);
+            Ok(rich_unroled_payload.clone())
+        },
+    )
+    .expect("initial unroled STRATZ sync should succeed");
+
+    mgr.set_target_item_hero_roles(vec![(HeroId(114), Role::Mid)]);
+    let mut role_calls: Vec<Option<Role>> = Vec::new();
+    mgr.sync_from_sources_with_role_items(
+        false,
+        1_795_000_000,
+        |url| match url {
+            "https://api.opendota.com/api/heroStats" => Ok(hero_stats_json.to_string()),
+            "https://api.opendota.com/api/constants/items" => Ok(item_constants_json.to_string()),
+            other => Err(truesight_core::ports::PortError(format!(
+                "unexpected URL: {other}"
+            ))),
+        },
+        |_token| Ok(r#"{"data":{"heroStats":{"matchUp":[]}}}"#.to_string()),
+        |_token, hero_id, role| {
+            assert_eq!(hero_id, 114);
+            role_calls.push(role);
+            Ok(sparse_role_payload.clone())
+        },
+    )
+    .expect("sparse role sync should succeed");
+
+    assert_eq!(
+        role_calls,
+        vec![Some(Role::Mid)],
+        "sparse role sync must keep 1-request-per-(hero, role) contract without an extra None fetch"
+    );
+    let repo = mgr.build_item_repository();
+    let build = recommend_item_build(
+        &repo,
+        HeroId(114),
+        Role::Mid,
+        Bracket::Legend,
+        &[None; 5],
+        &[],
+        0,
+    )
+    .expect("cached backfilled MK Mid build should succeed");
+    assert!(
+        build
+            .steps
+            .iter()
+            .any(|s| s.item_id == ItemId(252) && s.phase == ItemPhase::Core),
+        "cached MK Mid build must preserve role Core Echo Sabre (252): {:?}",
+        build.steps
+    );
+    let non_boot_late_count = build
+        .steps
+        .iter()
+        .filter(|s| {
+            s.phase == ItemPhase::Late
+                && !matches!(
+                    s.item_id.0,
+                    29 | 48 | 50 | 63 | 180 | 214 | 220 | 231 | 931 | 1953
+                )
+        })
+        .count();
+    assert!(
+        non_boot_late_count >= 3 && build.steps.iter().any(|s| s.item_id == ItemId(116)),
+        "cached MK Mid build must backfill >= 3 non-boot Late steps from unroled cache: {:?}",
+        build.steps
+    );
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    // 2. Unbracketed OpenDota unroled fallback `(hero, None, None)` scales Divine timing and backfills:
+    let stat =
+        |item_id: u16, phase: ItemPhase, avg_time_mins: f32, mc: u32, wc: u32| HeroItemStat {
+            item_id: ItemId(item_id),
+            phase,
+            avg_time_mins,
+            match_count: mc,
+            win_count: wc,
+        };
+    let mut od_repo = SeededItemMetaRepository::new();
+    od_repo.custom_hero_stats.push((
+        HeroId(114),
+        Some(Role::Mid),
+        Some(Bracket::Divine),
+        vec![
+            stat(63, ItemPhase::Early, 6.0, 4200, 2250),
+            stat(252, ItemPhase::Core, 14.5, 3400, 1850),
+            stat(116, ItemPhase::Late, 24.0, 3900, 2100),
+        ],
+    ));
+    od_repo.custom_hero_stats.push((
+        HeroId(114),
+        None,
+        None,
+        vec![
+            stat(116, ItemPhase::Late, 26.0, 40000, 21500),
+            stat(160, ItemPhase::Late, 30.0, 32000, 17800),
+            stat(139, ItemPhase::Late, 34.0, 25000, 14200),
+        ],
+    ));
+    let divine_stats = od_repo
+        .hero_item_stats(HeroId(114), Role::Mid, Bracket::Divine)
+        .expect("Divine OpenDota unroled backfill should succeed");
+    let skadi = divine_stats
+        .iter()
+        .find(|s| s.item_id == ItemId(160) && s.phase == ItemPhase::Late)
+        .expect("Skadi (160) must be backfilled from unbracketed OpenDota entry");
+    assert!(
+        skadi.avg_time_mins < 30.0 && skadi.match_count > 25 && skadi.match_count < 3900,
+        "unbracketed OpenDota backfill for Divine must scale avg_time_mins < 30.0 and match_count below Divine BKB (3900): {skadi:?}"
     );
 }
