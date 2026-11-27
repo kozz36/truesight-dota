@@ -523,9 +523,14 @@ impl TrueSightGuiApp {
                                     let (vname, vcost) = var_entry
                                         .map(|e| (e.display_name, e.cost))
                                         .unwrap_or_else(|| (format!("#{}", var.item_id.0), 0));
-                                    let var_owned = owned_items.contains(&var.item_id);
+                                    let parent_directly_owned = owned_items.contains(&step.item_id);
+                                    let var_owned = truesight_core::math::is_item_owned_or_upgraded(
+                                        &self.session.item_repo,
+                                        var.item_id,
+                                        owned_items,
+                                    );
                                     let upgrade_ready =
-                                        is_direct_upgrade && step.owned && !var_owned;
+                                        is_direct_upgrade && parent_directly_owned && !var_owned;
                                     let sense = if is_direct_upgrade {
                                         Sense::hover()
                                     } else {

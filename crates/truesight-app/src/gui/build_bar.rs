@@ -170,11 +170,16 @@ impl TrueSightGuiApp {
                     let var_name = var_entry
                         .map(|e| e.display_name)
                         .unwrap_or_else(|| format!("Item #{}", var.item_id.0));
-                    let var_owned = owned_items.contains(&var.item_id);
+                    let parent_directly_owned = owned_items.contains(&step.item_id);
+                    let var_owned = truesight_core::math::is_item_owned_or_upgraded(
+                        &self.session.item_repo,
+                        var.item_id,
+                        owned_items,
+                    );
                     let (chip_label, highlight) = variant_chip_label_and_highlight(
                         &var_name,
                         is_direct_upgrade,
-                        step.owned,
+                        parent_directly_owned,
                         var_owned,
                     );
                     let var_img = self

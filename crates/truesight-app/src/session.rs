@@ -15,8 +15,8 @@ use truesight_core::domain::{
     Side, TEAM_SIZE, counter_trait_table_patch,
 };
 use truesight_core::math::{
-    DraftAnalysis5v5, HeroRecommendation, MatchupMatrix, ModelWeights, evaluate_draft_5v5,
-    recommend_heroes, recommend_item_build,
+    DraftAnalysis5v5, HeroRecommendation, MatchupMatrix, ModelWeights, compute_next_unowned_index,
+    evaluate_draft_5v5, is_item_owned_or_upgraded, recommend_heroes, recommend_item_build,
 };
 use truesight_core::ports::{DraftEvent, DraftEventSource, ItemMetaRepository, StatsRepository};
 
@@ -1601,7 +1601,7 @@ impl AppSession {
             step.score = chosen.score;
             step.avg_time_mins = chosen.avg_time_mins;
             step.counter_trait = chosen.counter_trait;
-            step.owned = owned_items.contains(&chosen.item_id);
+            step.owned = is_item_owned_or_upgraded(&self.item_repo, chosen.item_id, owned_items);
             if let Some(entry) = self.item_repo.item_catalog(chosen.item_id) {
                 step.total_components = entry.components.len();
                 step.owned_components = entry
@@ -1616,7 +1616,7 @@ impl AppSession {
             step.variants.insert(var_pos, old_primary);
         }
 
-        build.next_unowned_index = build.steps.iter().position(|s| !s.owned);
+        build.next_unowned_index = compute_next_unowned_index(&build.steps);
         Some(build)
     }
 

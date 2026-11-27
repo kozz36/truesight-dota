@@ -228,16 +228,18 @@ pub fn recommend_item_build(
         step: BuildStep,
         match_count: u32,
         is_protected_upgrade: bool,
+        directly_owned: bool,
     }
 
     // Score each timed progression candidate (`Early`, `Core`, `Late`) deterministically.
     let mut scored: Vec<ScoredCandidate> = timed_core_stats
         .into_iter()
         .map(|stat| {
-            let owned = owned_items.contains(&stat.item_id);
+            let directly_owned = owned_items.contains(&stat.item_id);
+            let satisfied = is_item_owned_or_upgraded(repo, stat.item_id, owned_items);
             let (owned_components, total_components) =
                 count_owned_components(repo, stat.item_id, owned_items);
-            let component_bonus = if !owned && total_components > 0 {
+            let component_bonus = if !satisfied && total_components > 0 {
                 0.06 * (owned_components as f32 / total_components as f32)
             } else {
                 0.0
@@ -269,7 +271,7 @@ pub fn recommend_item_build(
                     phase: step_phase,
                     avg_time_mins: stat.avg_time_mins,
                     score,
-                    owned,
+                    owned: satisfied,
                     owned_components,
                     total_components,
                     counter_trait,
@@ -277,6 +279,7 @@ pub fn recommend_item_build(
                 },
                 match_count: stat.match_count,
                 is_protected_upgrade,
+                directly_owned,
             }
         })
         .collect();
@@ -297,11 +300,11 @@ pub fn recommend_item_build(
         phase_max_mc[slot] = phase_max_mc[slot].max(cand.match_count);
     }
     for cand in &scored {
-        if !cand.step.owned && has_aghs_scepter && cand.step.item_id.0 == 271 {
+        if !cand.directly_owned && has_aghs_scepter && cand.step.item_id.0 == 271 {
             continue;
         }
         if cand.step.phase == ItemPhase::Late
-            && (cand.step.owned
+            && (cand.directly_owned
                 || cand.is_protected_upgrade
                 || !is_phase_filler(
                     cand.step.phase,
@@ -320,7 +323,7 @@ pub fn recommend_item_build(
     let mut unowned_candidates: Vec<ScoredCandidate> = Vec::with_capacity(scored.len());
     let mut deferred_aghs_blessing: Option<ScoredCandidate> = None;
     for cand in scored {
-        if cand.step.owned {
+        if cand.directly_owned {
             clustered.push(cand);
         } else if has_aghs_scepter && cand.step.item_id.0 == 271 {
             deferred_aghs_blessing = Some(cand);
@@ -342,7 +345,7 @@ pub fn recommend_item_build(
             .iter()
             .filter(|c| {
                 c.step.phase == cand.step.phase
-                    && (c.step.owned
+                    && (c.directly_owned
                         || c.is_protected_upgrade
                         || !is_phase_filler(
                             c.step.phase,
@@ -408,7 +411,7 @@ pub fn recommend_item_build(
     let mut phase_counts = [0_usize; 5];
 
     for (idx, cand) in clustered.iter().enumerate() {
-        if cand.step.owned {
+        if cand.directly_owned {
             is_primary[idx] = true;
             primary_count += 1;
             phase_counts[phase_slot(cand.step.phase)] += 1;
@@ -553,7 +556,7 @@ pub fn recommend_item_build(
         if already_in_core {
             continue;
         }
-        let owned = owned_items.contains(&stat.item_id);
+        let owned = is_item_owned_or_upgraded(repo, stat.item_id, owned_items);
         let (matching_enemy_traits, counter_trait) =
             evaluate_enemy_counter_traits(stat.item_id, enemies);
         if !owned
@@ -649,7 +652,7 @@ pub fn recommend_item_build(
         optional_items.push(item);
     }
 
-    let next_unowned_index = steps.iter().position(|s| !s.owned);
+    let next_unowned_index = compute_next_unowned_index(&steps);
 
     Ok(RecommendedBuild {
         target_patch: counter_trait_table_patch(),
@@ -661,6 +664,62 @@ pub fn recommend_item_build(
         optional_items,
         next_unowned_index,
     })
+}
+
+/// Returns `true` when `target` is directly in `owned_items`, superseded by a higher-tier boots
+/// item, or consumed as a direct or transitive recipe component of an owned upgraded item.
+pub fn is_item_owned_or_upgraded(
+    repo: &dyn ItemMetaRepository,
+    target: ItemId,
+    owned_items: &[ItemId],
+) -> bool {
+    if owned_items.contains(&target) {
+        return true;
+    }
+    if is_early_boots(target) && owned_items.iter().any(|&id| is_late_boots(id)) {
+        return true;
+    }
+    owned_items
+        .iter()
+        .any(|&owned_id| item_contains_component(repo, owned_id, target, 0))
+}
+
+fn item_contains_component(
+    repo: &dyn ItemMetaRepository,
+    parent: ItemId,
+    target: ItemId,
+    depth: usize,
+) -> bool {
+    // Bound recursion cleanly against malformed or cyclic custom item catalogs.
+    if depth >= 6 {
+        return false;
+    }
+    let Some(entry) = repo.item_catalog(parent) else {
+        return false;
+    };
+    for &comp in &entry.components {
+        if comp == parent {
+            continue;
+        }
+        if comp == target || item_contains_component(repo, comp, target, depth + 1) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Computes the active `NEXT` primary step index without regressing into earlier-phase items that
+/// were sold or skipped once any later-phase step is already owned or upgraded.
+pub fn compute_next_unowned_index(steps: &[BuildStep]) -> Option<usize> {
+    let max_owned_phase = steps
+        .iter()
+        .filter(|s| s.owned)
+        .map(|s| phase_slot(s.phase))
+        .max()
+        .unwrap_or(0);
+    steps
+        .iter()
+        .position(|s| !s.owned && phase_slot(s.phase) >= max_owned_phase)
 }
 
 fn count_owned_components(

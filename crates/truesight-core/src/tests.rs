@@ -2359,3 +2359,176 @@ fn recommend_item_build_defers_blessing_when_tight_window_competitor_absorbs_sce
         owned_scepter.variants
     );
 }
+
+#[test]
+fn recommend_item_build_marks_upgraded_prerequisites_and_late_boots_satisfied_without_resurrecting_basics()
+ {
+    use crate::domain::{Bracket, ItemId, ItemPhase};
+    use crate::math::{is_item_owned_or_upgraded, recommend_item_build};
+
+    // Dawnbreaker scenario: Echo Sabre (252, Core, components &[21, 3, 57]) -> Harpoon (939, Late, &[252, 236])
+    let repo = MockItemRepo {
+        catalog: vec![
+            catalog_entry(50, "Phase Boots", 1500, &[29], false, false),
+            catalog_entry(48, "Boots of Travel", 2500, &[29], false, false),
+            catalog_entry(21, "Ogre Axe", 1000, &[], false, false),
+            catalog_entry(252, "Echo Sabre", 2700, &[21, 3, 57], false, false),
+            catalog_entry(116, "Black King Bar", 4050, &[], false, false),
+            catalog_entry(939, "Harpoon", 4700, &[252, 236], false, false),
+            catalog_entry(112, "Assault Cuirass", 5125, &[], false, false),
+            catalog_entry(180, "Arcane Boots", 1400, &[29], false, false),
+            catalog_entry(79, "Mekansm", 1775, &[], false, false),
+            catalog_entry(231, "Guardian Greaves", 5050, &[180, 79], false, false),
+            // Cyclic test entries to verify cycle-safe traversal termination
+            catalog_entry(7001, "Cycle A", 1000, &[7002], false, false),
+            catalog_entry(7002, "Cycle B", 1000, &[7001], false, false),
+        ],
+        stats: vec![
+            item_stat(50, ItemPhase::Early, 7.0, 2000, 1080),
+            item_stat(21, ItemPhase::Early, 10.0, 900, 460),
+            item_stat(252, ItemPhase::Core, 14.0, 2200, 1210),
+            item_stat(116, ItemPhase::Core, 22.0, 2000, 1100),
+            item_stat(939, ItemPhase::Late, 29.0, 1400, 820),
+            item_stat(112, ItemPhase::Late, 36.0, 1000, 560),
+        ],
+    };
+
+    let enemies = [None; 5];
+    // Hero upgraded Echo Sabre into Harpoon (so 252 is no longer literally in inventory),
+    // and upgraded Phase Boots later into Boots of Travel (48).
+    let owned = [ItemId(48), ItemId(116), ItemId(939)];
+    let build = recommend_item_build(
+        &repo,
+        HeroId(135),
+        Role::Offlane,
+        Bracket::Ancient,
+        &enemies,
+        &owned,
+        2000,
+    )
+    .expect("Dawnbreaker build with Harpoon should succeed");
+
+    // Excluded basic subcomponent Ogre Axe (21) must NOT be resurrected when owning Harpoon.
+    assert!(
+        build.steps.iter().all(|s| s.item_id != ItemId(21)),
+        "basic subcomponent Ogre Axe (21) must stay excluded when Harpoon is owned: {:?}",
+        build.steps
+    );
+
+    let echo = build
+        .steps
+        .iter()
+        .find(|s| s.item_id == ItemId(252))
+        .expect("Echo Sabre step should be present");
+    assert!(
+        echo.owned,
+        "Echo Sabre (252) must be marked satisfied/owned once Harpoon (939) is owned: {echo:?}"
+    );
+    let harpoon = build
+        .steps
+        .iter()
+        .find(|s| s.item_id == ItemId(939))
+        .expect("Harpoon step should be present");
+    assert!(harpoon.owned);
+
+    let phase = build
+        .steps
+        .iter()
+        .find(|s| s.item_id == ItemId(50))
+        .expect("Phase Boots step should be present");
+    assert!(
+        phase.owned,
+        "early Phase Boots (50) must be satisfied when Boots of Travel (48) is owned: {phase:?}"
+    );
+
+    assert_eq!(
+        build.next_unowned_index.map(|i| build.steps[i].item_id),
+        Some(ItemId(112)),
+        "NEXT must advance past upgraded Echo Sabre / Harpoon directly to Assault Cuirass (112): {:?}",
+        build.steps
+    );
+
+    // Transitive recipe satisfaction & cycle safety checks
+    assert!(is_item_owned_or_upgraded(&repo, ItemId(21), &[ItemId(939)]));
+    assert!(is_item_owned_or_upgraded(
+        &repo,
+        ItemId(180),
+        &[ItemId(231)]
+    ));
+    assert!(!is_item_owned_or_upgraded(
+        &repo,
+        ItemId(79),
+        &[ItemId(7001)]
+    ));
+}
+
+#[test]
+fn recommend_item_build_skips_sold_or_skipped_earlier_phase_items_for_next_pointer() {
+    use crate::domain::{Bracket, ItemId, ItemPhase};
+    use crate::math::recommend_item_build;
+
+    let repo = MockItemRepo {
+        catalog: vec![
+            catalog_entry(36, "Magic Wand", 450, &[], false, false),
+            catalog_entry(50, "Phase Boots", 1500, &[], false, false),
+            catalog_entry(252, "Echo Sabre", 2700, &[21, 3, 57], false, false),
+            catalog_entry(116, "Black King Bar", 4050, &[], false, false),
+            catalog_entry(939, "Harpoon", 4700, &[252, 236], false, false),
+            catalog_entry(112, "Assault Cuirass", 5125, &[], false, false),
+        ],
+        stats: vec![
+            item_stat(36, ItemPhase::Early, 4.0, 2400, 1280),
+            item_stat(50, ItemPhase::Early, 7.0, 2100, 1140),
+            item_stat(252, ItemPhase::Core, 14.0, 1900, 1020),
+            item_stat(116, ItemPhase::Core, 22.0, 2000, 1100),
+            item_stat(939, ItemPhase::Late, 31.0, 1300, 740),
+            item_stat(112, ItemPhase::Late, 38.0, 1000, 560),
+        ],
+    };
+
+    let enemies = [None; 5];
+    // Late game where Magic Wand (Early) & Echo Sabre (Core) were sold without upgrading to Harpoon,
+    // while Assault Cuirass (Late) is already owned: NEXT must advance to Harpoon (Late), NOT Echo Sabre!
+    let late_sold = recommend_item_build(
+        &repo,
+        HeroId(135),
+        Role::Offlane,
+        Bracket::Ancient,
+        &enemies,
+        &[ItemId(50), ItemId(116), ItemId(112)],
+        2400,
+    )
+    .expect("late-game build should succeed");
+
+    let echo = late_sold
+        .steps
+        .iter()
+        .find(|s| s.item_id == ItemId(252))
+        .expect("Echo Sabre step present");
+    assert!(!echo.owned);
+    assert_eq!(
+        late_sold
+            .next_unowned_index
+            .map(|i| late_sold.steps[i].item_id),
+        Some(ItemId(939)),
+        "NEXT must skip sold/skipped Early & Core items once a Late step is owned and point to Harpoon (939): {:?}",
+        late_sold.steps
+    );
+
+    // When all Late steps (Assault Cuirass + Harpoon) are owned, NEXT must be None even if Magic Wand (Early) was sold.
+    let late_done = recommend_item_build(
+        &repo,
+        HeroId(135),
+        Role::Offlane,
+        Bracket::Ancient,
+        &enemies,
+        &[ItemId(50), ItemId(116), ItemId(112), ItemId(939)],
+        2800,
+    )
+    .expect("completed late-game build should succeed");
+    assert_eq!(
+        late_done.next_unowned_index, None,
+        "when all Late steps are owned, sold Early items must not trigger NEXT: {:?}",
+        late_done.steps
+    );
+}
