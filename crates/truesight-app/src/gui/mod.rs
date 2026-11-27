@@ -828,15 +828,22 @@ pub(crate) use top_bar::build_viewport_builder;
 #[cfg(not(test))]
 use top_bar::build_viewport_builder;
 
+/// Builds the native `eframe` host configuration, explicitly pinning `Renderer::Glow` so
+/// Windows executes the upstream transparent WGL/DWM viewport handling in `eframe 0.37`.
+pub(crate) fn build_native_options() -> eframe::NativeOptions {
+    eframe::NativeOptions {
+        viewport: build_viewport_builder(),
+        renderer: eframe::Renderer::Glow,
+        ..Default::default()
+    }
+}
+
 pub fn run_gui(
     session: AppSession,
     gsi_listener: Option<BoundedGsiListener>,
     vision_worker: Option<BoundedVisionWorker>,
 ) -> Result<(), String> {
-    let options = eframe::NativeOptions {
-        viewport: build_viewport_builder(),
-        ..Default::default()
-    };
+    let options = build_native_options();
     eframe::run_native(
         "TrueSight Dota",
         options,

@@ -5713,4 +5713,11 @@ fn eframe_app_clear_color_is_transparent_and_overlay_builder_disables_native_sha
         Some(false),
         "compact transparent overlay viewport must disable native DWM drop shadow"
     );
+
+    let native_opts = super::build_native_options();
+    assert_eq!(
+        native_opts.renderer,
+        eframe::Renderer::Glow,
+        "native GUI must explicitly select eframe::Renderer::Glow so Windows executes the upstream transparent viewport fix"
+    );
 }
