@@ -73,7 +73,7 @@ quit                    # Exit session
 - [`skills/truesight-dota-domain/SKILL.md`](skills/truesight-dota-domain/SKILL.md) — Product domain skill and invariant reference for AI agents and contributors.
 - [`docs/architecture.md`](docs/architecture.md) — Hexagonal architecture, Engine v2 & Comfort v3 mathematical equations, and GSI / Vision / Account specifications.
 - [`docs/platforms-and-assets.md`](docs/platforms-and-assets.md) — Supported OS matrix, Windows/Linux installers, `gamestate_integration_truesight.cfg` setup, and third-party asset provenance.
-- [`docs/roadmap-and-tasks.md`](docs/roadmap-and-tasks.md) — Formal engineering task plan (`T1`–`T22` + Phase 3–4 `v0.4.0`–`v0.5.0`), TDD verification gates, and data sync schedule.
+- [`docs/roadmap-and-tasks.md`](docs/roadmap-and-tasks.md) — Formal engineering task plan (`T1`–`T22` + Phase 3–4 `v0.4.0`–`v0.5.1`), TDD verification gates, and data sync schedule.
 - [`.github/workflows/ci.yml`](.github/workflows/ci.yml), [`.github/workflows/release.yml`](.github/workflows/release.yml), and [`.github/dependabot.yml`](.github/dependabot.yml) — Automated dual-feature CI, `v*` binary release packaging, and weekly dependency updates.
 
 ## License & Third-Party Assets
