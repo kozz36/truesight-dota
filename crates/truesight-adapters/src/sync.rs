@@ -161,14 +161,13 @@ pub fn parse_loginusers_vdf(vdf_content: &str) -> Option<u64> {
             }
             Tok::Str(val) => {
                 if depth == 1 && matches!(tokens.get(idx + 1), Some(Tok::Open)) {
-                    if let Ok(raw) = val.trim().parse::<u64>() {
-                        if raw > STEAM64_OFFSET {
-                            if let Some(s32) = normalize_steam32_id(raw) {
-                                current_user = Some(s32);
-                                if first_valid.is_none() {
-                                    first_valid = Some(s32);
-                                }
-                            }
+                    if let Ok(raw) = val.trim().parse::<u64>()
+                        && raw > STEAM64_OFFSET
+                        && let Some(s32) = normalize_steam32_id(raw)
+                    {
+                        current_user = Some(s32);
+                        if first_valid.is_none() {
+                            first_valid = Some(s32);
                         }
                     }
                     pending_key = None;
@@ -235,10 +234,10 @@ pub fn load_app_config_from(path: &Path) -> AppConfig {
                     cfg.account_link = AccountLinkConfig::Unlinked;
                 } else if cleaned.eq_ignore_ascii_case("auto") {
                     cfg.account_link = AccountLinkConfig::Auto;
-                } else if let Ok(raw) = cleaned.parse::<u64>() {
-                    if let Some(id) = normalize_steam32_id(raw) {
-                        cfg.account_link = AccountLinkConfig::Explicit(id);
-                    }
+                } else if let Ok(raw) = cleaned.parse::<u64>()
+                    && let Some(id) = normalize_steam32_id(raw)
+                {
+                    cfg.account_link = AccountLinkConfig::Explicit(id);
                 }
             }
             "bracket" => {
@@ -261,10 +260,10 @@ pub fn load_app_config() -> AppConfig {
         let trimmed = env_val.trim();
         if trimmed.eq_ignore_ascii_case("none") || trimmed.eq_ignore_ascii_case("unlinked") {
             cfg.account_link = AccountLinkConfig::Unlinked;
-        } else if let Ok(raw) = trimmed.parse::<u64>() {
-            if let Some(id) = normalize_steam32_id(raw) {
-                cfg.account_link = AccountLinkConfig::Explicit(id);
-            }
+        } else if let Ok(raw) = trimmed.parse::<u64>()
+            && let Some(id) = normalize_steam32_id(raw)
+        {
+            cfg.account_link = AccountLinkConfig::Explicit(id);
         }
     }
     cfg
@@ -713,12 +712,12 @@ impl LocalCacheManager {
         }
 
         let mut player_ts = None;
-        if let Some(p_meta_path) = self.player_metadata_path() {
-            if let Ok(content) = fs::read_to_string(p_meta_path) {
-                for line in content.lines() {
-                    if let Some(v) = line.strip_prefix("player_sync_unix=") {
-                        player_ts = v.trim().parse::<u64>().ok();
-                    }
+        if let Some(p_meta_path) = self.player_metadata_path()
+            && let Ok(content) = fs::read_to_string(p_meta_path)
+        {
+            for line in content.lines() {
+                if let Some(v) = line.strip_prefix("player_sync_unix=") {
+                    player_ts = v.trim().parse::<u64>().ok();
                 }
             }
         }
@@ -884,25 +883,25 @@ impl LocalCacheManager {
             state.latest_committed_meta_gen =
                 state.latest_committed_meta_gen.max(self.sync_generation);
         }
-        if player_json.is_some() || player_matches_json.is_some() || player_profile_json.is_some() {
-            if let (Some(p_dir), Some(p_path), Some(pm_meta), Some(m_path), Some(prof_path)) = (
+        if (player_json.is_some() || player_matches_json.is_some() || player_profile_json.is_some())
+            && let (Some(p_dir), Some(p_path), Some(pm_meta), Some(m_path), Some(prof_path)) = (
                 self.player_dir(),
                 self.player_json_path(),
                 self.player_metadata_path(),
                 self.player_matches_json_path(),
                 self.player_profile_json_path(),
-            ) {
-                fs::create_dir_all(&p_dir).map_err(|e| PortError(e.to_string()))?;
-                if let Some(pm_body) = player_matches_json {
-                    atomic_write_file(&m_path, pm_body)?;
-                }
-                if let Some(prof_body) = player_profile_json {
-                    atomic_write_file(&prof_path, prof_body)?;
-                }
-                if let Some(p_body) = player_json {
-                    atomic_write_file(&p_path, p_body)?;
-                    atomic_write_file(&pm_meta, &format!("player_sync_unix={now_unix}\n"))?;
-                }
+            )
+        {
+            fs::create_dir_all(&p_dir).map_err(|e| PortError(e.to_string()))?;
+            if let Some(pm_body) = player_matches_json {
+                atomic_write_file(&m_path, pm_body)?;
+            }
+            if let Some(prof_body) = player_profile_json {
+                atomic_write_file(&prof_path, prof_body)?;
+            }
+            if let Some(p_body) = player_json {
+                atomic_write_file(&p_path, p_body)?;
+                atomic_write_file(&pm_meta, &format!("player_sync_unix={now_unix}\n"))?;
             }
         }
         Ok(())
@@ -1009,26 +1008,23 @@ impl LocalCacheManager {
                     deferred_errors.push(format!("meta: {e}"));
                 }
             }
-            if !self.is_cancelled() {
-                if let Some(ic_body) =
+            if !self.is_cancelled()
+                && let Some(ic_body) =
                     fetch_opendota_url("https://api.opendota.com/api/constants/items")
                         .ok()
                         .filter(|b| !parse_opendota_item_constants_json(b).is_empty())
-                {
-                    fetched_item_constants = Some(ic_body);
-                    updated_parts.push("itemConstants (24h TTL)");
-                }
+            {
+                fetched_item_constants = Some(ic_body);
+                updated_parts.push("itemConstants (24h TTL)");
             }
-            if !self.is_cancelled() {
-                if let Some(ref token) = stratz_token {
-                    if let Some(sb) = fetch_stratz_synergy(token)
-                        .ok()
-                        .filter(|s| !parse_stratz_with_synergy_json(s).is_empty())
-                    {
-                        fetched_stratz = Some(sb);
-                        updated_parts.push("STRATZ synergy");
-                    }
-                }
+            if !self.is_cancelled()
+                && let Some(ref token) = stratz_token
+                && let Some(sb) = fetch_stratz_synergy(token)
+                    .ok()
+                    .filter(|s| !parse_stratz_with_synergy_json(s).is_empty())
+            {
+                fetched_stratz = Some(sb);
+                updated_parts.push("STRATZ synergy");
             }
         }
         if need_item_stats && !self.is_cancelled() {
@@ -1082,36 +1078,36 @@ impl LocalCacheManager {
                 }
                 let mut covered_buckets_mask: u8 = 0;
                 let mut covered_unbracketed = false;
-                if let Some(ref token) = stratz_token {
-                    if let Ok(sb) = fetch_stratz_items(token, hero_id.0, role_opt) {
-                        let parsed_entries =
-                            parse_stratz_live_bracketed_item_purchases_json(&sb, hero_id, role_opt);
-                        for (entry_hid, entry_role, bucket_opt, mut stats) in parsed_entries {
-                            stats.retain(|stat| {
-                                stat.phase == ItemPhase::Starting
-                                    || stat.phase == ItemPhase::Situational
-                                    || crate::item_repo::is_valid_timed_progression_item_for_phase(
-                                        &catalog_repo,
-                                        stat.item_id,
-                                        stat.phase,
-                                    )
-                            });
-                            if !stats.is_empty() {
-                                if let Some(bucket) = bucket_opt {
-                                    covered_buckets_mask |= 1_u8 << bucket.index();
-                                } else {
-                                    covered_unbracketed = true;
-                                }
-                                merged_entries.insert(
-                                    (
-                                        entry_hid.0,
-                                        entry_role.map(role_to_cache_idx),
-                                        bucket_opt.map(StratzBracketBucket::index),
-                                    ),
-                                    stats,
-                                );
-                                any_item_stats_fetched = true;
+                if let Some(ref token) = stratz_token
+                    && let Ok(sb) = fetch_stratz_items(token, hero_id.0, role_opt)
+                {
+                    let parsed_entries =
+                        parse_stratz_live_bracketed_item_purchases_json(&sb, hero_id, role_opt);
+                    for (entry_hid, entry_role, bucket_opt, mut stats) in parsed_entries {
+                        stats.retain(|stat| {
+                            stat.phase == ItemPhase::Starting
+                                || stat.phase == ItemPhase::Situational
+                                || crate::item_repo::is_valid_timed_progression_item_for_phase(
+                                    &catalog_repo,
+                                    stat.item_id,
+                                    stat.phase,
+                                )
+                        });
+                        if !stats.is_empty() {
+                            if let Some(bucket) = bucket_opt {
+                                covered_buckets_mask |= 1_u8 << bucket.index();
+                            } else {
+                                covered_unbracketed = true;
                             }
+                            merged_entries.insert(
+                                (
+                                    entry_hid.0,
+                                    entry_role.map(role_to_cache_idx),
+                                    bucket_opt.map(StratzBracketBucket::index),
+                                ),
+                                stats,
+                            );
+                            any_item_stats_fetched = true;
                         }
                     }
                 }
@@ -1164,17 +1160,19 @@ impl LocalCacheManager {
                 updated_parts.push("itemBuilds (24h TTL)");
             }
         }
-        if need_player && !self.is_cancelled() {
-            if let Some(account_id) = self.player_account_id {
-                match fetch_opendota_url(&format!(
-                    "https://api.opendota.com/api/players/{account_id}/heroes"
-                )) {
-                    Ok(body) => {
-                        if is_valid_player_comfort_payload(&body) {
-                            fetched_player = Some(body);
-                            updated_parts.push("player comfort (1h TTL)");
-                            if !self.is_cancelled() {
-                                if let Some(mb) = fetch_opendota_url(&format!(
+        if need_player
+            && !self.is_cancelled()
+            && let Some(account_id) = self.player_account_id
+        {
+            match fetch_opendota_url(&format!(
+                "https://api.opendota.com/api/players/{account_id}/heroes"
+            )) {
+                Ok(body) => {
+                    if is_valid_player_comfort_payload(&body) {
+                        fetched_player = Some(body);
+                        updated_parts.push("player comfort (1h TTL)");
+                        if !self.is_cancelled()
+                                && let Some(mb) = fetch_opendota_url(&format!(
                                     "https://api.opendota.com/api/players/{account_id}/matches?limit=500"
                                 ))
                                 .ok()
@@ -1182,26 +1180,23 @@ impl LocalCacheManager {
                                 {
                                     fetched_matches = Some(mb);
                                 }
-                            }
-                            if !self.is_cancelled() {
-                                if let Some(pb) = fetch_opendota_url(&format!(
-                                    "https://api.opendota.com/api/players/{account_id}"
-                                ))
-                                .ok()
-                                .filter(|p| is_obj(p))
-                                {
-                                    fetched_profile = Some(pb);
-                                }
-                            }
-                        } else {
-                            deferred_errors.push(
-                                "player: Invalid or truncated player comfort JSON payload".into(),
-                            );
+                        if !self.is_cancelled()
+                            && let Some(pb) = fetch_opendota_url(&format!(
+                                "https://api.opendota.com/api/players/{account_id}"
+                            ))
+                            .ok()
+                            .filter(|p| is_obj(p))
+                        {
+                            fetched_profile = Some(pb);
                         }
+                    } else {
+                        deferred_errors.push(
+                            "player: Invalid or truncated player comfort JSON payload".into(),
+                        );
                     }
-                    Err(e) => {
-                        deferred_errors.push(format!("player: {e}"));
-                    }
+                }
+                Err(e) => {
+                    deferred_errors.push(format!("player: {e}"));
                 }
             }
         }
@@ -1266,17 +1261,17 @@ impl LocalCacheManager {
         if let Ok(m_json) = fs::read_to_string(self.meta_json_path()) {
             repo.custom_hero_meta = parse_hero_stats_json(&m_json);
         }
-        if let Some(p_path) = self.player_json_path() {
-            if let Ok(p_json) = fs::read_to_string(p_path) {
-                let matches_json = self
-                    .player_matches_json_path()
-                    .and_then(|mp| fs::read_to_string(mp).ok());
-                repo.custom_personal_pool = parse_player_comfort_with_matches_at_json(
-                    &p_json,
-                    matches_json.as_deref(),
-                    now_unix,
-                );
-            }
+        if let Some(p_path) = self.player_json_path()
+            && let Ok(p_json) = fs::read_to_string(p_path)
+        {
+            let matches_json = self
+                .player_matches_json_path()
+                .and_then(|mp| fs::read_to_string(mp).ok());
+            repo.custom_personal_pool = parse_player_comfort_with_matches_at_json(
+                &p_json,
+                matches_json.as_deref(),
+                now_unix,
+            );
         }
         if let Ok(s_json) = fs::read_to_string(self.stratz_synergy_json_path()) {
             repo.custom_pair_synergy = parse_stratz_with_synergy_json(&s_json);
@@ -1349,11 +1344,10 @@ pub fn parse_hero_stats_json(json: &str) -> Vec<(HeroId, [f32; 8], f32)> {
             let wk = format!("\"{t}_win\"");
             if let (Some(p), Some(w)) =
                 (extract_u64_field(block, &pk), extract_u64_field(block, &wk))
+                && p > 0
             {
-                if p > 0 {
-                    wrs[t - 1] = ((w as f32 + 25.0 * 0.50) / (p as f32 + 25.0)).clamp(0.35, 0.65);
-                    has_any = true;
-                }
+                wrs[t - 1] = ((w as f32 + 25.0 * 0.50) / (p as f32 + 25.0)).clamp(0.35, 0.65);
+                has_any = true;
             }
         }
         if !has_any {
@@ -2134,30 +2128,27 @@ pub fn parse_opendota_item_constants_json(json: &str) -> Vec<ItemCatalogEntry> {
                 if let Some((obj_slice, next_pos)) = extract_balanced_braces(trimmed, obj_offset) {
                     if let Some(id_val) =
                         extract_u64_field(obj_slice, "\"id\"").and_then(|v| u16::try_from(v).ok())
+                        && id_val > 0
                     {
-                        if id_val > 0 {
-                            let slug = key.strip_prefix("item_").unwrap_or(key).to_string();
-                            let display_name = extract_str_field(obj_slice, "\"dname\"")
-                                .unwrap_or(&slug)
-                                .to_string();
-                            let cost = extract_u64_field(obj_slice, "\"cost\"").unwrap_or(0) as u32;
-                            let is_recipe =
-                                slug.contains("recipe") || display_name.contains("Recipe");
-                            let raw_components =
-                                extract_str_array_field(obj_slice, "\"components\"");
-                            staged.push((
-                                ItemCatalogEntry {
-                                    id: ItemId(id_val),
-                                    slug,
-                                    display_name,
-                                    cost,
-                                    components: Vec::new(),
-                                    is_recipe,
-                                    is_consumable_drop: cost == 0 && !is_recipe,
-                                },
-                                raw_components,
-                            ));
-                        }
+                        let slug = key.strip_prefix("item_").unwrap_or(key).to_string();
+                        let display_name = extract_str_field(obj_slice, "\"dname\"")
+                            .unwrap_or(&slug)
+                            .to_string();
+                        let cost = extract_u64_field(obj_slice, "\"cost\"").unwrap_or(0) as u32;
+                        let is_recipe = slug.contains("recipe") || display_name.contains("Recipe");
+                        let raw_components = extract_str_array_field(obj_slice, "\"components\"");
+                        staged.push((
+                            ItemCatalogEntry {
+                                id: ItemId(id_val),
+                                slug,
+                                display_name,
+                                cost,
+                                components: Vec::new(),
+                                is_recipe,
+                                is_consumable_drop: cost == 0 && !is_recipe,
+                            },
+                            raw_components,
+                        ));
                     }
                     pos = next_pos;
                     continue;
@@ -2210,42 +2201,39 @@ fn parse_stratz_item_constants_json(json: &str) -> Vec<ItemCatalogEntry> {
                 };
                 if let Some(id_val) =
                     extract_u64_field(obj_slice, "\"id\"").and_then(|v| u16::try_from(v).ok())
+                    && id_val > 0
                 {
-                    if id_val > 0 {
-                        let raw_name = extract_str_field(obj_slice, "\"name\"").unwrap_or("");
-                        let slug = raw_name
-                            .strip_prefix("item_")
-                            .unwrap_or(raw_name)
-                            .to_string();
-                        let display_name = extract_str_field(obj_slice, "\"displayName\"")
-                            .unwrap_or(&slug)
-                            .to_string();
-                        let cost = extract_u64_field(obj_slice, "\"cost\"").unwrap_or(0) as u32;
-                        let is_recipe =
-                            extract_bool_field(obj_slice, "\"isRecipe\"").unwrap_or(false);
-                        let mut components = Vec::new();
-                        let mut comp_search = obj_slice;
-                        while let Some(c_idx) = comp_search.find("\"componentId\"") {
-                            let sub = &comp_search[c_idx..];
-                            if let Some(cid) = extract_u64_field(sub, "\"componentId\"")
-                                .and_then(|v| u16::try_from(v).ok())
-                            {
-                                if cid > 0 {
-                                    components.push(ItemId(cid));
-                                }
-                            }
-                            comp_search = &comp_search[c_idx + "\"componentId\"".len()..];
+                    let raw_name = extract_str_field(obj_slice, "\"name\"").unwrap_or("");
+                    let slug = raw_name
+                        .strip_prefix("item_")
+                        .unwrap_or(raw_name)
+                        .to_string();
+                    let display_name = extract_str_field(obj_slice, "\"displayName\"")
+                        .unwrap_or(&slug)
+                        .to_string();
+                    let cost = extract_u64_field(obj_slice, "\"cost\"").unwrap_or(0) as u32;
+                    let is_recipe = extract_bool_field(obj_slice, "\"isRecipe\"").unwrap_or(false);
+                    let mut components = Vec::new();
+                    let mut comp_search = obj_slice;
+                    while let Some(c_idx) = comp_search.find("\"componentId\"") {
+                        let sub = &comp_search[c_idx..];
+                        if let Some(cid) = extract_u64_field(sub, "\"componentId\"")
+                            .and_then(|v| u16::try_from(v).ok())
+                            && cid > 0
+                        {
+                            components.push(ItemId(cid));
                         }
-                        entries.push(ItemCatalogEntry {
-                            id: ItemId(id_val),
-                            slug,
-                            display_name,
-                            cost,
-                            components,
-                            is_recipe,
-                            is_consumable_drop: cost == 0 && !is_recipe,
-                        });
+                        comp_search = &comp_search[c_idx + "\"componentId\"".len()..];
                     }
+                    entries.push(ItemCatalogEntry {
+                        id: ItemId(id_val),
+                        slug,
+                        display_name,
+                        cost,
+                        components,
+                        is_recipe,
+                        is_consumable_drop: cost == 0 && !is_recipe,
+                    });
                 }
                 pos = next_pos;
             }
@@ -2758,14 +2746,13 @@ fn parse_cached_hero_item_stats_entries(
             let bucket_opt = extract_str_field(trimmed, "\"bracket\"")
                 .and_then(StratzBracketBucket::from_cache_key);
             let stats = parse_stratz_hero_item_purchase_json_for_role(json, role_opt);
-            if !stats.is_empty() {
-                if let Some(hid) = extract_u64_field(json, "\"heroId\"")
+            if !stats.is_empty()
+                && let Some(hid) = extract_u64_field(json, "\"heroId\"")
                     .or_else(|| extract_u64_field(json, "\"hero_id\""))
                     .and_then(|v| u16::try_from(v).ok())
                     .filter(|&v| v > 0)
-                {
-                    entries.push((HeroId(hid), role_opt, bucket_opt, stats));
-                }
+            {
+                entries.push((HeroId(hid), role_opt, bucket_opt, stats));
             }
         }
     }

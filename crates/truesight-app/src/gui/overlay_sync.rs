@@ -148,7 +148,7 @@ impl TrueSightGuiApp {
                     vp.inner_rect,
                     vp.native_pixels_per_point,
                     i.pixels_per_point(),
-                    i.screen_rect(),
+                    i.content_rect(),
                 )
             });
         let ppp = crate::session::AppSession::resolve_effective_pixels_per_point(

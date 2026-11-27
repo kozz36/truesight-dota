@@ -133,6 +133,7 @@ pub(super) fn build_overlay_viewport_builder(
         .with_always_on_top()
         .with_decorations(false)
         .with_transparent(true)
+        .with_has_shadow(false)
         .with_mouse_passthrough(geom.click_through)
         .with_title("TrueSight Dota — Overlay")
 }
@@ -694,7 +695,7 @@ impl TrueSightGuiApp {
             ),
         );
         super::surfaces::paint_overlay_glass_frame(ui.painter(), panel_rect);
-        let visible_rect = ui.ctx().screen_rect();
+        let visible_rect = ui.ctx().content_rect();
         let clamped_panel = visible_rect.intersect(panel_rect);
         let handle_anchor = if clamped_panel.width() >= 20.0 && clamped_panel.height() >= 20.0 {
             clamped_panel
@@ -716,7 +717,7 @@ impl TrueSightGuiApp {
             let resize_resp = ui
                 .interact(
                     resize_handle,
-                    ui.id().with("truesight_overlay_resize_grip"),
+                    ui.scope_id().with("truesight_overlay_resize_grip"),
                     Sense::hover(),
                 )
                 .on_hover_cursor(egui::CursorIcon::ResizeSouthEast)
@@ -729,7 +730,7 @@ impl TrueSightGuiApp {
             };
             let fg_painter = ui.ctx().layer_painter(egui::LayerId::new(
                 egui::Order::Foreground,
-                ui.id().with("truesight_overlay_resize_grip_layer"),
+                ui.scope_id().with("truesight_overlay_resize_grip_layer"),
             ));
             fg_painter.add(egui::Shape::convex_polygon(
                 vec![

@@ -693,10 +693,10 @@ impl AppSession {
         if q.is_empty() {
             return None;
         }
-        if let Ok(num) = q.parse::<u16>() {
-            if self.matrix.hero(HeroId(num)).is_some() {
-                return Some(HeroId(num));
-            }
+        if let Ok(num) = q.parse::<u16>()
+            && self.matrix.hero(HeroId(num)).is_some()
+        {
+            return Some(HeroId(num));
         }
         // Exact prefix or substring match on display_name or slug
         self.matrix
@@ -768,10 +768,9 @@ impl AppSession {
             .allies
             .iter()
             .position(|p| p.map(|d| d.hero_id) == Some(local_id))
+            && let Some(role) = Role::ALL.get(slot).copied()
         {
-            if let Some(role) = Role::ALL.get(slot).copied() {
-                self.draft.target_role = role;
-            }
+            self.draft.target_role = role;
         }
     }
 
@@ -1103,12 +1102,11 @@ impl AppSession {
                 hero_id,
                 ..
             } = event
+                && slot < TEAM_SIZE
             {
-                if slot < TEAM_SIZE {
-                    let index = usize::from(side == Side::Enemies);
-                    self.vision_slots[index][slot] = Some(hero_id);
-                    fresh_slots[index][slot] = Some(hero_id);
-                }
+                let index = usize::from(side == Side::Enemies);
+                self.vision_slots[index][slot] = Some(hero_id);
+                fresh_slots[index][slot] = Some(hero_id);
             }
         }
         let previous_picks = [self.draft.allies, self.draft.enemies];
@@ -1119,16 +1117,15 @@ impl AppSession {
                 Side::Enemies => self.enemy_locked_slots,
             };
             for (slot, &is_locked) in locked.iter().enumerate() {
-                if let Some(pick) = self.side_picks(side)[slot] {
-                    if self.vision_owned.contains(&(side, pick.hero_id))
-                        && !observed.contains(&Some(pick.hero_id))
-                        && !is_locked
-                        && self.local_player_hero != Some(pick.hero_id)
-                    {
-                        self.side_picks_mut(side)[slot] = None;
-                        if side == Side::Allies && self.build_view_hero == Some(pick.hero_id) {
-                            self.build_view_hero = None;
-                        }
+                if let Some(pick) = self.side_picks(side)[slot]
+                    && self.vision_owned.contains(&(side, pick.hero_id))
+                    && !observed.contains(&Some(pick.hero_id))
+                    && !is_locked
+                    && self.local_player_hero != Some(pick.hero_id)
+                {
+                    self.side_picks_mut(side)[slot] = None;
+                    if side == Side::Allies && self.build_view_hero == Some(pick.hero_id) {
+                        self.build_view_hero = None;
                     }
                 }
             }
@@ -1199,12 +1196,12 @@ impl AppSession {
         vision_worker: Option<&mut BoundedVisionWorker>,
     ) -> bool {
         let mut changed = self.poll_sync_completion();
-        if let Some(listener) = gsi_listener {
-            if let Ok(events) = listener.poll_events() {
-                for ev in events {
-                    self.apply_event(ev);
-                    changed = true;
-                }
+        if let Some(listener) = gsi_listener
+            && let Ok(events) = listener.poll_events()
+        {
+            for ev in events {
+                self.apply_event(ev);
+                changed = true;
             }
         }
         if let Some(worker) = vision_worker {
@@ -1230,11 +1227,11 @@ impl AppSession {
             };
             worker.set_capture_mode(capture_mode);
             worker.set_ally_faction(self.draft.ally_faction);
-            if let Ok(events) = worker.poll_events() {
-                if capture_mode != VisionCaptureMode::Suppressed {
-                    changed |= !events.is_empty();
-                    self.apply_vision_events(events);
-                }
+            if let Ok(events) = worker.poll_events()
+                && capture_mode != VisionCaptureMode::Suppressed
+            {
+                changed |= !events.is_empty();
+                self.apply_vision_events(events);
             }
             if self.apply_runtime_health(worker.runtime_health()) {
                 changed = true;

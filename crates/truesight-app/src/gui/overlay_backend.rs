@@ -629,6 +629,8 @@ impl super::TrueSightGuiApp {
                     egui_events.push(egui::Event::MouseWheel {
                         unit: egui::MouseWheelUnit::Point,
                         delta: egui::vec2(dx, dy),
+                        phase: egui::TouchPhase::Move,
+                        source: egui::MouseWheelSource::Unknown,
                         modifiers: egui::Modifiers::NONE,
                     });
                 }
@@ -717,14 +719,14 @@ impl super::TrueSightGuiApp {
 
         let overlay_ctx = self.overlay_ctx.clone();
         let mut panel_out = None;
-        let full_output = overlay_ctx.run(raw, |ctx| {
+        let mut full_output = overlay_ctx.run_ui(raw, |ui| {
             if !self.overlay_ctx_style_configured {
-                Self::configure_visuals_for(ctx);
+                Self::configure_visuals_for(ui.ctx());
                 self.overlay_ctx_style_configured = true;
             }
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)
-                .show(ctx, |ui| {
+                .show(ui, |ui| {
                     panel_out =
                         Some(self.render_overlay_panel_with_host(ui, OverlayHostMode::LayerShell));
                 });
@@ -732,6 +734,7 @@ impl super::TrueSightGuiApp {
 
         // Clicking the close button inside the overlay turns off overlay visibility immediately.
         if !self.session.is_overlay_visible() {
+            full_output.textures_delta.clear();
             if self.wayland_layer_visible {
                 if let Some(handle) = self.wayland_layer.as_ref() {
                     handle.send(LayerCommand::Hide);
@@ -771,7 +774,7 @@ impl super::TrueSightGuiApp {
         }
 
         self.overlay_rasterizer
-            .apply_textures_delta(&full_output.textures_delta);
+            .apply_textures_delta(&mut full_output.textures_delta);
         let prims = overlay_ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
         let width_px = logical_w.saturating_mul(scale as u32);
         let height_px = logical_h.saturating_mul(scale as u32);
@@ -816,7 +819,8 @@ impl super::TrueSightGuiApp {
         let is_post_draft = self.session.is_post_draft_build_view();
         let target_geom = self.session.active_overlay_geometry();
         let builder = super::overlay::build_overlay_viewport_builder(target_geom, is_post_draft);
-        ctx.show_viewport_immediate(overlay_id, builder, |vctx, _class| {
+        ctx.show_viewport_immediate(overlay_id, builder, |vui, _class| {
+            let vctx = vui.ctx().clone();
             if self
                 .last_overlay_is_post_draft
                 .is_some_and(|prev| prev != is_post_draft)
@@ -845,22 +849,22 @@ impl super::TrueSightGuiApp {
             }
             self.last_overlay_is_post_draft = Some(is_post_draft);
 
-            if !f8_root && Self::is_non_repeating_key_pressed(vctx, egui::Key::F8) {
+            if !f8_root && Self::is_non_repeating_key_pressed(&vctx, egui::Key::F8) {
                 self.session.dismiss_overlay();
                 ctx.request_repaint();
             }
             if !pass_toggled_this_frame
                 && !self.hotkey_recording
-                && super::hotkey::is_pass_shortcut_pressed(vctx, self.session.pass_hotkey)
+                && super::hotkey::is_pass_shortcut_pressed(&vctx, self.session.pass_hotkey)
             {
                 let next = !self.session.overlay_geometry.click_through;
                 self.set_overlay_click_through_live(ctx, next);
             }
 
-            self.sync_live_overlay_viewport_geometry(vctx);
+            self.sync_live_overlay_viewport_geometry(&vctx);
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)
-                .show(vctx, |ui| {
+                .show(vui, |ui| {
                     let _ = self.render_overlay_panel(ui);
                 });
 

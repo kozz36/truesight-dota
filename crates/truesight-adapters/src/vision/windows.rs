@@ -139,7 +139,7 @@ pub fn rgba_to_topbar_rgb_frame(rgba: &[u8], width: usize, height: usize) -> Opt
     }
     let strip_bytes = width.checked_mul(strip_h)?.checked_mul(4)?;
     let mut rgb = Vec::with_capacity(width * strip_h * 3);
-    for px in rgba[..strip_bytes].chunks_exact(4) {
+    for px in rgba[..strip_bytes].as_chunks::<4>().0 {
         rgb.push(px[0]);
         rgb.push(px[1]);
         rgb.push(px[2]);

@@ -212,10 +212,10 @@ pub(crate) fn steam_vdf_candidates_for(
 
 pub(crate) fn detect_steam_vdf_in_candidates(candidates: &[PathBuf]) -> Option<u64> {
     for candidate in candidates {
-        if let Ok(content) = fs::read_to_string(candidate) {
-            if let Some(steam32) = crate::sync::parse_loginusers_vdf(&content) {
-                return Some(steam32);
-            }
+        if let Ok(content) = fs::read_to_string(candidate)
+            && let Some(steam32) = crate::sync::parse_loginusers_vdf(&content)
+        {
+            return Some(steam32);
         }
     }
     None

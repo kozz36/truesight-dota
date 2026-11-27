@@ -23,7 +23,7 @@ gui = ["dep:eframe", "dep:global-hotkey", "dep:smithay-client-toolkit", "dep:zbu
 [dependencies]
 truesight-core = { path = "../truesight-core" }
 truesight-adapters = { path = "../truesight-adapters" }
-eframe = { version = "0.32", optional = true }
+eframe = { version = "0.37", optional = true }
 global-hotkey = { version = "0.10", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]

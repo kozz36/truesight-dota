@@ -180,7 +180,7 @@ impl TrueSightGuiApp {
                     let clear_resp = ui
                         .interact(
                             cr,
-                            Id::new(("slot_clear_btn", is_ally, slot)),
+                            Id::unique(("slot_clear_btn", is_ally, slot)),
                             Sense::click(),
                         )
                         .on_hover_text("Clear hero slot");
@@ -506,7 +506,7 @@ impl TrueSightGuiApp {
                 };
                 let card_resp = ui.interact(
                     card_hit_rect,
-                    Id::new(("slot_card_click", is_ally, slot)),
+                    Id::unique(("slot_card_click", is_ally, slot)),
                     Sense::click_and_drag(),
                 );
                 if card_resp.drag_started() && current_pick.is_some() {

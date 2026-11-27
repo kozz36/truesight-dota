@@ -94,6 +94,16 @@ fn make_5v5_gui_session() -> AppSession {
     session
 }
 
+fn run_test_ui(
+    ctx: &egui::Context,
+    raw_input: egui::RawInput,
+    run_ui: impl FnMut(&mut egui::Ui),
+) -> egui::FullOutput {
+    let mut output = ctx.run_ui(raw_input, run_ui);
+    output.textures_delta.clear();
+    output
+}
+
 fn render_at_viewport_with_output(
     app: &mut TrueSightGuiApp,
     ctx: &egui::Context,
@@ -106,8 +116,8 @@ fn render_at_viewport_with_output(
     let mut layout = None;
     let mut last_output = None;
     for _ in 0..2 {
-        let output = ctx.run(raw_input.clone(), |ctx| {
-            layout = Some(app.render_frame(ctx));
+        let output = run_test_ui(ctx, raw_input.clone(), |ui| {
+            layout = Some(app.render_frame(ui));
         });
         last_output = Some(output);
     }
@@ -321,7 +331,7 @@ fn v4_slot_internal_geometry_prevents_badge_percentage_and_clear_overlap() {
             ],
             ..Default::default()
         };
-        let _ = ctx.run(input, |ctx| {
+        let _ = run_test_ui(&ctx, input, |ctx| {
             app.render_frame(ctx);
         });
     }
@@ -537,7 +547,14 @@ fn viewport_sets_low_res_bounds_wayland_app_id_and_gem_icon() {
     assert_eq!(icon.height, 64);
     assert_eq!(icon.rgba.len(), 64 * 64 * 4);
     // Center region must contain bright Gem green channel energy rather than flat solid fill
-    let center_green_max = icon.rgba.chunks_exact(4).map(|px| px[1]).max().unwrap_or(0);
+    let center_green_max = icon
+        .rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|px| px[1])
+        .max()
+        .unwrap_or(0);
     assert!(
         center_green_max > 140,
         "expected visible Gem green luminance, max green={center_green_max}"
@@ -680,7 +697,7 @@ fn top_bar_moves_dev_telemetry_and_actions_into_options_panel() {
             ],
             ..Default::default()
         };
-        let _ = ctx.run(input, |ctx| {
+        let _ = run_test_ui(&ctx, input, |ctx| {
             app.render_frame(ctx);
         });
     }
@@ -715,7 +732,7 @@ fn top_bar_moves_dev_telemetry_and_actions_into_options_panel() {
             ],
             ..Default::default()
         };
-        let _ = ctx.run(input, |ctx| {
+        let _ = run_test_ui(&ctx, input, |ctx| {
             app.render_frame(ctx);
         });
     }
@@ -1314,7 +1331,7 @@ fn top_bar_renders_compact_vector_gear_and_info_button_without_overlap() {
             ],
             ..Default::default()
         };
-        let _ = ctx.run(input, |ctx| {
+        let _ = run_test_ui(&ctx, input, |ctx| {
             app.render_frame(ctx);
         });
     }
@@ -1583,7 +1600,8 @@ fn gui_build_bar_and_overlay_preserve_win_parity_and_render_variants() {
     let ctx = egui::Context::default();
 
     // Render overlay in draft phase
-    let _ = ctx.run(
+    let _ = run_test_ui(
+        &ctx,
         egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 pos2(0.0, 0.0),
@@ -1591,8 +1609,8 @@ fn gui_build_bar_and_overlay_preserve_win_parity_and_render_variants() {
             )),
             ..Default::default()
         },
-        |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 let r = app.render_overlay_panel(ui).rect;
                 assert!(r.width() > 0.0 && r.height() > 0.0);
             });
@@ -1610,7 +1628,8 @@ fn gui_build_bar_and_overlay_preserve_win_parity_and_render_variants() {
     assert!(summary_post.build.is_some());
 
     let mut suggested_rect = egui::Rect::NOTHING;
-    let _ = ctx.run(
+    let _ = run_test_ui(
+        &ctx,
         egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 pos2(0.0, 0.0),
@@ -1618,14 +1637,15 @@ fn gui_build_bar_and_overlay_preserve_win_parity_and_render_variants() {
             )),
             ..Default::default()
         },
-        |ctx| {
-            let rects = app.render_frame(ctx);
+        |ui| {
+            let rects = app.render_frame(ui);
             suggested_rect = rects.suggested;
         },
     );
     assert!(suggested_rect.width() > 0.0 && suggested_rect.height() > 0.0);
 
-    let _ = ctx.run(
+    let _ = run_test_ui(
+        &ctx,
         egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 pos2(0.0, 0.0),
@@ -1633,8 +1653,8 @@ fn gui_build_bar_and_overlay_preserve_win_parity_and_render_variants() {
             )),
             ..Default::default()
         },
-        |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 let r = app.render_overlay_panel(ui).rect;
                 assert!(r.width() > 0.0 && r.height() > 0.0);
             });
@@ -1728,8 +1748,8 @@ fn gui_overlay_syncs_and_clamps_live_viewport_geometry() {
         },
     );
 
-    let full_output = ctx.run(raw_input, |vctx| {
-        app.sync_live_overlay_viewport_geometry(vctx);
+    let full_output = run_test_ui(&ctx, raw_input, |ui| {
+        app.sync_live_overlay_viewport_geometry(ui.ctx());
     });
 
     assert_eq!(app.session.overlay_geometry.x, 240.0);
@@ -1793,7 +1813,8 @@ fn gui_overlay_keeps_next_badge_visible_for_fifth_step() {
     let ctx = egui::Context::default();
     let mut full_output = None;
     for _ in 0..2 {
-        full_output = Some(ctx.run(
+        full_output = Some(run_test_ui(
+            &ctx,
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     pos2(0.0, 0.0),
@@ -1801,8 +1822,8 @@ fn gui_overlay_keeps_next_badge_visible_for_fifth_step() {
                 )),
                 ..Default::default()
             },
-            |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+            |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
                     let _ = app.render_overlay_panel(ui);
                 });
             },
@@ -1870,8 +1891,8 @@ fn live_overlay_viewport_geometry_preserves_secondary_monitor_and_avoids_offset_
         },
     );
 
-    let secondary_output = ctx.run(raw_input_secondary, |vctx| {
-        app.sync_live_overlay_viewport_geometry(vctx);
+    let secondary_output = run_test_ui(&ctx, raw_input_secondary, |ui| {
+        app.sync_live_overlay_viewport_geometry(ui.ctx());
     });
     assert_eq!(
         app.session.overlay_geometry.x, 2200.0,
@@ -1914,8 +1935,8 @@ fn live_overlay_viewport_geometry_preserves_secondary_monitor_and_avoids_offset_
         },
     );
 
-    let strip_output = ctx.run(raw_input_strip, |vctx| {
-        app.sync_live_overlay_viewport_geometry(vctx);
+    let strip_output = run_test_ui(&ctx, raw_input_strip, |ui| {
+        app.sync_live_overlay_viewport_geometry(ui.ctx());
     });
     assert_eq!(app.session.overlay_geometry.x, 240.0);
     assert_eq!(
@@ -1978,8 +1999,8 @@ fn live_overlay_viewport_geometry_handles_heterogeneous_monitors_and_unavailable
         raw
     };
 
-    let _ = ctx.run(make_input(2450.0, 140.0), |vctx| {
-        app.sync_live_overlay_viewport_geometry(vctx);
+    let _ = run_test_ui(&ctx, make_input(2450.0, 140.0), |ui| {
+        app.sync_live_overlay_viewport_geometry(ui.ctx());
     });
     assert_eq!(
         app.session.overlay_geometry.x, 2450.0,
@@ -1988,8 +2009,8 @@ fn live_overlay_viewport_geometry_handles_heterogeneous_monitors_and_unavailable
     assert_eq!(app.session.overlay_geometry.y, 140.0);
 
     // Dragging past the right edge of the 1280pt secondary monitor (x=3000) clamps to 1920 + 1280 - 380 = 2820.
-    let _ = ctx.run(make_input(3000.0, 140.0), |vctx| {
-        app.sync_live_overlay_viewport_geometry(vctx);
+    let _ = run_test_ui(&ctx, make_input(3000.0, 140.0), |ui| {
+        app.sync_live_overlay_viewport_geometry(ui.ctx());
     });
     assert_eq!(app.session.overlay_geometry.x, 2820.0);
 
@@ -2005,8 +2026,8 @@ fn live_overlay_viewport_geometry_handles_heterogeneous_monitors_and_unavailable
     };
     let mut fallback_app = TrueSightGuiApp::new(fallback_session, None, None);
     fallback_app.native_monitors_probed = true;
-    let _ = ctx.run(make_input(2450.0, 140.0), |vctx| {
-        fallback_app.sync_live_overlay_viewport_geometry(vctx);
+    let _ = run_test_ui(&ctx, make_input(2450.0, 140.0), |ui| {
+        fallback_app.sync_live_overlay_viewport_geometry(ui.ctx());
     });
     assert_eq!(
         fallback_app.session.overlay_geometry.x, 2450.0,
@@ -2080,8 +2101,8 @@ fn live_overlay_avoids_offset_capture_strip_from_bounded_vision_worker_productio
         },
     );
 
-    let _ = ctx.run(raw_input, |ctx| {
-        let _ = app.render_frame(ctx);
+    let _ = run_test_ui(&ctx, raw_input, |ui| {
+        let _ = app.render_frame(ui);
     });
 
     assert_eq!(
@@ -2172,8 +2193,8 @@ fn live_overlay_viewport_geometry_normalizes_mixed_dpi_secondary_monitor_and_cap
         raw_input
     };
 
-    let _ = ctx.run(make_input(1400.0, 120.0), |ctx| {
-        let _ = app.render_frame(ctx);
+    let _ = run_test_ui(&ctx, make_input(1400.0, 120.0), |ui| {
+        let _ = app.render_frame(ui);
     });
 
     assert_eq!(
@@ -2196,8 +2217,8 @@ fn live_overlay_viewport_geometry_normalizes_mixed_dpi_secondary_monitor_and_cap
     );
 
     // Dragging past right edge of 150% secondary monitor (1920 + 2560 - 570 = 3910px = 2606.6667pt)
-    let _ = ctx.run(make_input(2800.0, 168.0), |ctx| {
-        let _ = app.render_frame(ctx);
+    let _ = run_test_ui(&ctx, make_input(2800.0, 168.0), |ui| {
+        let _ = app.render_frame(ui);
     });
     assert!(
         (app.session.overlay_geometry.x - (3910.0 / 1.5)).abs() < 0.1,
@@ -2256,7 +2277,7 @@ fn live_overlay_viewport_geometry_honors_effective_scale_with_native_dpi_and_app
     let ctx = egui::Context::default();
     ctx.set_zoom_factor(1.2);
     // `Context::set_zoom_factor` takes effect at the end of a pass for the following pass.
-    let _ = ctx.run(egui::RawInput::default(), |_| {});
+    let _ = run_test_ui(&ctx, egui::RawInput::default(), |_| {});
     assert!((ctx.zoom_factor() - 1.2).abs() < 1e-5);
     let overlay_id = egui::ViewportId::from_hash_of("truesight_compact_overlay");
 
@@ -2289,8 +2310,8 @@ fn live_overlay_viewport_geometry_honors_effective_scale_with_native_dpi_and_app
         raw_input
     };
 
-    let _ = ctx.run(make_input(1200.0, 100.0), |ctx| {
-        let _ = app.render_frame(ctx);
+    let _ = run_test_ui(&ctx, make_input(1200.0, 100.0), |ui| {
+        let _ = app.render_frame(ui);
     });
 
     assert!(
@@ -2316,8 +2337,8 @@ fn live_overlay_viewport_geometry_honors_effective_scale_with_native_dpi_and_app
 
     // Dragging past right edge of 150% secondary monitor with 1.2x zoom:
     // physical max_x = 1920 + 2560 - (380 * 1.8) = 4480 - 684 = 3796px -> 3796 / 1.8 = 2108.8889pt.
-    let _ = ctx.run(make_input(2500.0, 140.0), |ctx| {
-        let _ = app.render_frame(ctx);
+    let _ = run_test_ui(&ctx, make_input(2500.0, 140.0), |ui| {
+        let _ = app.render_frame(ui);
     });
     assert!(
         (app.session.overlay_geometry.x - (3796.0 / 1.8)).abs() < 0.1,
@@ -2339,14 +2360,15 @@ fn overlay_drag_and_resize_handles_emit_start_drag_and_begin_resize_commands() {
     let run_overlay_at =
         |vp_size: egui::Vec2, events: Vec<egui::Event>, app: &mut TrueSightGuiApp| {
             let mut panel_out = None;
-            let full_output = ctx.run(
+            let full_output = run_test_ui(
+                &ctx,
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(pos2(0.0, 0.0), vp_size)),
                     events,
                     ..Default::default()
                 },
-                |ctx| {
-                    egui::CentralPanel::default().show(ctx, |ui| {
+                |ui| {
+                    egui::CentralPanel::default().show(ui, |ui| {
                         panel_out = Some(app.render_overlay_panel(ui));
                     });
                 },
@@ -2610,7 +2632,8 @@ fn overlay_click_through_unlocks_via_top_bar_button_options_and_ctrl_shift_p_hot
 
     let click_at = |pos: egui::Pos2, app: &mut TrueSightGuiApp| {
         for pressed in [true, false] {
-            let _ = ctx.run(
+            let _ = run_test_ui(
+                &ctx,
                 egui::RawInput {
                     screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), viewport)),
                     events: vec![
@@ -2624,8 +2647,8 @@ fn overlay_click_through_unlocks_via_top_bar_button_options_and_ctrl_shift_p_hot
                     ],
                     ..Default::default()
                 },
-                |ctx| {
-                    app.render_frame(ctx);
+                |ui| {
+                    app.render_frame(ui);
                 },
             );
         }
@@ -2633,10 +2656,10 @@ fn overlay_click_through_unlocks_via_top_bar_button_options_and_ctrl_shift_p_hot
 
     let press_key = |key: egui::Key, modifiers: egui::Modifiers, app: &mut TrueSightGuiApp| {
         for pressed in [true, false] {
-            let _ = ctx.run(
+            let _ = run_test_ui(
+                &ctx,
                 egui::RawInput {
                     screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), viewport)),
-                    modifiers,
                     events: vec![egui::Event::Key {
                         key,
                         physical_key: None,
@@ -2646,8 +2669,8 @@ fn overlay_click_through_unlocks_via_top_bar_button_options_and_ctrl_shift_p_hot
                     }],
                     ..Default::default()
                 },
-                |ctx| {
-                    app.render_frame(ctx);
+                |ui| {
+                    app.render_frame(ui);
                 },
             );
         }
@@ -2721,7 +2744,8 @@ fn language_selector_switches_es_en_ru_from_quick_guide_and_options() {
 
     let click_at = |pos: egui::Pos2, app: &mut TrueSightGuiApp| {
         for pressed in [true, false] {
-            let _ = ctx.run(
+            let _ = run_test_ui(
+                &ctx,
                 egui::RawInput {
                     screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), viewport)),
                     events: vec![
@@ -2735,8 +2759,8 @@ fn language_selector_switches_es_en_ru_from_quick_guide_and_options() {
                     ],
                     ..Default::default()
                 },
-                |ctx| {
-                    app.render_frame(ctx);
+                |ui| {
+                    app.render_frame(ui);
                 },
             );
         }
@@ -2857,16 +2881,17 @@ fn overlay_resize_grip_remains_inside_minimum_280x160_viewport_and_starts_resize
     let screen_rect = Rect::from_min_size(pos2(0.0, 0.0), min_vp);
     let run_min_overlay = |events: Vec<egui::Event>, app: &mut TrueSightGuiApp| {
         let mut out = None;
-        let full = ctx.run(
+        let full = run_test_ui(
+            &ctx,
             egui::RawInput {
                 screen_rect: Some(screen_rect),
                 events,
                 ..Default::default()
             },
-            |ctx| {
+            |ui| {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::NONE)
-                    .show(ctx, |ui| {
+                    .show(ui, |ui| {
                         out = Some(app.render_overlay_panel(ui));
                     });
             },
@@ -2948,8 +2973,8 @@ fn gui_overlay_preserves_resized_dimensions_on_native_wayland_without_position_r
         },
     );
 
-    let full_output = ctx.run(raw_input, |vctx| {
-        app.sync_live_overlay_viewport_geometry(vctx);
+    let full_output = run_test_ui(&ctx, raw_input, |ui| {
+        app.sync_live_overlay_viewport_geometry(ui.ctx());
     });
 
     assert_eq!(app.session.overlay_geometry.width, 480.0);
@@ -2989,10 +3014,10 @@ fn hotkey_ignores_key_repeats_and_processes_multiple_queued_global_presses() {
                           repeat: bool,
                           modifiers: egui::Modifiers,
                           app: &mut TrueSightGuiApp| {
-        let _ = ctx.run(
+        let _ = run_test_ui(
+            &ctx,
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), viewport)),
-                modifiers,
                 events: vec![egui::Event::Key {
                     key,
                     physical_key: None,
@@ -3002,8 +3027,8 @@ fn hotkey_ignores_key_repeats_and_processes_multiple_queued_global_presses() {
                 }],
                 ..Default::default()
             },
-            |ctx| {
-                app.render_frame(ctx);
+            |ui| {
+                app.render_frame(ui);
             },
         );
     };
@@ -3257,15 +3282,16 @@ fn gui_build_bar_renders_three_timed_phases_and_role_filtered_optional_section()
     );
     let mut outputs = vec![(vec2(1468.0, 960.0), desktop_out)];
     for card_vp in [vec2(460.0, 760.0), vec2(320.0, 860.0)] {
-        let card_out = ctx.run(
+        let card_out = run_test_ui(
+            &ctx,
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), card_vp)),
                 ..Default::default()
             },
-            |ctx| {
+            |ui| {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::NONE)
-                    .show(ctx, |ui| {
+                    .show(ui, |ui| {
                         let _ = app.render_item_build_card(ui);
                     });
             },
@@ -3346,8 +3372,8 @@ fn gui_overlay_switches_independent_picks_and_build_geometries_and_renders_icon_
     raw_picks.viewports.insert(overlay_id, picks_vp);
 
     // 1. Frame in Picks mode initializes last_overlay_is_post_draft = Some(false).
-    let _ = ctx.run(raw_picks.clone(), |ctx| {
-        let _ = app.render_frame(ctx);
+    let _ = run_test_ui(&ctx, raw_picks.clone(), |ui| {
+        let _ = app.render_frame(ui);
     });
     assert_eq!(app.last_overlay_is_post_draft, Some(false));
     assert_eq!(app.session.overlay_geometry.width, 420.0);
@@ -3355,8 +3381,8 @@ fn gui_overlay_switches_independent_picks_and_build_geometries_and_renders_icon_
     // 2. Toggle to Build mode: must preserve Picks 420x260 and command Build 500x142 + min 220x104
     // on the immediate transition frame.
     app.session.toggle_post_draft_build_view();
-    let switch_out = ctx.run(raw_picks, |ctx| {
-        let _ = app.render_frame(ctx);
+    let switch_out = run_test_ui(&ctx, raw_picks, |ui| {
+        let _ = app.render_frame(ui);
     });
     let cmds = &switch_out
         .viewport_output
@@ -3386,15 +3412,16 @@ fn gui_overlay_switches_independent_picks_and_build_geometries_and_renders_icon_
     ] {
         let mut out_opt = None;
         let screen_rect = Rect::from_min_size(pos2(0.0, 0.0), vp);
-        let full = ctx.run(
+        let full = run_test_ui(
+            &ctx,
             egui::RawInput {
                 screen_rect: Some(screen_rect),
                 ..Default::default()
             },
-            |vctx| {
+            |ui| {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::NONE)
-                    .show(vctx, |ui| {
+                    .show(ui, |ui| {
                         out_opt = Some(app.render_overlay_panel(ui));
                     });
             },
@@ -3465,7 +3492,7 @@ fn gui_clicking_second_ally_sets_build_view_hero_without_setting_local_player_he
             ],
             ..Default::default()
         };
-        let _ = ctx.run(input, |ctx| {
+        let _ = run_test_ui(&ctx, input, |ctx| {
             let _ = app.render_frame(ctx);
         });
     }
@@ -3624,13 +3651,14 @@ fn paint_item_icon_fallback_draws_monogram_when_texture_is_absent() {
     assert_eq!(item_monogram("Ristul's Devotion"), "RD");
 
     let ctx = egui::Context::default();
-    let out = ctx.run(
+    let out = run_test_ui(
+        &ctx,
         egui::RawInput {
             screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(120.0, 80.0))),
             ..Default::default()
         },
-        |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 let (rect, _) = ui.allocate_exact_size(vec2(36.0, 26.0), egui::Sense::hover());
                 paint_item_icon_with_fallback(
                     ui.painter(),
@@ -3664,15 +3692,16 @@ fn build_bar_renders_four_late_items_in_2x2_grid_on_desktop() {
     let mut app = TrueSightGuiApp::new(session, None, None);
     app.onboarding_open = false;
     let ctx = egui::Context::default();
-    let out = ctx.run(
+    let out = run_test_ui(
+        &ctx,
         egui::RawInput {
             screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(920.0, 420.0))),
             ..Default::default()
         },
-        |ctx| {
+        |ui| {
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)
-                .show(ctx, |ui| {
+                .show(ui, |ui| {
                     let _ = app.render_item_build_card(ui);
                 });
         },
@@ -3758,15 +3787,16 @@ fn overlay_build_switches_late_between_4x1_wide_and_2x2_tall_and_wraps_three_var
 
     // 1. Wide/low 560x145 -> 4x1 horizontal Late row (all 4 share similar Y).
     let wide_vp = vec2(560.0, 145.0);
-    let wide_out = ctx.run(
+    let wide_out = run_test_ui(
+        &ctx,
         egui::RawInput {
             screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), wide_vp)),
             ..Default::default()
         },
-        |vctx| {
+        |ui| {
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)
-                .show(vctx, |ui| {
+                .show(ui, |ui| {
                     let _ = app.render_overlay_panel(ui);
                 });
         },
@@ -3787,15 +3817,16 @@ fn overlay_build_switches_late_between_4x1_wide_and_2x2_tall_and_wraps_three_var
 
     // 2. Taller/compact 420x270 -> 2x2 Late grid + >= 2 variant rows (>= 3 variant icons rendered).
     let tall_vp = vec2(420.0, 270.0);
-    let tall_out = ctx.run(
+    let tall_out = run_test_ui(
+        &ctx,
         egui::RawInput {
             screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), tall_vp)),
             ..Default::default()
         },
-        |vctx| {
+        |ui| {
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)
-                .show(vctx, |ui| {
+                .show(ui, |ui| {
                     let _ = app.render_overlay_panel(ui);
                 });
         },
@@ -3944,15 +3975,16 @@ fn build_bar_and_overlay_label_blessing_upgrade_and_highlight_child_when_scepter
         let mut app = TrueSightGuiApp::new(session, None, None);
         app.onboarding_open = false;
         let ctx = egui::Context::default();
-        let desk_out = ctx.run(
+        let desk_out = run_test_ui(
+            &ctx,
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(920.0, 420.0))),
                 ..Default::default()
             },
-            |vctx| {
+            |ui| {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::NONE)
-                    .show(vctx, |ui| {
+                    .show(ui, |ui| {
                         let _ = app.render_item_build_card(ui);
                     });
             },
@@ -3963,15 +3995,16 @@ fn build_bar_and_overlay_label_blessing_upgrade_and_highlight_child_when_scepter
         }
 
         app.session.overlay_mode = true;
-        let ovl_out = ctx.run(
+        let ovl_out = run_test_ui(
+            &ctx,
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(520.0, 240.0))),
                 ..Default::default()
             },
-            |vctx| {
+            |ui| {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::NONE)
-                    .show(vctx, |ui| {
+                    .show(ui, |ui| {
                         let _ = app.render_overlay_panel(ui);
                     });
             },
@@ -4123,16 +4156,17 @@ fn direct_upgrade_chip_in_build_bar_and_overlay_is_informational_and_preserves_o
     let ctx = egui::Context::default();
     let desk_vp = vec2(920.0, 420.0);
     let run_desktop = |app: &mut TrueSightGuiApp, events: Vec<egui::Event>| {
-        ctx.run(
+        run_test_ui(
+            &ctx,
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), desk_vp)),
                 events,
                 ..Default::default()
             },
-            |vctx| {
+            |ui| {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::NONE)
-                    .show(vctx, |ui| {
+                    .show(ui, |ui| {
                         let _ = app.render_item_build_card(ui);
                     });
             },
@@ -4194,16 +4228,17 @@ fn direct_upgrade_chip_in_build_bar_and_overlay_is_informational_and_preserves_o
     app.session.overlay_mode = true;
     let ovl_vp = vec2(520.0, 240.0);
     let run_overlay = |app: &mut TrueSightGuiApp, events: Vec<egui::Event>| {
-        ctx.run(
+        run_test_ui(
+            &ctx,
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), ovl_vp)),
                 events,
                 ..Default::default()
             },
-            |vctx| {
+            |ui| {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::NONE)
-                    .show(vctx, |ui| {
+                    .show(ui, |ui| {
                         let _ = app.render_overlay_panel(ui);
                     });
             },
@@ -4311,8 +4346,8 @@ fn live_overlay_viewport_suppresses_corrective_commands_during_active_wm_resize_
                     ..Default::default()
                 },
             );
-            let out = ctx.run(raw_input, |vctx| {
-                app.sync_live_overlay_viewport_geometry(vctx);
+            let out = run_test_ui(&ctx, raw_input, |ui| {
+                app.sync_live_overlay_viewport_geometry(ui.ctx());
             });
             out.viewport_output
                 .get(&egui::ViewportId::ROOT)
@@ -4416,8 +4451,8 @@ fn live_overlay_viewport_resumes_clamp_when_pointer_resumes_after_held_pause() {
                 ..Default::default()
             },
         );
-        ctx.run(raw_input, |vctx| {
-            app.sync_live_overlay_viewport_geometry(vctx);
+        run_test_ui(&ctx, raw_input, |ui| {
+            app.sync_live_overlay_viewport_geometry(ui.ctx());
         })
         .viewport_output
         .get(&egui::ViewportId::ROOT)
@@ -4500,8 +4535,8 @@ fn live_overlay_viewport_suppresses_unannounced_continuous_os_resize_motion() {
                 ..Default::default()
             },
         );
-        ctx.run(raw_input, |vctx| {
-            app.sync_live_overlay_viewport_geometry(vctx);
+        run_test_ui(&ctx, raw_input, |ui| {
+            app.sync_live_overlay_viewport_geometry(ui.ctx());
         })
         .viewport_output
         .get(&egui::ViewportId::ROOT)
@@ -4588,8 +4623,8 @@ fn live_overlay_viewport_fractional_dpi_and_boundary_clamp_do_not_oscillate() {
                     ..Default::default()
                 },
             );
-            let out = ctx.run(raw_input, |vctx| {
-                app.sync_live_overlay_viewport_geometry(vctx);
+            let out = run_test_ui(&ctx, raw_input, |ui| {
+                app.sync_live_overlay_viewport_geometry(ui.ctx());
             });
             let cmds = out
                 .viewport_output
@@ -4688,14 +4723,15 @@ fn gemstone_radial_glow_texture_decays_smoothly_without_hard_edges() {
 fn hud_card_renders_gemstone_facets_behind_content_with_corner_ticks() {
     let mut app = TrueSightGuiApp::new(make_5v5_gui_session(), None, None);
     let ctx = egui::Context::default();
-    let full_output = ctx.run(
+    let full_output = run_test_ui(
+        &ctx,
         egui::RawInput {
             screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(420.0, 260.0))),
             ..Default::default()
         },
-        |ctx| {
-            app.textures.ensure_loaded(ctx);
-            egui::CentralPanel::default().show(ctx, |ui| {
+        |ui| {
+            app.textures.ensure_loaded(ui.ctx());
+            egui::CentralPanel::default().show(ui, |ui| {
                 super::theme::hud_card(ui, |ui| {
                     ui.label("Gemstone Smooth Glow Test");
                 });
@@ -4753,13 +4789,14 @@ fn options_window_exposes_overlay_opacity_control_and_updates_session() {
 
     let mut out = None;
     for _ in 0..2 {
-        out = Some(ctx.run(
+        out = Some(run_test_ui(
+            &ctx,
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, 800.0))),
                 ..Default::default()
             },
-            |ctx| {
-                let _ = app.render_options_window(ctx, 48.0);
+            |ui| {
+                let _ = app.render_options_window(ui.ctx(), 48.0);
             },
         ));
     }
@@ -4853,13 +4890,14 @@ fn overlay_small_text_scrim_clears_wcag_aa_contrast_over_white_backdrop_at_defau
     }
 
     let ctx = egui::Context::default();
-    let out = ctx.run(
+    let out = run_test_ui(
+        &ctx,
         egui::RawInput {
             screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(160.0, 80.0))),
             ..Default::default()
         },
-        |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 super::surfaces::paint_empty_matrix_slot(
                     ui.painter(),
                     Rect::from_min_size(pos2(8.0, 8.0), vec2(26.0, 26.0)),
@@ -4967,10 +5005,10 @@ fn custom_pass_hotkey_triggers_in_app_toggle_and_suppresses_old_default() {
     let viewport = vec2(1280.0, 800.0);
     let press_key = |key: egui::Key, modifiers: egui::Modifiers, app: &mut TrueSightGuiApp| {
         for pressed in [true, false] {
-            let _ = ctx.run(
+            let _ = run_test_ui(
+                &ctx,
                 egui::RawInput {
                     screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), viewport)),
-                    modifiers,
                     events: vec![egui::Event::Key {
                         key,
                         physical_key: None,
@@ -4980,8 +5018,8 @@ fn custom_pass_hotkey_triggers_in_app_toggle_and_suppresses_old_default() {
                     }],
                     ..Default::default()
                 },
-                |ctx| {
-                    app.render_frame(ctx);
+                |ui| {
+                    app.render_frame(ui);
                 },
             );
         }
@@ -5031,13 +5069,14 @@ fn options_window_shows_wayland_configure_shortcut_button_and_custom_recorder() 
     let ctx = egui::Context::default();
     let mut out = None;
     for _ in 0..2 {
-        out = Some(ctx.run(
+        out = Some(run_test_ui(
+            &ctx,
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, 800.0))),
                 ..Default::default()
             },
-            |ctx| {
-                let _ = app.render_options_window(ctx, 48.0);
+            |ui| {
+                let _ = app.render_options_window(ui.ctx(), 48.0);
             },
         ));
     }
@@ -5106,10 +5145,10 @@ fn modified_f8_pass_hotkey_toggles_click_through_without_closing_overlay() {
 
     // Sending Ctrl+F8 must NOT toggle overlay visibility; it must trigger PASS only.
     for pressed in [true, false] {
-        let _ = ctx.run(
+        let _ = run_test_ui(
+            &ctx,
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), viewport)),
-                modifiers: ctrl,
                 events: vec![egui::Event::Key {
                     key: egui::Key::F8,
                     physical_key: None,
@@ -5119,8 +5158,8 @@ fn modified_f8_pass_hotkey_toggles_click_through_without_closing_overlay() {
                 }],
                 ..Default::default()
             },
-            |ctx| {
-                app.render_frame(ctx);
+            |ui| {
+                app.render_frame(ui);
             },
         );
     }
@@ -5135,7 +5174,8 @@ fn modified_f8_pass_hotkey_toggles_click_through_without_closing_overlay() {
 
     // Sending unmodified F8 still closes the overlay cleanly.
     for pressed in [true, false] {
-        let _ = ctx.run(
+        let _ = run_test_ui(
+            &ctx,
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), viewport)),
                 events: vec![egui::Event::Key {
@@ -5147,8 +5187,8 @@ fn modified_f8_pass_hotkey_toggles_click_through_without_closing_overlay() {
                 }],
                 ..Default::default()
             },
-            |ctx| {
-                app.render_frame(ctx);
+            |ui| {
+                app.render_frame(ui);
             },
         );
     }
@@ -5173,10 +5213,10 @@ fn recording_pass_hotkey_consumes_capture_keypress_without_toggling_overlay() {
     let viewport = vec2(1280.0, 800.0);
     let send_key = |key: egui::Key, modifiers: egui::Modifiers, app: &mut TrueSightGuiApp| {
         for pressed in [true, false] {
-            let _ = ctx.run(
+            let _ = run_test_ui(
+                &ctx,
                 egui::RawInput {
                     screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), viewport)),
-                    modifiers,
                     events: vec![egui::Event::Key {
                         key,
                         physical_key: None,
@@ -5186,8 +5226,8 @@ fn recording_pass_hotkey_consumes_capture_keypress_without_toggling_overlay() {
                     }],
                     ..Default::default()
                 },
-                |ctx| {
-                    app.render_frame(ctx);
+                |ui| {
+                    app.render_frame(ui);
                 },
             );
         }
@@ -5261,10 +5301,10 @@ fn recording_pass_hotkey_suppresses_queued_global_action_on_capture_frame() {
     // Re-record current Ctrl+Shift+T while the global shortcut thread also enqueues
     // ToggleOverlayPass in the same frame: must save without toggling PASS.
     tx.send(GlobalHotkeyAction::ToggleOverlayPass).unwrap();
-    let _ = ctx.run(
+    let _ = run_test_ui(
+        &ctx,
         egui::RawInput {
             screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), viewport)),
-            modifiers: ctrl_shift,
             events: vec![egui::Event::Key {
                 key: egui::Key::T,
                 physical_key: None,
@@ -5274,14 +5314,14 @@ fn recording_pass_hotkey_suppresses_queued_global_action_on_capture_frame() {
             }],
             ..Default::default()
         },
-        |ctx| {
-            app.render_frame(ctx);
+        |ui| {
+            app.render_frame(ui);
         },
     );
-    let _ = ctx.run(
+    let _ = run_test_ui(
+        &ctx,
         egui::RawInput {
             screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), viewport)),
-            modifiers: ctrl_shift,
             events: vec![egui::Event::Key {
                 key: egui::Key::T,
                 physical_key: None,
@@ -5291,8 +5331,8 @@ fn recording_pass_hotkey_suppresses_queued_global_action_on_capture_frame() {
             }],
             ..Default::default()
         },
-        |ctx| {
-            app.render_frame(ctx);
+        |ui| {
+            app.render_frame(ui);
         },
     );
 
@@ -5305,13 +5345,14 @@ fn recording_pass_hotkey_suppresses_queued_global_action_on_capture_frame() {
 
     // Subsequent global action when not recording works normally.
     tx.send(GlobalHotkeyAction::ToggleOverlayPass).unwrap();
-    let _ = ctx.run(
+    let _ = run_test_ui(
+        &ctx,
         egui::RawInput {
             screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), viewport)),
             ..Default::default()
         },
-        |ctx| {
-            app.render_frame(ctx);
+        |ui| {
+            app.render_frame(ui);
         },
     );
     assert!(
@@ -5335,14 +5376,15 @@ fn build_bar_p1_p5_selector_switches_build_view_without_mutating_local_hero() {
 
     let run_build_bar = |app: &mut TrueSightGuiApp, events: Vec<egui::Event>| {
         let mut captured = None;
-        let _ = ctx.run(
+        let _ = run_test_ui(
+            &ctx,
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(900.0, 500.0))),
                 events,
                 ..Default::default()
             },
-            |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+            |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
                     captured = Some(app.render_item_build_card(ui));
                 });
             },
@@ -5410,14 +5452,15 @@ fn overlay_build_p1_p5_selector_switches_build_view_and_preserves_local_identity
 
     let run_overlay = |app: &mut TrueSightGuiApp, events: Vec<egui::Event>| {
         let mut captured = None;
-        let _ = ctx.run(
+        let _ = run_test_ui(
+            &ctx,
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(440.0, 210.0))),
                 events,
                 ..Default::default()
             },
-            |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+            |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
                     captured = Some(app.render_overlay_panel(ui));
                 });
             },
@@ -5465,14 +5508,15 @@ fn overlay_header_faction_swap_button_toggles_ally_faction() {
 
     let run_overlay = |app: &mut TrueSightGuiApp, events: Vec<egui::Event>| {
         let mut captured = None;
-        let _ = ctx.run(
+        let _ = run_test_ui(
+            &ctx,
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(420.0, 240.0))),
                 events,
                 ..Default::default()
             },
-            |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+            |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
                     captured = Some(app.render_overlay_panel(ui));
                 });
             },
@@ -5518,15 +5562,16 @@ fn overlay_picks_matrix_and_build_phases_center_when_space_allows() {
     let mut app = TrueSightGuiApp::new(session, None, None);
     let ctx = egui::Context::default();
     let mut picks_out = None;
-    let _ = ctx.run(
+    let _ = run_test_ui(
+        &ctx,
         egui::RawInput {
             screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(580.0, 260.0))),
             ..Default::default()
         },
-        |ctx| {
+        |ui| {
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)
-                .show(ctx, |ui| {
+                .show(ui, |ui| {
                     picks_out = Some(app.render_overlay_panel(ui));
                 });
         },
@@ -5545,15 +5590,16 @@ fn overlay_picks_matrix_and_build_phases_center_when_space_allows() {
     // 2. Build overlay: EARLY > CORE > LATE phase strip centers when wide, stays left-aligned when narrow.
     app.session.toggle_post_draft_build_view();
     let mut wide_build = None;
-    let _ = ctx.run(
+    let _ = run_test_ui(
+        &ctx,
         egui::RawInput {
             screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(620.0, 200.0))),
             ..Default::default()
         },
-        |ctx| {
+        |ui| {
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)
-                .show(ctx, |ui| {
+                .show(ui, |ui| {
                     wide_build = Some(app.render_overlay_panel(ui));
                 });
         },
@@ -5576,15 +5622,16 @@ fn overlay_picks_matrix_and_build_phases_center_when_space_allows() {
     // 3. Narrow Build overlay preserves zero-clamped leading space (`centered_leading_space == 0.0`
     //    when content exceeds width) so horizontal scrolling stays left-aligned without clipping.
     let mut narrow_build = None;
-    let _ = ctx.run(
+    let _ = run_test_ui(
+        &ctx,
         egui::RawInput {
             screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(220.0, 120.0))),
             ..Default::default()
         },
-        |ctx| {
+        |ui| {
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)
-                .show(ctx, |ui| {
+                .show(ui, |ui| {
                     narrow_build = Some(app.render_overlay_panel(ui));
                 });
         },
@@ -5613,13 +5660,14 @@ fn options_window_renders_auto_overlay_toggle_without_low_res_overlap() {
 
     let mut out = None;
     for _ in 0..2 {
-        out = Some(ctx.run(
+        out = Some(run_test_ui(
+            &ctx,
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1180.0, 700.0))),
                 ..Default::default()
             },
-            |ctx| {
-                let _ = app.render_options_window(ctx, 48.0);
+            |ui| {
+                let _ = app.render_options_window(ui.ctx(), 48.0);
             },
         ));
     }
@@ -5641,5 +5689,28 @@ fn options_window_renders_auto_overlay_toggle_without_low_res_overlap() {
         "OPTIONS {:?} must not collide with top_bar {:?} or overflow 640x440",
         opts_rect,
         r_min.top_bar
+    );
+}
+
+#[test]
+fn eframe_app_clear_color_is_transparent_and_overlay_builder_disables_native_shadow() {
+    let app = TrueSightGuiApp::new(make_5v5_gui_session(), None, None);
+    let clear = eframe::App::clear_color(&app, &egui::Visuals::dark());
+    assert_eq!(
+        clear,
+        [0.0, 0.0, 0.0, 0.0],
+        "eframe::App::clear_color must be fully transparent so Windows overlay viewports composite cleanly"
+    );
+
+    let builder = super::overlay::build_overlay_viewport_builder(
+        crate::session::OverlayGeometry::default(),
+        false,
+    );
+    assert_eq!(builder.transparent, Some(true));
+    assert_eq!(builder.decorations, Some(false));
+    assert_eq!(
+        builder.has_shadow,
+        Some(false),
+        "compact transparent overlay viewport must disable native DWM drop shadow"
     );
 }

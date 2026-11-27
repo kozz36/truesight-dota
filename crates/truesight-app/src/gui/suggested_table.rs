@@ -567,6 +567,10 @@ impl TrueSightGuiApp {
                             FontId::proportional(hdr_font),
                             P_MUTED,
                         );
+                        if compact_tbl {
+                            ui.spacing_mut().interact_size.y = 14.0;
+                            ui.spacing_mut().button_padding = vec2(2.0, 1.0);
+                        }
 
                         for (display_idx, (&(_, rec), row_r)) in
                             filtered_recs.iter().zip(row_rects.iter()).enumerate()

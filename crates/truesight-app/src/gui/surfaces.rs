@@ -18,25 +18,25 @@ const GLOW_CTX_DATA_KEY: &str = "truesight_gem_radial_glow_tex_id";
 /// surface helpers (`hud_card`, `hud_card_fill`) can composite the texture without changing call signatures.
 pub(super) fn store_gem_grain_texture_id(ctx: &egui::Context, id: TextureId) {
     ctx.data_mut(|d| {
-        d.insert_temp(egui::Id::new(GRAIN_CTX_DATA_KEY), id);
+        d.insert_temp(egui::Id::unique(GRAIN_CTX_DATA_KEY), id);
     });
 }
 
 /// Retrieves the uploaded micro-grain `TextureId` from `egui::Context` when initialized.
 pub(super) fn gem_grain_texture_id(ctx: &egui::Context) -> Option<TextureId> {
-    ctx.data(|d| d.get_temp::<TextureId>(egui::Id::new(GRAIN_CTX_DATA_KEY)))
+    ctx.data(|d| d.get_temp::<TextureId>(egui::Id::unique(GRAIN_CTX_DATA_KEY)))
 }
 
 /// Stores the uploaded continuous radial glow `TextureId` inside `egui::Context` temporary state.
 pub(super) fn store_gem_glow_texture_id(ctx: &egui::Context, id: TextureId) {
     ctx.data_mut(|d| {
-        d.insert_temp(egui::Id::new(GLOW_CTX_DATA_KEY), id);
+        d.insert_temp(egui::Id::unique(GLOW_CTX_DATA_KEY), id);
     });
 }
 
 /// Retrieves the uploaded continuous radial glow `TextureId` from `egui::Context` when initialized.
 pub(super) fn gem_glow_texture_id(ctx: &egui::Context) -> Option<TextureId> {
-    ctx.data(|d| d.get_temp::<TextureId>(egui::Id::new(GLOW_CTX_DATA_KEY)))
+    ctx.data(|d| d.get_temp::<TextureId>(egui::Id::unique(GLOW_CTX_DATA_KEY)))
 }
 
 /// Returns seamless `Repeat`-wrapped linear sampling options for the procedural micro-grain texture.

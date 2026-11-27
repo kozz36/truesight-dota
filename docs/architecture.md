@@ -103,7 +103,7 @@ $$\text{Logit}(P_{\text{win}}) = 3.2 \cdot \left( w_{\text{meta}} E_{\text{meta}
 | Parameter | Value | Description |
 |-----------|-------|-------------|
 | `edition` | `2024` | Workspace Rust edition |
-| `rust-version` (MSRV) | `1.85` | Minimum supported Rust version declared in manifests |
+| `rust-version` (MSRV) | `1.95` | Minimum supported Rust version declared in manifests |
 | `selected_toolchain` | `rustc 1.99.1 (58cf8f9c3 2026-10-13)` | Pinned via `rust-toolchain.toml` on CachyOS Linux (`x86_64-unknown-linux-gnu`) |
 | `TRUESIGHT_GSI_ADDR` | `127.0.0.1:4001` (default) | Local bind address for Dota 2 Game State Integration HTTP POST payloads |
 
