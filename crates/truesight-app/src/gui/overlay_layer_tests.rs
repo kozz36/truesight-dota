@@ -1427,7 +1427,10 @@ fn wayland_compositor_closed_keeps_auto_overlay_eligible_and_recovers_on_availab
 
     // When all outputs temporarily disappear on Wayland, wait until an output returns before showing.
     event_tx
-        .send(LayerEvent::MonitorsUpdated(Vec::new()))
+        .send(LayerEvent::MonitorsUpdated {
+            outputs: Vec::new(),
+            has_any_output: false,
+        })
         .unwrap();
     event_tx.send(LayerEvent::Closed).unwrap();
     app.step_wayland_layer_overlay(&main_ctx);
@@ -1439,13 +1442,16 @@ fn wayland_compositor_closed_keeps_auto_overlay_eligible_and_recovers_on_availab
     );
 
     event_tx
-        .send(LayerEvent::MonitorsUpdated(vec![LogicalOutputBounds {
-            id: 1,
-            x: 0,
-            y: 0,
-            width: 1920,
-            height: 1080,
-        }]))
+        .send(LayerEvent::MonitorsUpdated {
+            outputs: vec![LogicalOutputBounds {
+                id: 1,
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            }],
+            has_any_output: true,
+        })
         .unwrap();
     app.step_wayland_layer_overlay(&main_ctx);
     assert_eq!(
@@ -1483,14 +1489,16 @@ fn wayland_presenter_last_output_destroyed_emits_empty_monitors_and_waits_for_re
         height: 1440,
     };
 
-    // Uninitialized output (without logical_size yet) must not emit empty MonitorsUpdated.
-    assert!(build_monitors_updated_event(&[1], Vec::new(), None).is_none());
-
     // SCTK 0.20 invokes output_destroyed while output 1 is still in OutputState:
-    // presenter must exclude output 1 and emit an empty monitor list.
-    let empty_ev = build_monitors_updated_event(&[1], vec![out1], Some(1))
-        .expect("destroying the last output must emit empty MonitorsUpdated");
-    assert!(matches!(&empty_ev, LayerEvent::MonitorsUpdated(v) if v.is_empty()));
+    // presenter must exclude output 1 and report zero available outputs.
+    let empty_ev = build_monitors_updated_event(&[1], vec![out1], Some(1));
+    assert!(matches!(
+        &empty_ev,
+        LayerEvent::MonitorsUpdated {
+            outputs,
+            has_any_output: false
+        } if outputs.is_empty()
+    ));
 
     let mut session = AppSession::new().unwrap();
     session.overlay_mode = false;
@@ -1531,9 +1539,34 @@ fn wayland_presenter_last_output_destroyed_emits_empty_monitors_and_waits_for_re
         "GUI must wait without re-creating layer while 0 outputs remain"
     );
 
-    // New output arrives -> presenter emits non-empty snapshot -> GUI recovers overlay.
-    let new_ev = build_monitors_updated_event(&[2], vec![out2], None)
-        .expect("adding output 2 must emit non-empty MonitorsUpdated");
+    // Reconnect a wl_output WITHOUT optional xdg-output logical bounds: availability still clears
+    // wayland_outputs_unavailable so the fallback surface can reopen without logical rects.
+    let no_bounds_ev = build_monitors_updated_event(&[3], Vec::new(), None);
+    assert!(matches!(
+        &no_bounds_ev,
+        LayerEvent::MonitorsUpdated {
+            outputs,
+            has_any_output: true
+        } if outputs.is_empty()
+    ));
+    event_tx.send(no_bounds_ev).unwrap();
+    app.step_wayland_layer_overlay(&main_ctx);
+    assert!(app.wayland_logical_outputs.is_empty());
+    assert_eq!(
+        drain_show_count(),
+        1,
+        "GUI must recover when a wl_output reconnects without optional xdg-output bounds"
+    );
+
+    // Unplug again, then reconnect output 2 WITH logical bounds -> recovers too.
+    event_tx
+        .send(build_monitors_updated_event(&[3], Vec::new(), Some(3)))
+        .unwrap();
+    event_tx.send(LayerEvent::Closed).unwrap();
+    app.step_wayland_layer_overlay(&main_ctx);
+    assert_eq!(drain_show_count(), 0);
+
+    let new_ev = build_monitors_updated_event(&[2], vec![out2], None);
     event_tx.send(new_ev).unwrap();
     app.step_wayland_layer_overlay(&main_ctx);
     assert_eq!(
@@ -1543,11 +1576,13 @@ fn wayland_presenter_last_output_destroyed_emits_empty_monitors_and_waits_for_re
     );
 
     // Removing 1 of 2 outputs keeps output 2 available and immediately recovers after Closed.
-    let remaining_ev = build_monitors_updated_event(&[1, 2], vec![out1, out2], Some(1))
-        .expect("removing 1 of 2 outputs must emit remaining output 2");
+    let remaining_ev = build_monitors_updated_event(&[1, 2], vec![out1, out2], Some(1));
     assert!(matches!(
         &remaining_ev,
-        LayerEvent::MonitorsUpdated(v) if v.len() == 1 && v[0].id == 2
+        LayerEvent::MonitorsUpdated {
+            outputs,
+            has_any_output: true
+        } if outputs.len() == 1 && outputs[0].id == 2
     ));
     event_tx.send(remaining_ev).unwrap();
     event_tx.send(LayerEvent::Closed).unwrap();

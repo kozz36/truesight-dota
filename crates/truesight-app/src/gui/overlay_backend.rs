@@ -102,7 +102,10 @@ pub(super) enum LayerEvent {
         height: u32,
         persist: bool,
     },
-    MonitorsUpdated(Vec<LogicalOutputBounds>),
+    MonitorsUpdated {
+        outputs: Vec<LogicalOutputBounds>,
+        has_any_output: bool,
+    },
     PointerMoved {
         x: f32,
         y: f32,
@@ -596,8 +599,11 @@ impl super::TrueSightGuiApp {
                         self.session.overlay_geometry = geom;
                     }
                 }
-                LayerEvent::MonitorsUpdated(outputs) => {
-                    self.wayland_outputs_unavailable = outputs.is_empty();
+                LayerEvent::MonitorsUpdated {
+                    outputs,
+                    has_any_output,
+                } => {
+                    self.wayland_outputs_unavailable = !has_any_output;
                     self.wayland_logical_outputs = outputs;
                 }
                 LayerEvent::PointerMoved { x, y } => {
