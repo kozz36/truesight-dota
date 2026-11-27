@@ -224,26 +224,44 @@ impl OverlayRasterizer {
             let tex = self.textures.get(&mesh.texture_id);
             let mut idx_pos = 0;
             while idx_pos + 2 < mesh.indices.len() {
-                // Fast-path consecutive triangle pairs forming an axis-aligned uniform quad.
-                if idx_pos + 5 < mesh.indices.len()
-                    && let Some(tex_color) = tex.and_then(RasterTexture::uniform_single_pixel)
-                    && let Some((rect_min_x, rect_min_y, rect_max_x, rect_max_y, fill)) =
-                        try_extract_uniform_quad(
-                            &mesh.vertices,
-                            &mesh.indices[idx_pos..idx_pos + 6],
-                            scale,
-                            tex_color,
-                        )
-                {
-                    let x0 = rect_min_x.max(clip_min_x);
-                    let y0 = rect_min_y.max(clip_min_y);
-                    let x1 = rect_max_x.min(clip_max_x);
-                    let y1 = rect_max_y.min(clip_max_y);
-                    if x0 < x1 && y0 < y1 {
-                        fill_rect_premultiplied(&mut self.buffer, width_px, x0, y0, x1, y1, fill);
+                // Fast-path consecutive triangle pairs forming an axis-aligned quad:
+                // either constant-UV solid fill (including font-atlas solids) or separable textured fill.
+                if idx_pos + 5 < mesh.indices.len() {
+                    let quad = &mesh.indices[idx_pos..idx_pos + 6];
+                    if let Some((rect_min_x, rect_min_y, rect_max_x, rect_max_y, fill)) =
+                        try_extract_uniform_quad(&mesh.vertices, quad, scale, tex)
+                    {
+                        let x0 = rect_min_x.max(clip_min_x);
+                        let y0 = rect_min_y.max(clip_min_y);
+                        let x1 = rect_max_x.min(clip_max_x);
+                        let y1 = rect_max_y.min(clip_max_y);
+                        if x0 < x1 && y0 < y1 {
+                            fill_rect_premultiplied(
+                                &mut self.buffer,
+                                width_px,
+                                x0,
+                                y0,
+                                x1,
+                                y1,
+                                fill,
+                            );
+                        }
+                        idx_pos += 6;
+                        continue;
                     }
-                    idx_pos += 6;
-                    continue;
+                    if let Some(t) = tex
+                        && let Some(tquad) = try_extract_textured_quad(&mesh.vertices, quad, scale)
+                    {
+                        fill_textured_quad_premultiplied(
+                            &mut self.buffer,
+                            width_px,
+                            (clip_min_x, clip_min_y, clip_max_x, clip_max_y),
+                            tquad,
+                            t,
+                        );
+                        idx_pos += 6;
+                        continue;
+                    }
                 }
 
                 let i0 = mesh.indices[idx_pos] as usize;
@@ -280,8 +298,99 @@ fn try_extract_uniform_quad(
     vertices: &[egui::epaint::Vertex],
     quad_indices: &[u32],
     scale: f32,
-    tex_color: Color32,
+    tex: Option<&RasterTexture>,
 ) -> Option<(i32, i32, i32, i32, [u8; 4])> {
+    let mut uniq = [usize::MAX; 4];
+    let mut uniq_len = 0_usize;
+    for &raw_idx in quad_indices {
+        let idx = raw_idx as usize;
+        if !uniq[..uniq_len].contains(&idx) {
+            if uniq_len == 4 {
+                return None;
+            }
+            uniq[uniq_len] = idx;
+            uniq_len += 1;
+        }
+    }
+    if uniq_len != 4 {
+        return None;
+    }
+
+    let first_v = vertices.get(uniq[0])?;
+    let first_col = first_v.color;
+    let first_uv = first_v.uv;
+    let uniform_uv_needed = tex.and_then(RasterTexture::uniform_single_pixel).is_none();
+    let mut min_x = f32::INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+    for &idx in &uniq {
+        let v = vertices.get(idx)?;
+        if v.color != first_col {
+            return None;
+        }
+        if uniform_uv_needed
+            && ((v.uv.x - first_uv.x).abs() > 1e-5 || (v.uv.y - first_uv.y).abs() > 1e-5)
+        {
+            return None;
+        }
+        let px = v.pos.x * scale;
+        let py = v.pos.y * scale;
+        min_x = min_x.min(px);
+        min_y = min_y.min(py);
+        max_x = max_x.max(px);
+        max_y = max_y.max(py);
+    }
+    for &idx in &uniq {
+        let v = vertices.get(idx)?;
+        let px = v.pos.x * scale;
+        let py = v.pos.y * scale;
+        let on_x = (px - min_x).abs() < 0.01 || (px - max_x).abs() < 0.01;
+        let on_y = (py - min_y).abs() < 0.01 || (py - max_y).abs() < 0.01;
+        if !on_x || !on_y {
+            return None;
+        }
+    }
+
+    let x0 = min_x.round() as i32;
+    let y0 = min_y.round() as i32;
+    let x1 = max_x.round() as i32;
+    let y1 = max_y.round() as i32;
+    if (min_x - x0 as f32).abs() > 0.05
+        || (min_y - y0 as f32).abs() > 0.05
+        || (max_x - x1 as f32).abs() > 0.05
+        || (max_y - y1 as f32).abs() > 0.05
+    {
+        return None;
+    }
+
+    let tex_color = match tex {
+        Some(t) => t
+            .uniform_single_pixel()
+            .unwrap_or_else(|| t.sample(first_uv.x, first_uv.y)),
+        None => Color32::WHITE,
+    };
+    let modulated = modulate_premultiplied(tex_color, first_col);
+    Some((x0, y0, x1, y1, modulated))
+}
+
+struct TexturedQuad {
+    min_x: f32,
+    min_y: f32,
+    max_x: f32,
+    max_y: f32,
+    u_left: f32,
+    u_right: f32,
+    v_top: f32,
+    v_bot: f32,
+    vert_col: Color32,
+}
+
+fn try_extract_textured_quad(
+    vertices: &[egui::epaint::Vertex],
+    quad_indices: &[u32],
+    scale: f32,
+) -> Option<TexturedQuad> {
     let mut uniq = [usize::MAX; 4];
     let mut uniq_len = 0_usize;
     for &raw_idx in quad_indices {
@@ -315,31 +424,166 @@ fn try_extract_uniform_quad(
         max_x = max_x.max(px);
         max_y = max_y.max(py);
     }
+    if (max_x - min_x) <= 0.0 || (max_y - min_y) <= 0.0 {
+        return None;
+    }
+
+    let mut lt = None;
+    let mut rt = None;
+    let mut rb = None;
+    let mut lb = None;
     for &idx in &uniq {
         let v = vertices.get(idx)?;
         let px = v.pos.x * scale;
         let py = v.pos.y * scale;
-        let on_x = (px - min_x).abs() < 0.01 || (px - max_x).abs() < 0.01;
-        let on_y = (py - min_y).abs() < 0.01 || (py - max_y).abs() < 0.01;
-        if !on_x || !on_y {
-            return None;
+        let is_l = (px - min_x).abs() < 0.01;
+        let is_r = (px - max_x).abs() < 0.01;
+        let is_t = (py - min_y).abs() < 0.01;
+        let is_b = (py - max_y).abs() < 0.01;
+        match (is_l, is_r, is_t, is_b) {
+            (true, false, true, false) => lt = Some(v.uv),
+            (false, true, true, false) => rt = Some(v.uv),
+            (false, true, false, true) => rb = Some(v.uv),
+            (true, false, false, true) => lb = Some(v.uv),
+            _ => return None,
         }
     }
-
-    let x0 = min_x.round() as i32;
-    let y0 = min_y.round() as i32;
-    let x1 = max_x.round() as i32;
-    let y1 = max_y.round() as i32;
-    if (min_x - x0 as f32).abs() > 0.05
-        || (min_y - y0 as f32).abs() > 0.05
-        || (max_x - x1 as f32).abs() > 0.05
-        || (max_y - y1 as f32).abs() > 0.05
+    let (lt, rt, rb, lb) = (lt?, rt?, rb?, lb?);
+    if (lt.x - lb.x).abs() > 1e-4
+        || (rt.x - rb.x).abs() > 1e-4
+        || (lt.y - rt.y).abs() > 1e-4
+        || (lb.y - rb.y).abs() > 1e-4
     {
         return None;
     }
 
-    let modulated = modulate_premultiplied(tex_color, first_col);
-    Some((x0, y0, x1, y1, modulated))
+    Some(TexturedQuad {
+        min_x,
+        min_y,
+        max_x,
+        max_y,
+        u_left: lt.x,
+        u_right: rt.x,
+        v_top: lt.y,
+        v_bot: lb.y,
+        vert_col: first_col,
+    })
+}
+
+fn fill_textured_quad_premultiplied(
+    buffer: &mut [u8],
+    stride_px: u32,
+    clip: (i32, i32, i32, i32),
+    quad: TexturedQuad,
+    tex: &RasterTexture,
+) {
+    if tex.width == 0 || tex.height == 0 || tex.pixels.is_empty() || quad.vert_col[3] == 0 {
+        return;
+    }
+    let (clip_min_x, clip_min_y, clip_max_x, clip_max_y) = clip;
+    let x0 = ((quad.min_x - 0.5).ceil() as i32).max(clip_min_x);
+    let y0 = ((quad.min_y - 0.5).ceil() as i32).max(clip_min_y);
+    let x1 = ((quad.max_x - 0.5).ceil() as i32).min(clip_max_x);
+    let y1 = ((quad.max_y - 0.5).ceil() as i32).min(clip_max_y);
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+
+    let inv_w = 1.0 / (quad.max_x - quad.min_x);
+    let inv_h = 1.0 / (quad.max_y - quad.min_y);
+    let du = quad.u_right - quad.u_left;
+    let dv = quad.v_bot - quad.v_top;
+    let tw = tex.width;
+    let th = tex.height;
+    let nearest = !tex.linear || (tw == 1 && th == 1);
+
+    for y in y0..y1 {
+        let ty = ((y as f32 + 0.5 - quad.min_y) * inv_h).clamp(0.0, 1.0);
+        let raw_v = quad.v_top + dv * ty;
+        let v = if tex.repeat {
+            raw_v.rem_euclid(1.0)
+        } else {
+            raw_v.clamp(0.0, 1.0)
+        };
+        let row_offset = y as usize * stride_px as usize;
+
+        if nearest {
+            let py_idx = ((v * th as f32).floor() as usize).min(th - 1);
+            let row = &tex.pixels[py_idx * tw..(py_idx + 1) * tw];
+            for x in x0..x1 {
+                let tx = ((x as f32 + 0.5 - quad.min_x) * inv_w).clamp(0.0, 1.0);
+                let raw_u = quad.u_left + du * tx;
+                let u = if tex.repeat {
+                    raw_u.rem_euclid(1.0)
+                } else {
+                    raw_u.clamp(0.0, 1.0)
+                };
+                let px_idx = ((u * tw as f32).floor() as usize).min(tw - 1);
+                let src_rgba = modulate_premultiplied(row[px_idx], quad.vert_col);
+                let off = (row_offset + x as usize) * 4;
+                blend_argb8888_pixel(&mut buffer[off..off + 4], src_rgba);
+            }
+        } else {
+            let fy = if tex.repeat {
+                (v * th as f32 - 0.5).rem_euclid(th as f32)
+            } else {
+                (v * th as f32 - 0.5).clamp(0.0, (th - 1) as f32)
+            };
+            let sy0 = (fy.floor() as usize).min(th - 1);
+            let sy1 = if tex.repeat {
+                (sy0 + 1) % th
+            } else {
+                (sy0 + 1).min(th - 1)
+            };
+            let wy_fp = ((fy - sy0 as f32) * 256.0).round().clamp(0.0, 256.0) as u32;
+            let inv_wy = 256 - wy_fp;
+            let row0 = &tex.pixels[sy0 * tw..(sy0 + 1) * tw];
+            let row1 = &tex.pixels[sy1 * tw..(sy1 + 1) * tw];
+
+            for x in x0..x1 {
+                let tx = ((x as f32 + 0.5 - quad.min_x) * inv_w).clamp(0.0, 1.0);
+                let raw_u = quad.u_left + du * tx;
+                let u = if tex.repeat {
+                    raw_u.rem_euclid(1.0)
+                } else {
+                    raw_u.clamp(0.0, 1.0)
+                };
+                let fx = if tex.repeat {
+                    (u * tw as f32 - 0.5).rem_euclid(tw as f32)
+                } else {
+                    (u * tw as f32 - 0.5).clamp(0.0, (tw - 1) as f32)
+                };
+                let sx0 = (fx.floor() as usize).min(tw - 1);
+                let sx1 = if tex.repeat {
+                    (sx0 + 1) % tw
+                } else {
+                    (sx0 + 1).min(tw - 1)
+                };
+                let wx_fp = ((fx - sx0 as f32) * 256.0).round().clamp(0.0, 256.0) as u32;
+                let inv_wx = 256 - wx_fp;
+                let p00 = row0[sx0];
+                let p10 = row0[sx1];
+                let p01 = row1[sx0];
+                let p11 = row1[sx1];
+                let bilerp_ch = |ch: usize| -> u8 {
+                    let top = p00[ch] as u32 * inv_wx + p10[ch] as u32 * wx_fp;
+                    let bot = p01[ch] as u32 * inv_wx + p11[ch] as u32 * wx_fp;
+                    (((top * inv_wy + bot * wy_fp) + 32768) >> 16).min(255) as u8
+                };
+                let tex_col = Color32::from_rgba_premultiplied(
+                    bilerp_ch(0),
+                    bilerp_ch(1),
+                    bilerp_ch(2),
+                    bilerp_ch(3),
+                );
+                let src_rgba = modulate_premultiplied(tex_col, quad.vert_col);
+                if src_rgba[3] != 0 {
+                    let off = (row_offset + x as usize) * 4;
+                    blend_argb8888_pixel(&mut buffer[off..off + 4], src_rgba);
+                }
+            }
+        }
+    }
 }
 
 #[inline]
@@ -463,6 +707,26 @@ fn rasterize_triangle(
     }
 
     let uniform_vert = v0.color == v1.color && v1.color == v2.color;
+    let uniform_uv = (v0.uv.x - v1.uv.x).abs() < 1e-5
+        && (v1.uv.x - v2.uv.x).abs() < 1e-5
+        && (v0.uv.y - v1.uv.y).abs() < 1e-5
+        && (v1.uv.y - v2.uv.y).abs() < 1e-5;
+    let const_tex_col = if uniform_uv {
+        Some(tex.map_or(Color32::WHITE, |t| t.sample(v0.uv.x, v0.uv.y)))
+    } else {
+        None
+    };
+    let const_src_rgba = match (uniform_vert, const_tex_col) {
+        (true, Some(tc)) => {
+            let rgba = modulate_premultiplied(tc, v0.color);
+            if rgba[3] == 0 {
+                return;
+            }
+            Some(rgba)
+        }
+        _ => None,
+    };
+
     for y in min_y..max_y {
         let py = y as f32 + 0.5;
         let row_offset = y as usize * stride_px as usize;
@@ -477,38 +741,48 @@ fn rasterize_triangle(
             {
                 continue;
             }
-            let w0 = (e0 * inv_area).clamp(0.0, 1.0);
-            let w1 = (e1 * inv_area).clamp(0.0, 1.0);
-            let w2 = (e2 * inv_area).clamp(0.0, 1.0);
-
-            let vert_col = if uniform_vert {
-                v0.color
+            let src_rgba = if let Some(rgba) = const_src_rgba {
+                rgba
             } else {
-                let interp = |c0: u8, c1: u8, c2: u8| -> u8 {
-                    (c0 as f32 * w0 + c1 as f32 * w1 + c2 as f32 * w2)
-                        .round()
-                        .clamp(0.0, 255.0) as u8
+                let w0 = (e0 * inv_area).clamp(0.0, 1.0);
+                let w1 = (e1 * inv_area).clamp(0.0, 1.0);
+                let w2 = (e2 * inv_area).clamp(0.0, 1.0);
+
+                let vert_col = if uniform_vert {
+                    v0.color
+                } else {
+                    let interp = |c0: u8, c1: u8, c2: u8| -> u8 {
+                        (c0 as f32 * w0 + c1 as f32 * w1 + c2 as f32 * w2)
+                            .round()
+                            .clamp(0.0, 255.0) as u8
+                    };
+                    Color32::from_rgba_premultiplied(
+                        interp(v0.color[0], v1.color[0], v2.color[0]),
+                        interp(v0.color[1], v1.color[1], v2.color[1]),
+                        interp(v0.color[2], v1.color[2], v2.color[2]),
+                        interp(v0.color[3], v1.color[3], v2.color[3]),
+                    )
                 };
-                Color32::from_rgba_premultiplied(
-                    interp(v0.color[0], v1.color[0], v2.color[0]),
-                    interp(v0.color[1], v1.color[1], v2.color[1]),
-                    interp(v0.color[2], v1.color[2], v2.color[2]),
-                    interp(v0.color[3], v1.color[3], v2.color[3]),
-                )
-            };
 
-            let tex_col = match tex {
-                Some(t) => {
-                    let u = v0.uv.x * w0 + v1.uv.x * w1 + v2.uv.x * w2;
-                    let v = v0.uv.y * w0 + v1.uv.y * w1 + v2.uv.y * w2;
-                    t.sample(u, v)
-                }
-                None => Color32::WHITE,
-            };
+                let tex_col = if let Some(tc) = const_tex_col {
+                    tc
+                } else {
+                    match tex {
+                        Some(t) => {
+                            let u = v0.uv.x * w0 + v1.uv.x * w1 + v2.uv.x * w2;
+                            let v = v0.uv.y * w0 + v1.uv.y * w1 + v2.uv.y * w2;
+                            t.sample(u, v)
+                        }
+                        None => Color32::WHITE,
+                    }
+                };
 
-            let src_rgba = modulate_premultiplied(tex_col, vert_col);
-            let off = (row_offset + x as usize) * 4;
-            blend_argb8888_pixel(&mut buffer[off..off + 4], src_rgba);
+                modulate_premultiplied(tex_col, vert_col)
+            };
+            if src_rgba[3] != 0 {
+                let off = (row_offset + x as usize) * 4;
+                blend_argb8888_pixel(&mut buffer[off..off + 4], src_rgba);
+            }
         }
     }
 }
