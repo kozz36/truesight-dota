@@ -524,3 +524,148 @@ pub(super) fn paint_modal_gemstone_accents(painter: &egui::Painter, rect: Rect) 
     }
     paint_hud_corner_ticks(painter, rect, P_GEM);
 }
+
+pub(super) fn overlay_build_phase_short(phase: truesight_core::domain::ItemPhase) -> &'static str {
+    use truesight_core::domain::ItemPhase;
+    match phase {
+        ItemPhase::Starting => "START",
+        ItemPhase::Early => "EARLY",
+        ItemPhase::Core => "CORE",
+        ItemPhase::Late => "LATE",
+        ItemPhase::Situational => "OPT",
+    }
+}
+
+pub(super) fn format_build_clock(secs: i32) -> String {
+    let abs = secs.unsigned_abs();
+    let mins = abs / 60;
+    let rem = abs % 60;
+    if secs < 0 {
+        format!("-{mins:02}:{rem:02}")
+    } else {
+        format!("{mins:02}:{rem:02}")
+    }
+}
+
+pub(super) fn paint_overlay_corner_pill(
+    painter: &egui::Painter,
+    anchor: egui::Pos2,
+    align: egui::Align2,
+    text: &str,
+    text_color: Color32,
+    bg_color: Color32,
+    font_size: f32,
+) {
+    let galley = painter.layout_no_wrap(
+        text.to_string(),
+        egui::FontId::proportional(font_size),
+        text_color,
+    );
+    let pad = egui::vec2(2.5, 0.5);
+    let box_sz = galley.size() + pad * 2.0;
+    let rect = align.anchor_size(anchor, box_sz);
+    painter.rect_filled(rect, 1.5, bg_color);
+    painter.galley(rect.min + pad, galley, text_color);
+}
+
+pub(super) fn select_overlay_late_grid_2x2(avail_w: f32, main_h: f32, late_count: usize) -> bool {
+    late_count >= 3 && main_h >= 120.0 && (avail_w < 500.0 || (main_h / avail_w.max(1.0)) >= 0.36)
+}
+
+pub(super) fn max_overlay_variant_rows(row_avail_h: f32, tile_h: f32, variant_h: f32) -> usize {
+    let extra = (row_avail_h - tile_h - 6.0).max(0.0);
+    ((extra / (variant_h + 2.0)).floor() as usize).clamp(1, 3)
+}
+
+fn estimate_step_tile_width(
+    step: &truesight_core::domain::BuildStep,
+    tile_w: f32,
+    variant_w: f32,
+    var_rows: usize,
+) -> f32 {
+    let var_cols = if var_rows > 0 && !step.variants.is_empty() {
+        step.variants.len().min(2)
+    } else {
+        0
+    };
+    let vars_w = if var_cols > 0 {
+        (var_cols as f32) * variant_w + ((var_cols - 1) as f32) * 2.0
+    } else {
+        0.0
+    };
+    tile_w.max(vars_w)
+}
+
+fn estimate_phase_box_width(
+    label_w: f32,
+    steps: &[(usize, &truesight_core::domain::BuildStep)],
+    tile_w: f32,
+    variant_w: f32,
+    var_rows: usize,
+    grid_2x2: bool,
+) -> f32 {
+    let content_w = if steps.is_empty() {
+        tile_w
+    } else if grid_2x2 && steps.len() >= 3 {
+        steps
+            .chunks(2)
+            .map(|row| {
+                let sum: f32 = row
+                    .iter()
+                    .map(|(_, s)| estimate_step_tile_width(s, tile_w, variant_w, var_rows))
+                    .sum();
+                sum + ((row.len().saturating_sub(1)) as f32) * 3.0
+            })
+            .fold(0.0_f32, f32::max)
+    } else {
+        let sum: f32 = steps
+            .iter()
+            .map(|(_, s)| estimate_step_tile_width(s, tile_w, variant_w, var_rows))
+            .sum();
+        sum + ((steps.len().saturating_sub(1)) as f32) * 3.0
+    };
+    content_w.max(label_w) + 8.0
+}
+
+/// Estimates exact pixel width of the three framed phase boxes (`EARLY > CORE > LATE`) for centering.
+#[expect(clippy::too_many_arguments)]
+pub(super) fn estimate_overlay_build_row_width(
+    early_label_w: f32,
+    early_steps: &[(usize, &truesight_core::domain::BuildStep)],
+    core_label_w: f32,
+    core_steps: &[(usize, &truesight_core::domain::BuildStep)],
+    late_label_w: f32,
+    late_steps: &[(usize, &truesight_core::domain::BuildStep)],
+    late_is_2x2: bool,
+    tile_w: f32,
+    variant_w: f32,
+    single_var_rows: usize,
+    late_var_rows: usize,
+) -> f32 {
+    let w0 = estimate_phase_box_width(
+        early_label_w,
+        early_steps,
+        tile_w,
+        variant_w,
+        single_var_rows,
+        false,
+    );
+    let w1 = estimate_phase_box_width(
+        core_label_w,
+        core_steps,
+        tile_w,
+        variant_w,
+        single_var_rows,
+        false,
+    );
+    let w2 = estimate_phase_box_width(
+        late_label_w,
+        late_steps,
+        tile_w,
+        variant_w,
+        late_var_rows,
+        late_is_2x2,
+    );
+    // 3 phase boxes + 2 chevrons (8.0px each) + 4 spacing gaps (3.0px each)
+    w0 + w1 + w2 + 16.0 + 12.0
+}

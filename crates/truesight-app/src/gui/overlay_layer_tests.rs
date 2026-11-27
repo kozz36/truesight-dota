@@ -1163,6 +1163,217 @@ fn wayland_overlay_glass_surface_renders_lower_default_alpha_and_responds_to_opa
 
 #[cfg(target_os = "linux")]
 #[test]
+fn resize_pacer_coalesces_in_flight_motion_and_advances_on_commit() {
+    use super::wayland_layer::ResizePacer;
+
+    let mut pacer = ResizePacer::new();
+
+    // No-op when size has not changed.
+    assert_eq!(pacer.on_motion((380, 230), (380, 230)), None);
+
+    // First resize step fires immediately and marks a frame in flight.
+    assert_eq!(pacer.on_motion((380, 230), (390, 235)), Some((390, 235)));
+
+    // Subsequent high-rate pointer motions while frame (390, 235) is rendering must coalesce
+    // instead of bumping active.width/height prematurely (which would reject the in-flight frame).
+    assert_eq!(pacer.on_motion((390, 235), (400, 240)), None);
+    assert_eq!(pacer.on_motion((390, 235), (412, 248)), None);
+
+    // Committing the in-flight frame advances immediately to the coalesced target (412, 248).
+    assert_eq!(pacer.on_frame_committed((390, 235)), Some((412, 248)));
+
+    // Committing (412, 248) with nothing newer queued clears the in-flight gate.
+    assert_eq!(pacer.on_frame_committed((412, 248)), None);
+    assert_eq!(pacer.on_motion((412, 248), (416, 250)), Some((416, 250)));
+
+    // Finishing the gesture while a newer target (420, 255) is queued flushes it once and resets.
+    assert_eq!(pacer.on_motion((416, 250), (420, 255)), None);
+    assert_eq!(pacer.on_finish((416, 250)), Some((420, 255)));
+    assert_eq!(pacer.on_motion((420, 255), (424, 258)), Some((424, 258)));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn resize_pacer_advances_after_compositor_adjusted_configure() {
+    use super::wayland_layer::ResizePacer;
+
+    let mut pacer = ResizePacer::new();
+    // Initial configure before any motion must remain idle.
+    pacer.on_configured((380, 230));
+    assert_eq!(pacer.on_motion((380, 230), (450, 260)), Some((450, 260)));
+
+    // Queue a newer pointer motion while (450, 260) is in flight, then simulate compositor
+    // clamping configure to (440, 260).
+    assert_eq!(pacer.on_motion((450, 260), (460, 270)), None);
+    pacer.on_configured((440, 260));
+
+    // Committing the compositor-accepted (440, 260) frame must advance to the queued (460, 270).
+    assert_eq!(pacer.on_frame_committed((440, 260)), Some((460, 270)));
+}
+
+#[test]
+fn rasterizer_fast_paths_match_uniform_uv_flipped_glow_and_repeat_grain() {
+    let mut raster = OverlayRasterizer::new();
+
+    // 1. Multi-pixel atlas texture (4x4) with constant UV on pixel (2, 1) -> green
+    let atlas_id = TextureId::Managed(10);
+    let mut atlas_pixels = vec![Color32::BLACK; 16];
+    atlas_pixels[4 + 2] = Color32::from_rgba_premultiplied(20, 200, 60, 255);
+
+    // 2. Linear ClampToEdge glow texture (4x4) peaking at UV (0, 0) -> (1, 1) transparent
+    let glow_id = TextureId::Managed(11);
+    let mut glow_pixels = Vec::with_capacity(16);
+    for y in 0..4_usize {
+        for x in 0..4_usize {
+            let a = (255usize.saturating_sub((x + y) * 42)) as u8;
+            glow_pixels.push(Color32::from_rgba_premultiplied(a, a, a, a));
+        }
+    }
+
+    // 3. Linear Repeat grain texture (4x4) with distinct columns to verify wrap tiling
+    let grain_id = TextureId::Managed(12);
+    let mut grain_pixels = Vec::with_capacity(16);
+    for _y in 0..4_usize {
+        for x in 0..4_usize {
+            let v = match x {
+                0 => 40,
+                1 => 120,
+                2 => 200,
+                _ => 160,
+            };
+            grain_pixels.push(Color32::from_rgba_premultiplied(v, v, v, 255));
+        }
+    }
+
+    let mut delta = TexturesDelta::default();
+    delta.set.push((
+        atlas_id,
+        egui::epaint::ImageDelta::full(
+            ColorImage {
+                size: [4, 4],
+                source_size: vec2(4.0, 4.0),
+                pixels: atlas_pixels,
+            },
+            TextureOptions::NEAREST,
+        ),
+    ));
+    delta.set.push((
+        glow_id,
+        egui::epaint::ImageDelta::full(
+            ColorImage {
+                size: [4, 4],
+                source_size: vec2(4.0, 4.0),
+                pixels: glow_pixels,
+            },
+            TextureOptions {
+                magnification: TextureFilter::Linear,
+                minification: TextureFilter::Linear,
+                wrap_mode: egui::TextureWrapMode::ClampToEdge,
+                mipmap_mode: None,
+            },
+        ),
+    ));
+    delta.set.push((
+        grain_id,
+        egui::epaint::ImageDelta::full(
+            ColorImage {
+                size: [4, 4],
+                source_size: vec2(4.0, 4.0),
+                pixels: grain_pixels,
+            },
+            TextureOptions {
+                magnification: TextureFilter::Linear,
+                minification: TextureFilter::Linear,
+                wrap_mode: egui::TextureWrapMode::Repeat,
+                mipmap_mode: None,
+            },
+        ),
+    ));
+    raster.apply_textures_delta(&delta);
+
+    let mut atlas_mesh = Mesh::with_texture(atlas_id);
+    push_quad(
+        &mut atlas_mesh,
+        Rect::from_min_max(pos2(0.0, 0.0), pos2(4.0, 4.0)),
+        Rect::from_min_max(pos2(0.625, 0.375), pos2(0.625, 0.375)),
+        Color32::WHITE,
+    );
+
+    let mut flipped_glow = Mesh::with_texture(glow_id);
+    flipped_glow.vertices.extend_from_slice(&[
+        Vertex {
+            pos: pos2(0.0, 4.0),
+            uv: pos2(1.0, 1.0),
+            color: Color32::from_rgba_unmultiplied(255, 255, 255, 180),
+        },
+        Vertex {
+            pos: pos2(8.0, 4.0),
+            uv: pos2(0.0, 1.0),
+            color: Color32::from_rgba_unmultiplied(255, 255, 255, 180),
+        },
+        Vertex {
+            pos: pos2(8.0, 12.0),
+            uv: pos2(0.0, 0.0),
+            color: Color32::from_rgba_unmultiplied(255, 255, 255, 180),
+        },
+        Vertex {
+            pos: pos2(0.0, 12.0),
+            uv: pos2(1.0, 0.0),
+            color: Color32::from_rgba_unmultiplied(255, 255, 255, 180),
+        },
+    ]);
+    flipped_glow.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
+
+    let mut tiled_grain = Mesh::with_texture(grain_id);
+    push_quad(
+        &mut tiled_grain,
+        Rect::from_min_max(pos2(8.0, 0.0), pos2(16.0, 8.0)),
+        Rect::from_min_max(pos2(0.0, 0.0), pos2(2.0, 2.0)),
+        Color32::WHITE,
+    );
+
+    let prims = vec![
+        egui::ClippedPrimitive {
+            clip_rect: Rect::from_min_max(pos2(0.0, 0.0), pos2(16.0, 12.0)),
+            primitive: egui::epaint::Primitive::Mesh(atlas_mesh),
+        },
+        egui::ClippedPrimitive {
+            clip_rect: Rect::from_min_max(pos2(0.0, 0.0), pos2(16.0, 12.0)),
+            primitive: egui::epaint::Primitive::Mesh(flipped_glow),
+        },
+        egui::ClippedPrimitive {
+            clip_rect: Rect::from_min_max(pos2(0.0, 0.0), pos2(16.0, 12.0)),
+            primitive: egui::epaint::Primitive::Mesh(tiled_grain),
+        },
+    ];
+    let bytes = raster.rasterize_if_dirty(16, 12, 1.0, &prims).unwrap();
+
+    // Uniform-UV atlas quad pixel (1, 1) -> exact [B=60, G=200, R=20, A=255]
+    let atlas_off = (16 + 1) * 4;
+    assert_eq!(&bytes[atlas_off..atlas_off + 4], &[60, 200, 20, 255]);
+
+    // Flipped glow: bottom-right pixel (7, 11) has UV closest to (0, 0) and must be brighter
+    // than top-left pixel (0, 4) whose UV is closest to (1, 1).
+    let glow_tl = (4 * 16) * 4;
+    let glow_br = (11 * 16 + 7) * 4;
+    assert!(
+        bytes[glow_br + 3] > bytes[glow_tl + 3] + 80,
+        "flipped bottom-right glow alpha {} must dominate top-left {}",
+        bytes[glow_br + 3],
+        bytes[glow_tl + 3]
+    );
+
+    // Tiled Repeat grain in [8..16, 0..8] repeats with period 4px: col (8+k) matches col (12+k).
+    for k in 0..4_usize {
+        let first_tile = (8 + k) * 4;
+        let second_tile = (12 + k) * 4;
+        assert_eq!(bytes[first_tile], bytes[second_tile]);
+        assert_ne!(bytes[(8) * 4], bytes[(10) * 4]);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn wayland_compositor_closed_keeps_auto_overlay_eligible_and_recovers_on_available_output() {
     use super::overlay_backend::{LayerCommand, LayerEvent};
     use super::wayland_layer::WaylandLayerHandle;

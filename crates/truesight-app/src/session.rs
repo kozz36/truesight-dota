@@ -104,6 +104,7 @@ pub struct AppSession {
     pub known_monitors: Vec<MonitorRect>,
     pub active_capture_strip_rect: Option<(f32, f32, f32, f32)>,
     pub ui_language: UiLanguage,
+    pub pass_hotkey: PassHotkey,
 }
 
 impl Drop for AppSession {
@@ -125,6 +126,12 @@ fn hero_role_affinity(matrix: &MatchupMatrix, hero_id: HeroId, role: Role) -> f3
     } else {
         5.0
     }
+}
+
+fn normalized_inventory_signature(items: &[ItemId]) -> Vec<u16> {
+    let mut ids: Vec<u16> = items.iter().map(|id| id.0).collect();
+    ids.sort_unstable();
+    ids
 }
 
 struct RoleAssignmentSearch<'a> {
@@ -265,6 +272,7 @@ impl AppSession {
             known_monitors: Vec::new(),
             active_capture_strip_rect: None,
             ui_language: ui_cfg.ui_language,
+            pass_hotkey: ui_cfg.pass_hotkey,
         })
     }
 
@@ -288,6 +296,7 @@ impl AppSession {
             self.build_overlay_geometry = ui_cfg.build_overlay_geometry;
             self.overlay_opacity = Self::sanitize_overlay_opacity(ui_cfg.overlay_opacity);
             self.ui_language = ui_cfg.ui_language;
+            self.pass_hotkey = ui_cfg.pass_hotkey;
             if is_stratz_exp_expired(resolved_exp, now) {
                 self.cache_mgr.stratz_api_token = None;
                 self.cache_mgr.stratz_token_exp = None;
@@ -1021,10 +1030,16 @@ impl AppSession {
                 if let Some(owner_id) = explicit_owner.or(self.local_player_hero) {
                     self.owned_items_owner = Some(owner_id);
                 }
-                self.owned_items = item_slugs
+                let new_items: Vec<ItemId> = item_slugs
                     .iter()
                     .filter_map(|slug| self.item_repo.item_by_slug(slug).map(|e| e.id))
                     .collect();
+                let inventory_changed = normalized_inventory_signature(&new_items)
+                    != normalized_inventory_signature(&self.owned_items);
+                self.owned_items = new_items;
+                if inventory_changed {
+                    self.build_view_hero = None;
+                }
             }
             DraftEvent::DraftReset => {
                 self.reset_draft();
@@ -1311,6 +1326,7 @@ impl AppSession {
                 build_overlay_geometry: self.build_overlay_geometry,
                 overlay_opacity: self.overlay_opacity,
                 ui_language: self.ui_language,
+                pass_hotkey: self.pass_hotkey,
             };
             if let Err(err) = save_ui_config_to_dir(dir, &cfg) {
                 self.last_sync_notice = Some(format!(
@@ -2158,6 +2174,12 @@ impl AppSession {
         let _ = self.persist_ui_config();
     }
 
+    /// Updates and persists the pass-through toggle hotkey (`ui_config.toml`).
+    pub fn set_pass_hotkey(&mut self, hotkey: PassHotkey) {
+        self.pass_hotkey = hotkey;
+        let _ = self.persist_ui_config();
+    }
+
     /// Returns whole days remaining before the persisted STRATZ token expires at `now_unix_secs`,
     /// or `None` when no token is set or the token is already expired.
     pub fn stratz_token_days_remaining_at(&self, now_unix_secs: u64) -> Option<u32> {
@@ -2384,7 +2406,312 @@ impl UiLanguage {
     }
 }
 
-/// Persisted UI onboarding, overlay, language, and STRATZ token state stored in `ui_config.toml`.
+/// Supported base keys for the configurable overlay click-through hotkey.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PassHotkeyKey {
+    A,
+    B,
+    C,
+    D,
+    E,
+    F,
+    G,
+    H,
+    I,
+    J,
+    K,
+    L,
+    M,
+    N,
+    O,
+    P,
+    Q,
+    R,
+    S,
+    T,
+    U,
+    V,
+    W,
+    X,
+    Y,
+    Z,
+    Digit0,
+    Digit1,
+    Digit2,
+    Digit3,
+    Digit4,
+    Digit5,
+    Digit6,
+    Digit7,
+    Digit8,
+    Digit9,
+    F1,
+    F2,
+    F3,
+    F4,
+    F5,
+    F6,
+    F7,
+    F8,
+    F9,
+    F10,
+    F11,
+    F12,
+}
+
+impl PassHotkeyKey {
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_uppercase().as_str() {
+            "A" => Some(Self::A),
+            "B" => Some(Self::B),
+            "C" => Some(Self::C),
+            "D" => Some(Self::D),
+            "E" => Some(Self::E),
+            "F" => Some(Self::F),
+            "G" => Some(Self::G),
+            "H" => Some(Self::H),
+            "I" => Some(Self::I),
+            "J" => Some(Self::J),
+            "K" => Some(Self::K),
+            "L" => Some(Self::L),
+            "M" => Some(Self::M),
+            "N" => Some(Self::N),
+            "O" => Some(Self::O),
+            "P" => Some(Self::P),
+            "Q" => Some(Self::Q),
+            "R" => Some(Self::R),
+            "S" => Some(Self::S),
+            "T" => Some(Self::T),
+            "U" => Some(Self::U),
+            "V" => Some(Self::V),
+            "W" => Some(Self::W),
+            "X" => Some(Self::X),
+            "Y" => Some(Self::Y),
+            "Z" => Some(Self::Z),
+            "0" | "DIGIT0" => Some(Self::Digit0),
+            "1" | "DIGIT1" => Some(Self::Digit1),
+            "2" | "DIGIT2" => Some(Self::Digit2),
+            "3" | "DIGIT3" => Some(Self::Digit3),
+            "4" | "DIGIT4" => Some(Self::Digit4),
+            "5" | "DIGIT5" => Some(Self::Digit5),
+            "6" | "DIGIT6" => Some(Self::Digit6),
+            "7" | "DIGIT7" => Some(Self::Digit7),
+            "8" | "DIGIT8" => Some(Self::Digit8),
+            "9" | "DIGIT9" => Some(Self::Digit9),
+            "F1" => Some(Self::F1),
+            "F2" => Some(Self::F2),
+            "F3" => Some(Self::F3),
+            "F4" => Some(Self::F4),
+            "F5" => Some(Self::F5),
+            "F6" => Some(Self::F6),
+            "F7" => Some(Self::F7),
+            "F8" => Some(Self::F8),
+            "F9" => Some(Self::F9),
+            "F10" => Some(Self::F10),
+            "F11" => Some(Self::F11),
+            "F12" => Some(Self::F12),
+            _ => None,
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::A => "A",
+            Self::B => "B",
+            Self::C => "C",
+            Self::D => "D",
+            Self::E => "E",
+            Self::F => "F",
+            Self::G => "G",
+            Self::H => "H",
+            Self::I => "I",
+            Self::J => "J",
+            Self::K => "K",
+            Self::L => "L",
+            Self::M => "M",
+            Self::N => "N",
+            Self::O => "O",
+            Self::P => "P",
+            Self::Q => "Q",
+            Self::R => "R",
+            Self::S => "S",
+            Self::T => "T",
+            Self::U => "U",
+            Self::V => "V",
+            Self::W => "W",
+            Self::X => "X",
+            Self::Y => "Y",
+            Self::Z => "Z",
+            Self::Digit0 => "0",
+            Self::Digit1 => "1",
+            Self::Digit2 => "2",
+            Self::Digit3 => "3",
+            Self::Digit4 => "4",
+            Self::Digit5 => "5",
+            Self::Digit6 => "6",
+            Self::Digit7 => "7",
+            Self::Digit8 => "8",
+            Self::Digit9 => "9",
+            Self::F1 => "F1",
+            Self::F2 => "F2",
+            Self::F3 => "F3",
+            Self::F4 => "F4",
+            Self::F5 => "F5",
+            Self::F6 => "F6",
+            Self::F7 => "F7",
+            Self::F8 => "F8",
+            Self::F9 => "F9",
+            Self::F10 => "F10",
+            Self::F11 => "F11",
+            Self::F12 => "F12",
+        }
+    }
+
+    pub const fn xdg_key(self) -> &'static str {
+        match self {
+            Self::A => "a",
+            Self::B => "b",
+            Self::C => "c",
+            Self::D => "d",
+            Self::E => "e",
+            Self::F => "f",
+            Self::G => "g",
+            Self::H => "h",
+            Self::I => "i",
+            Self::J => "j",
+            Self::K => "k",
+            Self::L => "l",
+            Self::M => "m",
+            Self::N => "n",
+            Self::O => "o",
+            Self::P => "p",
+            Self::Q => "q",
+            Self::R => "r",
+            Self::S => "s",
+            Self::T => "t",
+            Self::U => "u",
+            Self::V => "v",
+            Self::W => "w",
+            Self::X => "x",
+            Self::Y => "y",
+            Self::Z => "z",
+            Self::Digit0 => "0",
+            Self::Digit1 => "1",
+            Self::Digit2 => "2",
+            Self::Digit3 => "3",
+            Self::Digit4 => "4",
+            Self::Digit5 => "5",
+            Self::Digit6 => "6",
+            Self::Digit7 => "7",
+            Self::Digit8 => "8",
+            Self::Digit9 => "9",
+            Self::F1 => "F1",
+            Self::F2 => "F2",
+            Self::F3 => "F3",
+            Self::F4 => "F4",
+            Self::F5 => "F5",
+            Self::F6 => "F6",
+            Self::F7 => "F7",
+            Self::F8 => "F8",
+            Self::F9 => "F9",
+            Self::F10 => "F10",
+            Self::F11 => "F11",
+            Self::F12 => "F12",
+        }
+    }
+}
+
+/// Configurable modifier + key binding for toggling overlay mouse click-through (`Ctrl+Shift+T` by default).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PassHotkey {
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+    pub key: PassHotkeyKey,
+}
+
+impl Default for PassHotkey {
+    fn default() -> Self {
+        Self {
+            ctrl: true,
+            alt: false,
+            shift: true,
+            key: PassHotkeyKey::T,
+        }
+    }
+}
+
+impl PassHotkey {
+    /// Parses a modified shortcut string such as `"Ctrl+Shift+T"` or `"Ctrl+Alt+F10"`.
+    /// Requires at least one modifier (`Ctrl`, `Alt`, `Shift`) so bare Dota 2 keys are never hijacked.
+    pub fn parse(raw: &str) -> Option<Self> {
+        let mut ctrl = false;
+        let mut alt = false;
+        let mut shift = false;
+        let mut key = None;
+        for part in raw.trim().trim_matches('"').split('+') {
+            let tok = part.trim();
+            if tok.is_empty() {
+                return None;
+            }
+            match tok.to_ascii_lowercase().as_str() {
+                "ctrl" | "control" => ctrl = true,
+                "alt" => alt = true,
+                "shift" => shift = true,
+                _ => {
+                    if key.is_some() {
+                        return None;
+                    }
+                    key = Some(PassHotkeyKey::parse(tok)?);
+                }
+            }
+        }
+        let key = key?;
+        if !(ctrl || alt || shift) {
+            return None;
+        }
+        Some(Self {
+            ctrl,
+            alt,
+            shift,
+            key,
+        })
+    }
+
+    /// Formats the canonical UI/config string (e.g. `"Ctrl+Shift+T"`).
+    pub fn format_label(self) -> String {
+        let mut parts = Vec::with_capacity(4);
+        if self.ctrl {
+            parts.push("Ctrl");
+        }
+        if self.alt {
+            parts.push("Alt");
+        }
+        if self.shift {
+            parts.push("Shift");
+        }
+        parts.push(self.key.label());
+        parts.join("+")
+    }
+
+    /// Formats the XDG GlobalShortcuts `preferred_trigger` syntax (e.g. `"CTRL+SHIFT+t"`).
+    pub fn to_portal_trigger(self) -> String {
+        let mut parts = Vec::with_capacity(4);
+        if self.ctrl {
+            parts.push("CTRL");
+        }
+        if self.alt {
+            parts.push("ALT");
+        }
+        if self.shift {
+            parts.push("SHIFT");
+        }
+        parts.push(self.key.xdg_key());
+        parts.join("+")
+    }
+}
+
+/// Persisted UI onboarding, overlay, language, hotkey, and STRATZ token state stored in `ui_config.toml`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UiConfig {
     pub onboarding_dismissed: bool,
@@ -2396,6 +2723,7 @@ pub struct UiConfig {
     pub build_overlay_geometry: OverlayGeometry,
     pub overlay_opacity: f32,
     pub ui_language: UiLanguage,
+    pub pass_hotkey: PassHotkey,
 }
 
 impl Default for UiConfig {
@@ -2410,6 +2738,7 @@ impl Default for UiConfig {
             build_overlay_geometry: OverlayGeometry::default_build(),
             overlay_opacity: DEFAULT_OVERLAY_OPACITY,
             ui_language: UiLanguage::default(),
+            pass_hotkey: PassHotkey::default(),
         }
     }
 }
@@ -2603,6 +2932,11 @@ pub fn load_ui_config_from_dir(config_dir: &Path) -> UiConfig {
                     cfg.ui_language = lang;
                 }
             }
+            "pass_hotkey" => {
+                if let Some(hk) = PassHotkey::parse(val) {
+                    cfg.pass_hotkey = hk;
+                }
+            }
             _ => {}
         }
     }
@@ -2675,6 +3009,10 @@ pub fn save_ui_config_to_dir(config_dir: &Path, cfg: &UiConfig) -> Result<(), St
     body.push_str(&format!(
         "ui_language = \"{}\"\n",
         cfg.ui_language.as_config_str()
+    ));
+    body.push_str(&format!(
+        "pass_hotkey = \"{}\"\n",
+        cfg.pass_hotkey.format_label()
     ));
     if let Some(token) = cfg.stratz_api_token.as_deref().filter(|t| !t.is_empty()) {
         let escaped = token.replace('"', "");

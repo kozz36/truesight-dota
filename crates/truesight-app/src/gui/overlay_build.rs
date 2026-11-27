@@ -1,76 +1,45 @@
 use super::TrueSightGuiApp;
 use super::i18n::UiStrings;
+use super::surfaces::{
+    estimate_overlay_build_row_width, format_build_clock as format_clock,
+    overlay_build_phase_short as phase_short, paint_overlay_corner_pill as paint_corner_pill,
+};
+#[cfg(test)]
+pub(super) use super::surfaces::{max_overlay_variant_rows, select_overlay_late_grid_2x2};
+#[cfg(not(test))]
+use super::surfaces::{max_overlay_variant_rows, select_overlay_late_grid_2x2};
 use super::theme::*;
 use super::viewmodel::OverlaySummary;
 use eframe::egui::{
-    self, Align, Align2, Color32, FontId, Layout, Margin, RichText, Sense, Stroke, vec2,
+    self, Align, Align2, Color32, CornerRadius, FontId, Layout, Margin, Rect, RichText, Sense,
+    Stroke, vec2,
 };
-use truesight_core::domain::{BuildStep, ItemId, ItemPhase, OptionalBuildItem};
+use truesight_core::domain::{BuildStep, HeroId, ItemId, ItemPhase, OptionalBuildItem, TEAM_SIZE};
 use truesight_core::ports::ItemMetaRepository;
 
-fn phase_short(phase: ItemPhase) -> &'static str {
-    match phase {
-        ItemPhase::Starting => "START",
-        ItemPhase::Early => "EARLY",
-        ItemPhase::Core => "CORE",
-        ItemPhase::Late => "LATE",
-        ItemPhase::Situational => "OPT",
-    }
-}
-
-fn format_clock(secs: i32) -> String {
-    let abs = secs.unsigned_abs();
-    let mins = abs / 60;
-    let rem = abs % 60;
-    if secs < 0 {
-        format!("-{mins:02}:{rem:02}")
-    } else {
-        format!("{mins:02}:{rem:02}")
-    }
-}
-
-fn paint_corner_pill(
-    painter: &egui::Painter,
-    anchor: egui::Pos2,
-    align: Align2,
-    text: &str,
-    text_color: Color32,
-    bg_color: Color32,
-    font_size: f32,
-) {
-    let galley = painter.layout_no_wrap(
-        text.to_string(),
-        FontId::proportional(font_size),
-        text_color,
-    );
-    let pad = vec2(2.5, 0.5);
-    let box_sz = galley.size() + pad * 2.0;
-    let rect = align.anchor_size(anchor, box_sz);
-    painter.rect_filled(rect, 1.5, bg_color);
-    painter.galley(rect.min + pad, galley, text_color);
-}
-
-pub(super) fn select_overlay_late_grid_2x2(avail_w: f32, main_h: f32, late_count: usize) -> bool {
-    late_count >= 3 && main_h >= 120.0 && (avail_w < 500.0 || (main_h / avail_w.max(1.0)) >= 0.36)
-}
-
-pub(super) fn max_overlay_variant_rows(row_avail_h: f32, tile_h: f32, variant_h: f32) -> usize {
-    let extra = (row_avail_h - tile_h - 6.0).max(0.0);
-    ((extra / (variant_h + 2.0)).floor() as usize).clamp(1, 3)
+pub(super) struct OverlayBuildOutput {
+    pub(super) clicked_variant: Option<(ItemId, ItemId)>,
+    pub(super) clicked_ally_hero: Option<HeroId>,
+    pub(super) ally_role_buttons: [Rect; TEAM_SIZE],
+    pub(super) phases_rect: Option<Rect>,
 }
 
 impl TrueSightGuiApp {
     /// Renders the compact icon-only item build overlay organized into three framed phase
-    /// boxes (`EARLY > CORE > LATE`), inline starting items, and a prominent framed `OPT`
-    /// situational counter strip underneath.
+    /// boxes (`EARLY > CORE > LATE`), `P1`–`P5` ally selector pills, inline starting items,
+    /// and a prominent framed `OPT` situational counter strip underneath.
     pub(super) fn render_overlay_build_panel(
         &self,
         ui: &mut egui::Ui,
         summary: &OverlaySummary,
         textures: &GuiTextureCache,
-    ) -> Option<(ItemId, ItemId)> {
+    ) -> OverlayBuildOutput {
         let tr = super::i18n::strings(self.session.ui_language);
         let mut clicked_variant: Option<(ItemId, ItemId)> = None;
+        let mut clicked_ally_hero: Option<HeroId> = None;
+        let mut ally_role_buttons = [Rect::NOTHING; TEAM_SIZE];
+        let mut phases_rect: Option<Rect> = None;
+        let active_build = self.session.active_build_hero();
         let start_items: &[ItemId] = summary
             .build
             .as_ref()
@@ -81,23 +50,23 @@ impl TrueSightGuiApp {
         let inline_starting = !start_items.is_empty() && hdr_avail_w >= 330.0;
 
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 5.0;
+            ui.spacing_mut().item_spacing.x = 4.0;
             super::surfaces::overlay_text_scrim(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 5.0;
+                    ui.spacing_mut().item_spacing.x = 4.0;
                     ui.label(
                         RichText::new(format!("T = {}", format_clock(summary.game_time_secs)))
                             .size(9.0)
                             .strong()
                             .color(P_CYAN),
                     );
-                    if let Some((hero_id, role)) = self.session.active_build_hero() {
+                    if let Some((hero_id, role)) = active_build {
                         let hero_name = self
                             .session
                             .matrix
                             .hero(hero_id)
-                            .map(|h| h.display_name.clone())
-                            .unwrap_or_else(|| format!("Hero #{}", hero_id.0));
+                            .map(|h| h.display_name.as_str())
+                            .unwrap_or("Hero");
                         ui.add(
                             egui::Label::new(
                                 RichText::new(format!("{hero_name} · P{}", role.index() + 1))
@@ -117,6 +86,60 @@ impl TrueSightGuiApp {
                     }
                 });
             });
+
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                for idx in 0..TEAM_SIZE {
+                    let picked_hero = self.session.draft.allies[idx].map(|p| p.hero_id);
+                    let is_on =
+                        active_build.is_some_and(|(active_id, _)| picked_hero == Some(active_id));
+                    let txt_col = if picked_hero.is_none() {
+                        P_MUTED
+                    } else if is_on {
+                        P_VOID
+                    } else {
+                        P_SILVER
+                    };
+                    let fill_col = if is_on {
+                        P_GEM
+                    } else {
+                        super::surfaces::translucent(P_INDIGO_2, 76)
+                    };
+                    let stroke_col = if is_on {
+                        P_GEM
+                    } else {
+                        super::surfaces::translucent(P_LINE, 130)
+                    };
+                    let hover = match picked_hero
+                        .and_then(|id| self.session.matrix.hero(id))
+                        .map(|h| h.display_name.as_str())
+                    {
+                        Some(name) => format!("P{} · {name}", idx + 1),
+                        None => format!("P{} · —", idx + 1),
+                    };
+                    let btn = egui::Button::new(
+                        RichText::new(format!("P{}", idx + 1))
+                            .size(8.0)
+                            .strong()
+                            .color(txt_col),
+                    )
+                    .fill(fill_col)
+                    .stroke(Stroke::new(1.0_f32, stroke_col))
+                    .corner_radius(CornerRadius::same(2))
+                    .min_size(vec2(17.0, 14.0));
+                    let resp = ui
+                        .add_enabled(picked_hero.is_some(), btn)
+                        .on_disabled_hover_text(&hover)
+                        .on_hover_text(hover);
+                    ally_role_buttons[idx] = resp.rect;
+                    if resp.clicked()
+                        && let Some(hid) = picked_hero
+                    {
+                        clicked_ally_hero = Some(hid);
+                    }
+                }
+            });
+
             if inline_starting {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     self.render_overlay_starting_icons(ui, start_items, true, textures);
@@ -133,7 +156,12 @@ impl TrueSightGuiApp {
                 false,
                 P_SILVER,
             );
-            return None;
+            return OverlayBuildOutput {
+                clicked_variant: None,
+                clicked_ally_hero,
+                ally_role_buttons,
+                phases_rect: None,
+            };
         };
 
         let avail_w = ui.available_width();
@@ -225,6 +253,27 @@ impl TrueSightGuiApp {
             var_rows: usize,
         }
 
+        let phase_label_w = |lbl: &str| {
+            ui.painter()
+                .layout_no_wrap(lbl.to_string(), FontId::proportional(7.5), P_CYAN)
+                .size()
+                .x
+        };
+        let row_w = estimate_overlay_build_row_width(
+            phase_label_w(tr.phase_early),
+            &early_steps,
+            phase_label_w(tr.phase_core),
+            &core_steps,
+            phase_label_w(tr.phase_late),
+            &late_steps,
+            late_is_2x2,
+            tile_w,
+            variant_w,
+            single_var_rows,
+            late_var_rows,
+        );
+        let phase_lead = super::overlay::centered_leading_space(avail_w, row_w);
+
         ui.allocate_ui_with_layout(vec2(avail_w, main_h), Layout::top_down(Align::Min), |ui| {
             egui::ScrollArea::horizontal()
                 .id_salt("truesight_overlay_build_scroll")
@@ -233,51 +282,58 @@ impl TrueSightGuiApp {
                 .animated(false)
                 .show(ui, |ui| {
                     ui.horizontal_top(|ui| {
-                        ui.spacing_mut().item_spacing.x = 3.0;
-                        let phases = [
-                            OverlayPhaseSpec {
-                                label: tr.phase_early,
-                                steps: &early_steps,
-                                grid_2x2: false,
-                                var_rows: single_var_rows,
-                            },
-                            OverlayPhaseSpec {
-                                label: tr.phase_core,
-                                steps: &core_steps,
-                                grid_2x2: false,
-                                var_rows: single_var_rows,
-                            },
-                            OverlayPhaseSpec {
-                                label: tr.phase_late,
-                                steps: &late_steps,
-                                grid_2x2: late_is_2x2,
-                                var_rows: late_var_rows,
-                            },
-                        ];
-                        for (p_idx, spec) in phases.into_iter().enumerate() {
-                            if p_idx > 0 {
-                                ui.vertical(|ui| {
-                                    ui.add_space((10.0 + tile_h * 0.40).max(12.0));
-                                    let (cr, _) =
-                                        ui.allocate_exact_size(vec2(8.0, 12.0), Sense::hover());
-                                    paint_chevron_right(ui.painter(), cr, P_GEM);
-                                });
-                            }
-                            self.render_overlay_phase_box(
-                                ui,
-                                spec.label,
-                                spec.steps,
-                                build.next_unowned_index,
-                                tile_w,
-                                tile_h,
-                                variant_w,
-                                variant_h,
-                                spec.var_rows,
-                                spec.grid_2x2,
-                                textures,
-                                &mut clicked_variant,
-                            );
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        if phase_lead > 0.0 {
+                            ui.add_space(phase_lead);
                         }
+                        let strip_resp = ui.horizontal_top(|ui| {
+                            ui.spacing_mut().item_spacing.x = 3.0;
+                            let phases = [
+                                OverlayPhaseSpec {
+                                    label: tr.phase_early,
+                                    steps: &early_steps,
+                                    grid_2x2: false,
+                                    var_rows: single_var_rows,
+                                },
+                                OverlayPhaseSpec {
+                                    label: tr.phase_core,
+                                    steps: &core_steps,
+                                    grid_2x2: false,
+                                    var_rows: single_var_rows,
+                                },
+                                OverlayPhaseSpec {
+                                    label: tr.phase_late,
+                                    steps: &late_steps,
+                                    grid_2x2: late_is_2x2,
+                                    var_rows: late_var_rows,
+                                },
+                            ];
+                            for (p_idx, spec) in phases.into_iter().enumerate() {
+                                if p_idx > 0 {
+                                    ui.vertical(|ui| {
+                                        ui.add_space((10.0 + tile_h * 0.40).max(12.0));
+                                        let (cr, _) =
+                                            ui.allocate_exact_size(vec2(8.0, 12.0), Sense::hover());
+                                        paint_chevron_right(ui.painter(), cr, P_GEM);
+                                    });
+                                }
+                                self.render_overlay_phase_box(
+                                    ui,
+                                    spec.label,
+                                    spec.steps,
+                                    build.next_unowned_index,
+                                    tile_w,
+                                    tile_h,
+                                    variant_w,
+                                    variant_h,
+                                    spec.var_rows,
+                                    spec.grid_2x2,
+                                    textures,
+                                    &mut clicked_variant,
+                                );
+                            }
+                        });
+                        phases_rect = Some(strip_resp.response.rect);
                     });
                 });
         });
@@ -295,7 +351,12 @@ impl TrueSightGuiApp {
             );
         }
 
-        clicked_variant
+        OverlayBuildOutput {
+            clicked_variant,
+            clicked_ally_hero,
+            ally_role_buttons,
+            phases_rect,
+        }
     }
 
     fn render_overlay_starting_icons(

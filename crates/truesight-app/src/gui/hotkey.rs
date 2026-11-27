@@ -1,39 +1,22 @@
-use eframe::egui;
-use std::sync::atomic::{AtomicBool, Ordering};
+use super::TrueSightGuiApp;
+use super::theme::*;
+use crate::session::{PassHotkey, PassHotkeyKey};
+use eframe::egui::{self, RichText, Stroke};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
-/// Human-readable label for the global click-through hotkey (`Ctrl+Shift+P`, leaving `F9` free for Dota 2 Pause).
-pub(super) const PASS_HOTKEY_LABEL: &str = "Ctrl+Shift+P";
+#[cfg(test)]
+pub(super) use super::hotkey_portal::{
+    PORTAL_PREFERRED_TRIGGER, PortalLoopOutcome, portal_status_label, should_bind_on_startup,
+    should_fallback_to_xwayland, should_use_configure_shortcuts,
+};
+#[cfg(all(test, target_os = "linux"))]
+pub(super) use super::hotkey_portal::{
+    extract_assigned_trigger_from_pairs, inspect_portal_shortcuts_value,
+};
 
-/// XDG GlobalShortcuts `preferred_trigger` syntax (`https://specifications.freedesktop.org/shortcuts/latest/`).
-#[cfg(any(target_os = "linux", test))]
-pub(super) const PORTAL_PREFERRED_TRIGGER: &str = "CTRL+SHIFT+p";
-
-/// Formats the hotkey backend status label from the portal-reported `trigger_description`.
-/// Falls back to `(In-App)` whenever no trigger is actually bound by the compositor.
-#[cfg(any(target_os = "linux", test))]
-pub(super) fn portal_status_label(assigned_trigger: Option<&str>) -> String {
-    match assigned_trigger.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(trigger) => format!("{trigger} (Global · Wayland Portal)"),
-        None => format!("{PASS_HOTKEY_LABEL} (In-App)"),
-    }
-}
-
-/// Result of running the Wayland XDG GlobalShortcuts portal session.
-#[cfg(any(target_os = "linux", test))]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum PortalLoopOutcome {
-    Finished,
-    Cancelled,
-    Unavailable(String),
-}
-
-/// Returns `true` only when the portal is unavailable (never after explicit user cancellation)
-/// and an X11/XWayland `DISPLAY` is available for `XGrabKey` fallback.
-#[cfg(any(target_os = "linux", test))]
-pub(super) fn should_fallback_to_xwayland(outcome: &PortalLoopOutcome, has_display: bool) -> bool {
-    matches!(outcome, PortalLoopOutcome::Unavailable(_)) && has_display
-}
+/// Human-readable default label for the global click-through hotkey (`Ctrl+Shift+T`).
+pub(super) const PASS_HOTKEY_LABEL: &str = "Ctrl+Shift+T";
 
 /// Actions dispatched from OS-level global hotkeys into the GUI frame loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,99 +24,435 @@ pub(super) enum GlobalHotkeyAction {
     ToggleOverlayPass,
 }
 
-/// Cross-platform global hotkey listener (`Ctrl+Shift+P`) backed by Win32 `RegisterHotKey` on
-/// Windows, XDG Desktop Portal `GlobalShortcuts` on Linux Wayland, and X11 `XGrabKey` fallback on
-/// Linux X11. Fails closed to in-app shortcut handling without affecting normal draft rendering.
+macro_rules! map_pass_keys {
+    ($($pk:ident => ($ek:ident, $gc:ident)),* $(,)?) => {
+        fn egui_key_to_pass_key(key: egui::Key) -> Option<PassHotkeyKey> {
+            match key {
+                $(egui::Key::$ek => Some(PassHotkeyKey::$pk),)*
+                _ => None,
+            }
+        }
+
+        fn to_global_code(key: PassHotkeyKey) -> global_hotkey::hotkey::Code {
+            use global_hotkey::hotkey::Code;
+            match key {
+                $(PassHotkeyKey::$pk => Code::$gc,)*
+            }
+        }
+    };
+}
+
+map_pass_keys!(
+    A => (A, KeyA), B => (B, KeyB), C => (C, KeyC), D => (D, KeyD), E => (E, KeyE),
+    F => (F, KeyF), G => (G, KeyG), H => (H, KeyH), I => (I, KeyI), J => (J, KeyJ),
+    K => (K, KeyK), L => (L, KeyL), M => (M, KeyM), N => (N, KeyN), O => (O, KeyO),
+    P => (P, KeyP), Q => (Q, KeyQ), R => (R, KeyR), S => (S, KeyS), T => (T, KeyT),
+    U => (U, KeyU), V => (V, KeyV), W => (W, KeyW), X => (X, KeyX), Y => (Y, KeyY),
+    Z => (Z, KeyZ),
+    Digit0 => (Num0, Digit0), Digit1 => (Num1, Digit1), Digit2 => (Num2, Digit2),
+    Digit3 => (Num3, Digit3), Digit4 => (Num4, Digit4), Digit5 => (Num5, Digit5),
+    Digit6 => (Num6, Digit6), Digit7 => (Num7, Digit7), Digit8 => (Num8, Digit8),
+    Digit9 => (Num9, Digit9),
+    F1 => (F1, F1), F2 => (F2, F2), F3 => (F3, F3), F4 => (F4, F4),
+    F5 => (F5, F5), F6 => (F6, F6), F7 => (F7, F7), F8 => (F8, F8),
+    F9 => (F9, F9), F10 => (F10, F10), F11 => (F11, F11), F12 => (F12, F12),
+);
+
+fn to_global_hotkey(hotkey: PassHotkey) -> global_hotkey::hotkey::HotKey {
+    use global_hotkey::hotkey::{HotKey, Modifiers};
+    let mut mods = Modifiers::empty();
+    if hotkey.ctrl {
+        mods |= Modifiers::CONTROL;
+    }
+    if hotkey.alt {
+        mods |= Modifiers::ALT;
+    }
+    if hotkey.shift {
+        mods |= Modifiers::SHIFT;
+    }
+    HotKey::new(
+        (!mods.is_empty()).then_some(mods),
+        to_global_code(hotkey.key),
+    )
+}
+
+/// Converts a pressed `egui::Key` + modifiers into a [`PassHotkey`] (requiring at least one modifier).
+pub(super) fn from_egui_key(key: egui::Key, modifiers: egui::Modifiers) -> Option<PassHotkey> {
+    let ctrl = modifiers.ctrl;
+    let alt = modifiers.alt;
+    let shift = modifiers.shift;
+    if !(ctrl || alt || shift) {
+        return None;
+    }
+    let pass_key = egui_key_to_pass_key(key)?;
+    Some(PassHotkey {
+        ctrl,
+        alt,
+        shift,
+        key: pass_key,
+    })
+}
+
+/// Returns `true` when the active pass-through hotkey was just pressed (non-repeating) in `ctx`.
+pub(super) fn is_pass_shortcut_pressed(ctx: &egui::Context, target: PassHotkey) -> bool {
+    ctx.input(|i| {
+        i.events.iter().any(|ev| {
+            matches!(
+                ev,
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                    ..
+                } if egui_key_to_pass_key(*key) == Some(target.key)
+                    && modifiers.ctrl == target.ctrl
+                    && modifiers.alt == target.alt
+                    && modifiers.shift == target.shift
+            )
+        })
+    })
+}
+
+fn capture_pass_hotkey_from_ctx(ctx: &egui::Context) -> Option<Result<PassHotkey, bool>> {
+    ctx.input(|i| {
+        for ev in &i.events {
+            if let egui::Event::Key {
+                key,
+                pressed: true,
+                repeat: false,
+                modifiers,
+                ..
+            } = ev
+            {
+                if *key == egui::Key::Escape {
+                    return Some(Err(true));
+                }
+                if let Some(hk) = from_egui_key(*key, *modifiers) {
+                    return Some(Ok(hk));
+                }
+            }
+        }
+        None
+    })
+}
+
+/// Cross-platform global hotkey listener supporting custom shortcuts (`Ctrl+Shift+T` default)
+/// on Windows, X11, and macOS, plus XDG Desktop Portal `GlobalShortcuts` re-binding on Linux Wayland.
 pub(super) struct GlobalHotkeyListener {
     rx: mpsc::Receiver<GlobalHotkeyAction>,
+    tx: mpsc::SyncSender<GlobalHotkeyAction>,
     status: Arc<Mutex<String>>,
     stop: Arc<AtomicBool>,
-    _manager: Option<global_hotkey::GlobalHotKeyManager>,
+    manager: Option<global_hotkey::GlobalHotKeyManager>,
+    registered_hotkey: Option<global_hotkey::hotkey::HotKey>,
+    expected_id: Arc<AtomicU32>,
+    platform_name: &'static str,
+    is_wayland_portal: bool,
+    active_hotkey: Arc<Mutex<PassHotkey>>,
+    rebind_in_flight: Arc<AtomicBool>,
     #[cfg(target_os = "linux")]
-    portal_session:
-        Arc<Mutex<Option<(zbus::blocking::Connection, zbus::zvariant::OwnedObjectPath)>>>,
+    portal_session: super::hotkey_portal::PortalSessionSlot,
+    #[cfg(target_os = "linux")]
+    portal_bound_in_session: Arc<AtomicBool>,
 }
 
 impl Drop for GlobalHotkeyListener {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
+        if let Some(mgr) = &self.manager
+            && let Some(prev) = self.registered_hotkey.take()
+        {
+            let _ = mgr.unregister(prev);
+        }
         #[cfg(target_os = "linux")]
         if let Ok(mut guard) = self.portal_session.lock()
             && let Some((conn, session_path)) = guard.take()
         {
-            if let Ok(proxy) = zbus::blocking::Proxy::new(
-                &conn,
-                "org.freedesktop.portal.Desktop",
-                session_path,
-                "org.freedesktop.portal.Session",
-            ) {
-                let _ = proxy.call::<_, _, ()>("Close", &());
-            }
+            super::hotkey_portal::close_portal_session(&conn, &session_path);
         }
     }
 }
 
 impl GlobalHotkeyListener {
+    #[cfg(test)]
+    fn make_test_listener(
+        rx: mpsc::Receiver<GlobalHotkeyAction>,
+        status: &str,
+        is_wayland_portal: bool,
+    ) -> Self {
+        let (tx, _unused_rx) = mpsc::sync_channel(1);
+        Self {
+            rx,
+            tx,
+            status: Arc::new(Mutex::new(status.to_string())),
+            stop: Arc::new(AtomicBool::new(false)),
+            manager: None,
+            registered_hotkey: None,
+            expected_id: Arc::new(AtomicU32::new(0)),
+            platform_name: if is_wayland_portal {
+                "Wayland Portal"
+            } else {
+                "Test"
+            },
+            is_wayland_portal,
+            active_hotkey: Arc::new(Mutex::new(PassHotkey::default())),
+            rebind_in_flight: Arc::new(AtomicBool::new(false)),
+            #[cfg(target_os = "linux")]
+            portal_session: Arc::new(Mutex::new(None)),
+            #[cfg(target_os = "linux")]
+            portal_bound_in_session: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
     /// Creates an inactive listener backed by a caller-supplied channel for deterministic unit tests.
     #[cfg(test)]
     pub(super) fn from_channel_for_test(
         rx: mpsc::Receiver<GlobalHotkeyAction>,
         status: &str,
     ) -> Self {
-        Self {
-            rx,
-            status: Arc::new(Mutex::new(status.to_string())),
-            stop: Arc::new(AtomicBool::new(false)),
-            _manager: None,
-            #[cfg(target_os = "linux")]
-            portal_session: Arc::new(Mutex::new(None)),
-        }
+        Self::make_test_listener(rx, status, false)
     }
 
-    /// Starts OS-level `Ctrl+Shift+P` global shortcut registration and wakes `ctx` on trigger.
-    pub(super) fn start(ctx: egui::Context) -> Self {
+    /// Creates a test listener with configurable Wayland Portal backend flag for Options UI tests.
+    #[cfg(test)]
+    pub(super) fn from_channel_for_test_with_wayland(
+        rx: mpsc::Receiver<GlobalHotkeyAction>,
+        status: &str,
+        is_wayland_portal: bool,
+    ) -> Self {
+        Self::make_test_listener(rx, status, is_wayland_portal)
+    }
+
+    /// Starts OS-level global shortcut registration for `hotkey` and wakes `ctx` on trigger.
+    pub(super) fn start(ctx: egui::Context, hotkey: PassHotkey) -> Self {
         let (tx, rx) = mpsc::sync_channel::<GlobalHotkeyAction>(8);
-        let status = Arc::new(Mutex::new(format!("{PASS_HOTKEY_LABEL} (In-App)")));
+        let status = Arc::new(Mutex::new(format!("{} (In-App)", hotkey.format_label())));
         let stop = Arc::new(AtomicBool::new(false));
+        let expected_id = Arc::new(AtomicU32::new(0));
+        let active_hotkey = Arc::new(Mutex::new(hotkey));
+        let rebind_in_flight = Arc::new(AtomicBool::new(false));
         #[cfg(target_os = "linux")]
         let portal_session = Arc::new(Mutex::new(None));
+        #[cfg(target_os = "linux")]
+        let portal_bound_in_session = Arc::new(AtomicBool::new(false));
 
         #[cfg(target_os = "windows")]
-        let manager = init_desktop_manager(tx.clone(), ctx.clone(), &status, "Windows");
+        let (platform_name, is_wayland_portal, manager, registered_hotkey) = {
+            let (m, hk) = init_desktop_manager(
+                tx.clone(),
+                ctx,
+                &status,
+                "Windows",
+                hotkey,
+                Arc::clone(&expected_id),
+            );
+            ("Windows", false, m, hk)
+        };
 
         #[cfg(all(not(target_os = "windows"), not(target_os = "linux")))]
-        let manager = init_desktop_manager(tx.clone(), ctx.clone(), &status, "Desktop");
+        let (platform_name, is_wayland_portal, manager, registered_hotkey) = {
+            let (m, hk) = init_desktop_manager(
+                tx.clone(),
+                ctx,
+                &status,
+                "Desktop",
+                hotkey,
+                Arc::clone(&expected_id),
+            );
+            ("Desktop", false, m, hk)
+        };
 
         #[cfg(target_os = "linux")]
-        let manager = {
+        let (platform_name, is_wayland_portal, manager, registered_hotkey) = {
             if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-                spawn_wayland_portal_listener(
-                    tx,
+                super::hotkey_portal::spawn_wayland_portal_listener(
+                    tx.clone(),
                     ctx,
                     Arc::clone(&status),
                     Arc::clone(&stop),
                     Arc::clone(&portal_session),
+                    Arc::clone(&active_hotkey),
+                    false,
+                    Arc::clone(&rebind_in_flight),
+                    Arc::clone(&portal_bound_in_session),
                 );
-                None
+                ("Wayland Portal", true, None, None)
             } else if std::env::var_os("DISPLAY").is_some() {
-                init_desktop_manager(tx, ctx, &status, "X11")
+                let (m, hk) = init_desktop_manager(
+                    tx.clone(),
+                    ctx,
+                    &status,
+                    "X11",
+                    hotkey,
+                    Arc::clone(&expected_id),
+                );
+                ("X11", false, m, hk)
             } else {
-                None
+                ("Linux", false, None, None)
             }
         };
 
         Self {
             rx,
+            tx,
             status,
             stop,
-            _manager: manager,
+            manager,
+            registered_hotkey,
+            expected_id,
+            platform_name,
+            is_wayland_portal,
+            active_hotkey,
+            rebind_in_flight,
             #[cfg(target_os = "linux")]
             portal_session,
+            #[cfg(target_os = "linux")]
+            portal_bound_in_session,
+        }
+    }
+
+    /// Re-registers the pass-through global shortcut dynamically on Windows/X11/Desktop,
+    /// or updates the active in-app/preferred trigger label on Wayland.
+    pub(super) fn update_hotkey(&mut self, _ctx: &egui::Context, hotkey: PassHotkey) -> bool {
+        if let Ok(mut guard) = self.active_hotkey.lock() {
+            *guard = hotkey;
+        }
+        let label = hotkey.format_label();
+        if self.is_wayland_portal {
+            let cur = self.status_label();
+            if cur.ends_with("(In-App)") {
+                set_status(&self.status, format!("{label} (In-App)"));
+            }
+            return true;
+        }
+
+        let Some(mgr) = &self.manager else {
+            set_status(&self.status, format!("{label} (In-App)"));
+            return false;
+        };
+
+        let prev = self.registered_hotkey.take();
+        if let Some(old_hk) = prev {
+            let _ = mgr.unregister(old_hk);
+        }
+        let new_hk = to_global_hotkey(hotkey);
+        if mgr.register(new_hk).is_ok() {
+            self.expected_id.store(new_hk.id(), Ordering::Release);
+            self.registered_hotkey = Some(new_hk);
+            set_status(
+                &self.status,
+                format!("{label} (Global · {})", self.platform_name),
+            );
+            true
+        } else {
+            self.expected_id.store(0, Ordering::Release);
+            set_status(&self.status, format!("{label} (In-App)"));
+            false
+        }
+    }
+
+    pub(super) fn is_wayland_portal_backend(&self) -> bool {
+        self.is_wayland_portal
+    }
+
+    pub(super) fn rebind_in_flight(&self) -> bool {
+        self.rebind_in_flight.load(Ordering::Acquire)
+    }
+
+    /// Opens the compositor's XDG `BindShortcuts` prompt on demand without restarting the app.
+    pub(super) fn rebind_wayland_portal(
+        &mut self,
+        ctx: egui::Context,
+        preferred: PassHotkey,
+    ) -> bool {
+        if !self.is_wayland_portal {
+            return false;
+        }
+        if let Ok(mut guard) = self.active_hotkey.lock() {
+            *guard = preferred;
+        }
+        if self
+            .rebind_in_flight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            let existing = self.portal_session.lock().ok().and_then(|g| g.clone());
+            if let Some((conn, session_path)) = existing {
+                let tx = self.tx.clone();
+                let stop = Arc::clone(&self.stop);
+                let portal_session = Arc::clone(&self.portal_session);
+                let active_hotkey = Arc::clone(&self.active_hotkey);
+                let status = Arc::clone(&self.status);
+                let in_flight = Arc::clone(&self.rebind_in_flight);
+                let bound_in_session = Arc::clone(&self.portal_bound_in_session);
+                let _ = std::thread::Builder::new()
+                    .name("truesight-portal-rebind".into())
+                    .spawn(move || {
+                        let res = super::hotkey_portal::rebind_existing_portal_session(
+                            &conn,
+                            &session_path,
+                            preferred,
+                            &status,
+                            &bound_in_session,
+                        );
+                        if matches!(
+                            res,
+                            Ok(super::hotkey_portal::RebindSessionResult::NeedsFreshSession)
+                        ) {
+                            super::hotkey_portal::close_portal_session(&conn, &session_path);
+                            if let Ok(mut guard) = portal_session.lock() {
+                                *guard = None;
+                            }
+                            bound_in_session.store(false, Ordering::Release);
+                            super::hotkey_portal::spawn_wayland_portal_listener(
+                                tx,
+                                ctx,
+                                status,
+                                stop,
+                                portal_session,
+                                active_hotkey,
+                                true,
+                                in_flight,
+                                bound_in_session,
+                            );
+                        } else {
+                            in_flight.store(false, Ordering::Release);
+                            ctx.request_repaint();
+                        }
+                    });
+            } else {
+                super::hotkey_portal::spawn_wayland_portal_listener(
+                    self.tx.clone(),
+                    ctx,
+                    Arc::clone(&self.status),
+                    Arc::clone(&self.stop),
+                    Arc::clone(&self.portal_session),
+                    Arc::clone(&self.active_hotkey),
+                    true,
+                    Arc::clone(&self.rebind_in_flight),
+                    Arc::clone(&self.portal_bound_in_session),
+                );
+            }
+            true
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = &self.tx;
+            self.rebind_in_flight.store(false, Ordering::Release);
+            ctx.request_repaint();
+            false
         }
     }
 
     /// Drains all pending global hotkey actions without blocking the UI thread.
     pub(super) fn poll_actions(&self) -> Vec<GlobalHotkeyAction> {
+        let _ = &self.tx;
         let mut out = Vec::new();
         while let Ok(action) = self.rx.try_recv() {
             out.push(action);
@@ -150,361 +469,224 @@ impl GlobalHotkeyListener {
     }
 }
 
-fn set_status(status: &Arc<Mutex<String>>, text: String) {
+pub(super) fn set_status(status: &Arc<Mutex<String>>, text: String) {
     if let Ok(mut guard) = status.lock() {
         *guard = text;
     }
 }
 
-fn init_desktop_manager(
+pub(super) fn init_desktop_manager(
     tx: mpsc::SyncSender<GlobalHotkeyAction>,
     ctx: egui::Context,
     status: &Arc<Mutex<String>>,
     platform_name: &str,
-) -> Option<global_hotkey::GlobalHotKeyManager> {
-    use global_hotkey::{
-        GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
-        hotkey::{Code, HotKey, Modifiers},
-    };
+    hotkey: PassHotkey,
+    expected_id: Arc<AtomicU32>,
+) -> (
+    Option<global_hotkey::GlobalHotKeyManager>,
+    Option<global_hotkey::hotkey::HotKey>,
+) {
+    use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 
+    let label = hotkey.format_label();
     let Ok(manager) = GlobalHotKeyManager::new() else {
-        set_status(status, format!("{PASS_HOTKEY_LABEL} (In-App)"));
-        return None;
+        set_status(status, format!("{label} (In-App)"));
+        return (None, None);
     };
-    let hotkey = HotKey::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyP);
-    if manager.register(hotkey).is_err() {
-        set_status(status, format!("{PASS_HOTKEY_LABEL} (In-App)"));
-        return None;
-    }
 
-    let expected_id = hotkey.id();
+    let handler_expected = Arc::clone(&expected_id);
     GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
-        if event.id == expected_id && event.state == HotKeyState::Pressed {
+        let cur_id = handler_expected.load(Ordering::Acquire);
+        if cur_id != 0 && event.id == cur_id && event.state == HotKeyState::Pressed {
             let _ = tx.try_send(GlobalHotkeyAction::ToggleOverlayPass);
             ctx.request_repaint();
         }
     }));
 
-    set_status(
-        status,
-        format!("{PASS_HOTKEY_LABEL} (Global · {platform_name})"),
-    );
-    Some(manager)
-}
-
-#[cfg(target_os = "linux")]
-fn unwrap_value<'v, 'a>(mut val: &'v zbus::zvariant::Value<'a>) -> &'v zbus::zvariant::Value<'a> {
-    while let zbus::zvariant::Value::Value(inner) = val {
-        val = inner.as_ref();
+    let hk = to_global_hotkey(hotkey);
+    if manager.register(hk).is_err() {
+        set_status(status, format!("{label} (In-App)"));
+        return (Some(manager), None);
     }
-    val
+
+    expected_id.store(hk.id(), Ordering::Release);
+    set_status(status, format!("{label} (Global · {platform_name})"));
+    (Some(manager), Some(hk))
 }
 
-#[cfg(target_os = "linux")]
-fn value_as_str<'v, 'a>(val: &'v zbus::zvariant::Value<'a>) -> Option<&'v str> {
-    match unwrap_value(val) {
-        zbus::zvariant::Value::Str(s) => Some(s.as_str()),
-        _ => None,
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn value_as_non_empty_string(val: &zbus::zvariant::Value<'_>) -> Option<String> {
-    value_as_str(val)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-}
-
-/// Inspects an XDG `shortcuts` `a(sa{sv})` variant payload for `target_id` and extracts
-/// whether the entry exists plus any non-empty `trigger_description`.
-#[cfg(target_os = "linux")]
-pub(super) fn inspect_portal_shortcuts_value(
-    val: &zbus::zvariant::Value<'_>,
-    target_id: &str,
-) -> (bool, Option<String>) {
-    let mut listed = false;
-    let mut assigned_trigger = None;
-    let zbus::zvariant::Value::Array(entries) = unwrap_value(val) else {
-        return (false, None);
-    };
-    for item in entries.iter() {
-        let zbus::zvariant::Value::Structure(pair) = unwrap_value(item) else {
-            continue;
-        };
-        let Some(id_val) = pair.fields().first() else {
-            continue;
-        };
-        if value_as_str(id_val) != Some(target_id) {
-            continue;
+impl TrueSightGuiApp {
+    pub(super) fn handle_pass_hotkey_frame(&mut self, ctx: &egui::Context) -> (bool, bool) {
+        let mut pass_toggled_this_frame = false;
+        let mut captured_this_frame = false;
+        if !self.options_open {
+            self.hotkey_recording = false;
         }
-        listed = true;
-        if let Some(props_val) = pair.fields().get(1)
-            && let zbus::zvariant::Value::Dict(dict) = unwrap_value(props_val)
+        if self.hotkey_recording {
+            match capture_pass_hotkey_from_ctx(ctx) {
+                Some(Ok(captured)) => {
+                    self.session.set_pass_hotkey(captured);
+                    if let Some(listener) = &mut self.hotkey_listener {
+                        let _ = listener.update_hotkey(ctx, captured);
+                    }
+                    self.hotkey_recording = false;
+                    captured_this_frame = true;
+                    self.status_banner =
+                        format!("Pass-through hotkey: {}", captured.format_label());
+                }
+                Some(Err(_escaped)) => {
+                    self.hotkey_recording = false;
+                    captured_this_frame = true;
+                }
+                None => {}
+            }
+        }
+        // Always drain queued global actions so a shortcut pressed during capture cannot fire PASS on this or the next frame.
+        if let Some(actions) = self
+            .hotkey_listener
+            .as_ref()
+            .map(GlobalHotkeyListener::poll_actions)
+            && !captured_this_frame
+            && !self.hotkey_recording
         {
-            for (k, v) in dict.iter() {
-                if value_as_str(k) == Some("trigger_description")
-                    && let Some(desc) = value_as_non_empty_string(v)
+            for action in actions {
+                if action == GlobalHotkeyAction::ToggleOverlayPass
+                    && self.session.is_overlay_visible()
                 {
-                    assigned_trigger = Some(desc);
+                    let next = !self.session.overlay_geometry.click_through;
+                    self.set_overlay_click_through_live(ctx, next);
+                    pass_toggled_this_frame = true;
                 }
             }
         }
+        if captured_this_frame {
+            return (true, true);
+        }
+        let f8_root =
+            !self.hotkey_recording && Self::is_non_repeating_key_pressed(ctx, egui::Key::F8);
+        if f8_root {
+            self.session.toggle_overlay_shortcut();
+        }
+        if !pass_toggled_this_frame
+            && !self.hotkey_recording
+            && self.session.is_overlay_visible()
+            && is_pass_shortcut_pressed(ctx, self.session.pass_hotkey)
+        {
+            let next = !self.session.overlay_geometry.click_through;
+            self.set_overlay_click_through_live(ctx, next);
+            pass_toggled_this_frame = true;
+        }
+        (f8_root, pass_toggled_this_frame)
     }
-    (listed, assigned_trigger)
-}
 
-/// Extracts the non-empty `trigger_description` for `target_id` from a deserialized
-/// `ShortcutsChanged` (`Vec<(String, HashMap<String, OwnedValue>)>`) payload.
-#[cfg(target_os = "linux")]
-pub(super) fn extract_assigned_trigger_from_pairs(
-    pairs: &[(
-        String,
-        std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
-    )],
-    target_id: &str,
-) -> Option<String> {
-    pairs
-        .iter()
-        .find(|(id, _)| id == target_id)
-        .and_then(|(_, props)| props.get("trigger_description"))
-        .and_then(|v| value_as_non_empty_string(v))
-}
+    pub(super) fn render_options_hotkey_card(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        tr: &super::i18n::UiStrings,
+    ) {
+        let hk_label = self.session.pass_hotkey.format_label();
+        let hotkey_status = self
+            .hotkey_listener
+            .as_ref()
+            .map(GlobalHotkeyListener::status_label)
+            .unwrap_or_else(|| format!("{hk_label} (In-App)"));
+        let is_wayland = self
+            .hotkey_listener
+            .as_ref()
+            .is_some_and(GlobalHotkeyListener::is_wayland_portal_backend);
+        let is_default = self.session.pass_hotkey == PassHotkey::default();
 
-#[cfg(target_os = "linux")]
-fn spawn_wayland_portal_listener(
-    tx: mpsc::SyncSender<GlobalHotkeyAction>,
-    ctx: egui::Context,
-    status: Arc<Mutex<String>>,
-    stop: Arc<AtomicBool>,
-    portal_session: Arc<
-        Mutex<Option<(zbus::blocking::Connection, zbus::zvariant::OwnedObjectPath)>>,
-    >,
-) {
-    let _ = std::thread::Builder::new()
-        .name("truesight-global-hotkey".into())
-        .spawn(move || {
-            let outcome = run_wayland_portal_loop(&tx, &ctx, &status, &stop, &portal_session);
-            if should_fallback_to_xwayland(&outcome, std::env::var_os("DISPLAY").is_some()) {
-                // XWayland fallback covers XWayland games (e.g. Dota 2 via Proton or X11) if portal is absent.
-                let _x11_mgr = init_desktop_manager(tx, ctx, &status, "XWayland");
-                while !stop.load(Ordering::Acquire) {
-                    std::thread::sleep(std::time::Duration::from_millis(250));
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.label(
+                RichText::new(tr.pass_hotkey_label)
+                    .size(9.5)
+                    .strong()
+                    .color(P_MUTED),
+            );
+            ui.add(
+                egui::Label::new(
+                    RichText::new(&hotkey_status)
+                        .size(9.5)
+                        .strong()
+                        .color(P_CYAN),
+                )
+                .truncate(),
+            )
+            .on_hover_text(&hotkey_status);
+
+            let rec_lbl = if self.hotkey_recording {
+                tr.hotkey_recording_btn
+            } else {
+                tr.hotkey_change_btn
+            };
+            let rec_col = if self.hotkey_recording {
+                P_VOID
+            } else {
+                P_GLINT
+            };
+            let rec_fill = if self.hotkey_recording {
+                P_GEM
+            } else {
+                P_INDIGO_2
+            };
+            if ui
+                .add(
+                    egui::Button::new(RichText::new(rec_lbl).size(9.0).strong().color(rec_col))
+                        .fill(rec_fill)
+                        .stroke(Stroke::new(
+                            1.0_f32,
+                            if self.hotkey_recording { P_GEM } else { P_LINE },
+                        )),
+                )
+                .on_hover_text(tr.hotkey_record_hover)
+                .clicked()
+            {
+                self.hotkey_recording = !self.hotkey_recording;
+            }
+
+            if !is_default
+                && ui
+                    .add(
+                        egui::Button::new(
+                            RichText::new(tr.hotkey_reset_btn).size(9.0).color(P_SILVER),
+                        )
+                        .fill(P_INDIGO_2),
+                    )
+                    .clicked()
+            {
+                let def_hk = PassHotkey::default();
+                self.session.set_pass_hotkey(def_hk);
+                self.hotkey_recording = false;
+                if let Some(listener) = &mut self.hotkey_listener {
+                    let _ = listener.update_hotkey(ctx, def_hk);
                 }
-            } else if matches!(
-                outcome,
-                PortalLoopOutcome::Cancelled | PortalLoopOutcome::Unavailable(_)
-            ) {
-                set_status(&status, format!("{PASS_HOTKEY_LABEL} (In-App)"));
-                ctx.request_repaint();
             }
         });
-}
 
-#[cfg(target_os = "linux")]
-fn run_wayland_portal_loop(
-    tx: &mpsc::SyncSender<GlobalHotkeyAction>,
-    ctx: &egui::Context,
-    status: &Arc<Mutex<String>>,
-    stop: &Arc<AtomicBool>,
-    portal_session: &Arc<
-        Mutex<Option<(zbus::blocking::Connection, zbus::zvariant::OwnedObjectPath)>>,
-    >,
-) -> PortalLoopOutcome {
-    match run_wayland_portal_loop_inner(tx, ctx, status, stop, portal_session) {
-        Ok(()) => PortalLoopOutcome::Finished,
-        Err(outcome) => outcome,
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn run_wayland_portal_loop_inner(
-    tx: &mpsc::SyncSender<GlobalHotkeyAction>,
-    ctx: &egui::Context,
-    status: &Arc<Mutex<String>>,
-    stop: &Arc<AtomicBool>,
-    portal_session: &Arc<
-        Mutex<Option<(zbus::blocking::Connection, zbus::zvariant::OwnedObjectPath)>>,
-    >,
-) -> Result<(), PortalLoopOutcome> {
-    use std::collections::HashMap;
-    use zbus::blocking::{Connection, Proxy};
-    use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
-
-    const PORTAL_DEST: &str = "org.freedesktop.portal.Desktop";
-    const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
-    const PORTAL_IFACE: &str = "org.freedesktop.portal.GlobalShortcuts";
-    const REQ_IFACE: &str = "org.freedesktop.portal.Request";
-    const SHORTCUT_ID: &str = "toggle_overlay_pass";
-
-    let unavailable = |err: zbus::Error| PortalLoopOutcome::Unavailable(err.to_string());
-
-    let conn = Connection::session().map_err(unavailable)?;
-    let unique = conn
-        .unique_name()
-        .ok_or_else(|| PortalLoopOutcome::Unavailable("missing D-Bus unique name".into()))?
-        .as_str()
-        .trim_start_matches(':')
-        .replace('.', "_");
-    let pid = std::process::id();
-
-    let portal = Proxy::new(&conn, PORTAL_DEST, PORTAL_PATH, PORTAL_IFACE).map_err(unavailable)?;
-
-    let mut token_seq = 0_u32;
-    let mut next_token = |prefix: &str| {
-        token_seq += 1;
-        format!("truesight_{prefix}_{pid}_{token_seq}")
-    };
-
-    let wait_response = |req_token: &str,
-                         send_call: &dyn Fn(&str) -> zbus::Result<OwnedObjectPath>|
-     -> Result<(u32, HashMap<String, OwnedValue>), PortalLoopOutcome> {
-        let predicted_path =
-            format!("/org/freedesktop/portal/desktop/request/{unique}/{req_token}");
-        let req_proxy = Proxy::new(&conn, PORTAL_DEST, predicted_path.as_str(), REQ_IFACE)
-            .map_err(unavailable)?;
-        let mut sigs = req_proxy.receive_signal("Response").map_err(unavailable)?;
-        let actual_path = send_call(req_token).map_err(unavailable)?;
-        if actual_path.as_str() != predicted_path {
-            let actual_proxy = Proxy::new(&conn, PORTAL_DEST, actual_path.as_str(), REQ_IFACE)
-                .map_err(unavailable)?;
-            sigs = actual_proxy
-                .receive_signal("Response")
-                .map_err(unavailable)?;
-        }
-        let msg = sigs.next().ok_or_else(|| {
-            PortalLoopOutcome::Unavailable("portal Request::Response stream closed".into())
-        })?;
-        msg.body()
-            .deserialize::<(u32, HashMap<String, OwnedValue>)>()
-            .map_err(|e| PortalLoopOutcome::Unavailable(e.to_string()))
-    };
-
-    // 1. Create GlobalShortcuts session
-    let create_req_tok = next_token("req");
-    let sess_tok = next_token("sess");
-    let (create_code, create_res) = wait_response(&create_req_tok, &|tok| {
-        let mut opts: HashMap<&str, Value<'_>> = HashMap::new();
-        opts.insert("handle_token", Value::from(tok));
-        opts.insert("session_handle_token", Value::from(sess_tok.as_str()));
-        portal.call("CreateSession", &(opts,))
-    })?;
-    if create_code == 1 {
-        return Err(PortalLoopOutcome::Cancelled);
-    }
-    if create_code != 0 {
-        return Err(PortalLoopOutcome::Unavailable(format!(
-            "CreateSession portal response {create_code}"
-        )));
-    }
-
-    let session_handle_str = create_res
-        .get("session_handle")
-        .and_then(|v| {
-            v.downcast_ref::<zbus::zvariant::ObjectPath<'_>>()
-                .ok()
-                .map(|p| p.as_str().to_string())
-                .or_else(|| v.downcast_ref::<String>().ok())
-        })
-        .ok_or_else(|| {
-            PortalLoopOutcome::Unavailable(
-                "missing session_handle in CreateSession response".into(),
-            )
-        })?;
-    let session_path = OwnedObjectPath::try_from(session_handle_str)
-        .map_err(|e| PortalLoopOutcome::Unavailable(e.to_string()))?;
-
-    if let Ok(mut guard) = portal_session.lock() {
-        *guard = Some((conn.clone(), session_path.clone()));
-    }
-
-    // Subscribe to both Activated and ShortcutsChanged before List/Bind to avoid signal races.
-    let mut portal_sigs = portal.receive_all_signals().map_err(unavailable)?;
-
-    // 2. Check existing shortcuts so approved bindings do not re-prompt every launch.
-    let list_req_tok = next_token("list");
-    let mut shortcut_listed = false;
-    let mut assigned_trigger = None;
-    if let Ok((0, list_res)) = wait_response(&list_req_tok, &|tok| {
-        let mut opts: HashMap<&str, Value<'_>> = HashMap::new();
-        opts.insert("handle_token", Value::from(tok));
-        portal.call("ListShortcuts", &(session_path.as_ref(), opts))
-    }) && let Some(val) = list_res.get("shortcuts")
-    {
-        (shortcut_listed, assigned_trigger) = inspect_portal_shortcuts_value(val, SHORTCUT_ID);
-    }
-
-    // 3. Bind Ctrl+Shift+P using XDG shortcut spec (`CTRL+SHIFT+p`) if not already listed.
-    if !shortcut_listed {
-        let bind_req_tok = next_token("bind");
-        let (bind_code, bind_res) = wait_response(&bind_req_tok, &|tok| {
-            let mut shortcut_props: HashMap<&str, Value<'_>> = HashMap::new();
-            shortcut_props.insert(
-                "description",
-                Value::from("Toggle TrueSight Overlay Click-Through"),
-            );
-            shortcut_props.insert("preferred_trigger", Value::from(PORTAL_PREFERRED_TRIGGER));
-            let shortcuts = vec![(SHORTCUT_ID, shortcut_props)];
-            let mut opts: HashMap<&str, Value<'_>> = HashMap::new();
-            opts.insert("handle_token", Value::from(tok));
-            portal.call(
-                "BindShortcuts",
-                &(session_path.as_ref(), shortcuts, "", opts),
-            )
-        })?;
-        if bind_code == 1 {
-            return Err(PortalLoopOutcome::Cancelled);
-        }
-        if bind_code != 0 {
-            return Err(PortalLoopOutcome::Unavailable(format!(
-                "BindShortcuts portal response {bind_code}"
-            )));
-        }
-        if let Some(val) = bind_res.get("shortcuts") {
-            let (_, bind_trigger) = inspect_portal_shortcuts_value(val, SHORTCUT_ID);
-            assigned_trigger = bind_trigger;
-        }
-    }
-
-    // 4. Reflect only truly assigned triggers as Global; keep In-App status if unbound.
-    set_status(status, portal_status_label(assigned_trigger.as_deref()));
-    ctx.request_repaint();
-
-    for msg in &mut portal_sigs {
-        if stop.load(Ordering::Acquire) {
-            break;
-        }
-        let header = msg.header();
-        let Some(member) = header.member() else {
-            continue;
-        };
-        match member.as_str() {
-            "Activated" => {
-                if let Ok((sig_session, shortcut_id, _ts, _opts)) =
-                    msg.body()
-                        .deserialize::<(OwnedObjectPath, String, u64, HashMap<String, OwnedValue>)>(
-                        )
-                    && sig_session == session_path
-                    && shortcut_id == SHORTCUT_ID
-                {
-                    let _ = tx.try_send(GlobalHotkeyAction::ToggleOverlayPass);
-                    ctx.request_repaint();
-                }
+        if is_wayland {
+            let in_flight = self
+                .hotkey_listener
+                .as_ref()
+                .is_some_and(GlobalHotkeyListener::rebind_in_flight);
+            let cfg_lbl = if in_flight {
+                tr.configure_shortcut_busy
+            } else {
+                tr.configure_shortcut_btn
+            };
+            if ui
+                .add_enabled(
+                    !in_flight,
+                    egui::Button::new(RichText::new(cfg_lbl).size(9.5).strong().color(P_GEM))
+                        .fill(P_INDIGO_2)
+                        .stroke(Stroke::new(1.0_f32, P_GEM_DEEP)),
+                )
+                .on_hover_text(tr.configure_shortcut_hover)
+                .clicked()
+                && let Some(listener) = &mut self.hotkey_listener
+            {
+                let _ = listener.rebind_wayland_portal(ctx.clone(), self.session.pass_hotkey);
             }
-            "ShortcutsChanged" => {
-                if let Ok((sig_session, shortcuts)) = msg
-                    .body()
-                    .deserialize::<(OwnedObjectPath, Vec<(String, HashMap<String, OwnedValue>)>)>()
-                    && sig_session == session_path
-                {
-                    let next_trigger = extract_assigned_trigger_from_pairs(&shortcuts, SHORTCUT_ID);
-                    set_status(status, portal_status_label(next_trigger.as_deref()));
-                    ctx.request_repaint();
-                }
-            }
-            _ => {}
         }
     }
-
-    Ok(())
 }

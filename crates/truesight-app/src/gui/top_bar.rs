@@ -259,10 +259,11 @@ impl TrueSightGuiApp {
 
     fn render_pass_unlock_button(&mut self, ui: &mut egui::Ui, compact: bool) -> Rect {
         let tr = super::i18n::strings(self.session.ui_language);
+        let hk_label = self.session.pass_hotkey.format_label();
         let label = if compact {
-            tr.top_bar_pass_unlock_compact
+            tr.top_bar_pass_unlock_compact.to_string()
         } else {
-            tr.top_bar_pass_unlock_btn
+            super::i18n::with_hotkey_label(tr.top_bar_pass_unlock_btn, &hk_label)
         };
         let resp = ui
             .add(
@@ -276,7 +277,10 @@ impl TrueSightGuiApp {
                 .stroke(Stroke::new(1.0_f32, P_NEUTRAL))
                 .min_size(vec2(0.0, TOP_BTN_H)),
             )
-            .on_hover_text(tr.top_bar_pass_unlock_hover);
+            .on_hover_text(super::i18n::with_hotkey_label(
+                tr.top_bar_pass_unlock_hover,
+                &hk_label,
+            ));
         if resp.clicked() {
             self.set_overlay_click_through_live(ui.ctx(), false);
         }
@@ -405,8 +409,9 @@ impl TrueSightGuiApp {
         }
 
         let tr = super::i18n::strings(self.session.ui_language);
-        let mut close_window =
-            !self.account_editor_open && ctx.input(|i| i.key_pressed(egui::Key::Escape));
+        let mut close_window = !self.account_editor_open
+            && !self.hotkey_recording
+            && ctx.input(|i| i.key_pressed(egui::Key::Escape));
         let mut demo_btn_rect = None;
         let mut lang_btn_rects: Option<[Rect; 3]> = None;
 
@@ -514,7 +519,7 @@ impl TrueSightGuiApp {
                             )
                             .wrap(),
                         );
-                        ui.add_space(2.0);
+                        ui.add_space(1.0);
                         ui.horizontal(|ui| {
                             let sync_label = if self.session.sync_in_flight {
                                 tr.syncing_btn
@@ -560,7 +565,7 @@ impl TrueSightGuiApp {
                                     .unwrap_or_default();
                             }
                         });
-                        ui.add_space(4.0);
+                        ui.add_space(1.0);
                         let now = truesight_adapters::sync::LocalCacheManager::now_unix();
                         let days_opt = self.session.stratz_token_days_remaining_at(now);
                         let expired = self.session.is_stratz_token_expired_at(now);
@@ -664,11 +669,17 @@ impl TrueSightGuiApp {
                     } else {
                         tr.click_through_off
                     };
+                    let hotkey_label = self.session.pass_hotkey.format_label();
                     let hotkey_info = self
                         .hotkey_listener
                         .as_ref()
                         .map(|h| h.status_label())
-                        .unwrap_or_else(|| super::hotkey::PASS_HOTKEY_LABEL.to_string());
+                        .unwrap_or_else(|| format!("{hotkey_label} (In-App)"));
+                    let click_hover = format!(
+                        "{}\n{}",
+                        super::i18n::with_hotkey_label(tr.click_through_hover, &hotkey_label),
+                        hotkey_info
+                    );
                     if ui
                         .add(
                             egui::Button::new(RichText::new(ct_lbl).size(10.0).color(
@@ -688,13 +699,15 @@ impl TrueSightGuiApp {
                                 },
                             )),
                         )
-                        .on_hover_text(format!("{}\n{}", tr.click_through_hover, hotkey_info))
+                        .on_hover_text(click_hover)
                         .clicked()
                     {
                         let next = !self.session.overlay_geometry.click_through;
                         self.set_overlay_click_through_live(ui.ctx(), next);
                     }
                 });
+
+                self.render_options_hotkey_card(ui, ctx, tr);
 
                 ui.horizontal(|ui| {
                     let mut opacity_pct = (self.session.overlay_opacity * 100.0).round() as i32;
@@ -774,6 +787,7 @@ impl TrueSightGuiApp {
 
         if close_window {
             self.options_open = false;
+            self.hotkey_recording = false;
         }
         let win_rect = resp.as_ref().map(|r| r.response.rect);
         if let Some(r) = &resp {

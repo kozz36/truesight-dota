@@ -1,6 +1,8 @@
 mod build_bar;
 mod dota_watch;
 mod hotkey;
+#[cfg(any(target_os = "linux", test))]
+mod hotkey_portal;
 mod i18n;
 mod matrix_card;
 mod onboarding;
@@ -126,6 +128,7 @@ pub struct TrueSightGuiApp {
     #[cfg(target_os = "linux")]
     wayland_outputs_unavailable: bool,
     hotkey_listener: Option<hotkey::GlobalHotkeyListener>,
+    pub(super) hotkey_recording: bool,
     dota_watcher: Option<dota_watch::DotaProcessWatcher>,
 }
 
@@ -218,6 +221,7 @@ impl TrueSightGuiApp {
             #[cfg(target_os = "linux")]
             wayland_outputs_unavailable: false,
             hotkey_listener: None,
+            hotkey_recording: false,
             dota_watcher: None,
         }
     }
@@ -231,25 +235,13 @@ impl TrueSightGuiApp {
                         key,
                         pressed: true,
                         repeat: false,
-                        ..
-                    } if *key == target
-                )
-            })
-        })
-    }
-
-    fn is_pass_shortcut_pressed(ctx: &egui::Context) -> bool {
-        ctx.input(|i| {
-            i.events.iter().any(|ev| {
-                matches!(
-                    ev,
-                    egui::Event::Key {
-                        key: egui::Key::P,
-                        pressed: true,
-                        repeat: false,
                         modifiers,
                         ..
-                    } if modifiers.ctrl && modifiers.shift && !modifiers.alt
+                    } if *key == target
+                        && !modifiers.ctrl
+                        && !modifiers.alt
+                        && !modifiers.shift
+                        && !modifiers.command
                 )
             })
         })
@@ -281,7 +273,10 @@ impl TrueSightGuiApp {
         ctx.request_repaint_of(overlay_id);
         let tr = i18n::strings(self.session.ui_language);
         self.status_banner = if enabled {
-            tr.status_pass_enabled.into()
+            i18n::with_hotkey_label(
+                tr.status_pass_enabled,
+                &self.session.pass_hotkey.format_label(),
+            )
         } else {
             tr.status_pass_disabled.into()
         };
@@ -450,34 +445,7 @@ impl TrueSightGuiApp {
         if let Some(notice) = self.session.last_sync_notice.take() {
             self.status_banner = notice;
         }
-        let mut pass_toggled_this_frame = false;
-        if let Some(actions) = self
-            .hotkey_listener
-            .as_ref()
-            .map(hotkey::GlobalHotkeyListener::poll_actions)
-        {
-            for action in actions {
-                if action == hotkey::GlobalHotkeyAction::ToggleOverlayPass
-                    && self.session.is_overlay_visible()
-                {
-                    let next = !self.session.overlay_geometry.click_through;
-                    self.set_overlay_click_through_live(ctx, next);
-                    pass_toggled_this_frame = true;
-                }
-            }
-        }
-        let f8_root = Self::is_non_repeating_key_pressed(ctx, egui::Key::F8);
-        if f8_root {
-            self.session.toggle_overlay_shortcut();
-        }
-        if !pass_toggled_this_frame
-            && self.session.is_overlay_visible()
-            && Self::is_pass_shortcut_pressed(ctx)
-        {
-            let next = !self.session.overlay_geometry.click_through;
-            self.set_overlay_click_through_live(ctx, next);
-            pass_toggled_this_frame = true;
-        }
+        let (f8_root, pass_toggled_this_frame) = self.handle_pass_hotkey_frame(ctx);
 
         let (analysis, _) = self.session.evaluate();
         let mut rects = LayoutRects {
@@ -886,7 +854,10 @@ pub fn run_gui(
             {
                 app.overlay_backend = detected_backend;
             }
-            app.hotkey_listener = Some(hotkey::GlobalHotkeyListener::start(cc.egui_ctx.clone()));
+            app.hotkey_listener = Some(hotkey::GlobalHotkeyListener::start(
+                cc.egui_ctx.clone(),
+                app.session.pass_hotkey,
+            ));
             app.dota_watcher = Some(dota_watch::DotaProcessWatcher::start(cc.egui_ctx.clone()));
             Ok(Box::new(app))
         }),

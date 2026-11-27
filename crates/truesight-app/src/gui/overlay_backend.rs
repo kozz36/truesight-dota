@@ -843,7 +843,10 @@ impl super::TrueSightGuiApp {
                 self.session.dismiss_overlay();
                 ctx.request_repaint();
             }
-            if !pass_toggled_this_frame && Self::is_pass_shortcut_pressed(vctx) {
+            if !pass_toggled_this_frame
+                && !self.hotkey_recording
+                && super::hotkey::is_pass_shortcut_pressed(vctx, self.session.pass_hotkey)
+            {
                 let next = !self.session.overlay_geometry.click_through;
                 self.set_overlay_click_through_live(ctx, next);
             }
