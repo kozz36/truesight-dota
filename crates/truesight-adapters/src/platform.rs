@@ -244,12 +244,11 @@ pub(crate) fn query_windows_steam_path_at(reg_key: &str) -> Option<PathBuf> {
     let mut ps_cmd = Command::new(&ps_exe);
     configure_background_command(&mut ps_cmd);
     let ps_args = build_windows_steam_path_powershell_args(reg_key);
-    if let Ok(out) = ps_cmd.args(&ps_args).output() {
-        if out.status.success() {
-            if let Some(path) = decode_windows_steam_path_utf8(&out.stdout) {
-                return Some(path);
-            }
-        }
+    if let Ok(out) = ps_cmd.args(&ps_args).output()
+        && out.status.success()
+        && let Some(path) = decode_windows_steam_path_utf8(&out.stdout)
+    {
+        return Some(path);
     }
 
     let reg_exe = crate::vision::resolve_windows_system32_exe(
