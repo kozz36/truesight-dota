@@ -5734,6 +5734,15 @@ fn build_bar_and_overlay_clear_upg_ready_after_prerequisite_is_upgraded() {
     session.item_repo = SeededItemMetaRepository {
         custom_catalog: vec![
             ItemCatalogEntry {
+                id: ItemId(127),
+                slug: "blade_mail".into(),
+                display_name: "Blade Mail".into(),
+                cost: 2100,
+                components: vec![],
+                is_recipe: false,
+                is_consumable_drop: false,
+            },
+            ItemCatalogEntry {
                 id: ItemId(1),
                 slug: "blink".into(),
                 display_name: "Blink Dagger".into(),
@@ -5777,17 +5786,24 @@ fn build_bar_and_overlay_clear_upg_ready_after_prerequisite_is_upgraded() {
             vec![
                 HeroItemStat {
                     item_id: ItemId(1),
-                    phase: ItemPhase::Early,
-                    avg_time_mins: 11.0,
+                    phase: ItemPhase::Core,
+                    avg_time_mins: 12.0,
                     match_count: 2500,
                     win_count: 1375,
                 },
                 HeroItemStat {
+                    item_id: ItemId(127),
+                    phase: ItemPhase::Core,
+                    avg_time_mins: 16.0,
+                    match_count: 2200,
+                    win_count: 1210,
+                },
+                HeroItemStat {
                     item_id: ItemId(603),
-                    phase: ItemPhase::Early,
-                    avg_time_mins: 13.0,
-                    match_count: 900,
-                    win_count: 500,
+                    phase: ItemPhase::Core,
+                    avg_time_mins: 24.0,
+                    match_count: 1200,
+                    win_count: 660,
                 },
                 HeroItemStat {
                     item_id: ItemId(600),
@@ -5807,9 +5823,10 @@ fn build_bar_and_overlay_clear_upg_ready_after_prerequisite_is_upgraded() {
         )],
         ..Default::default()
     };
-    // Hero upgraded Blink Dagger (1) into Overwhelming Blink (600); Swift Blink (603) stays attached
-    // as a sibling direct-upgrade variant beneath Blink Dagger.
-    session.owned_items = vec![ItemId(600)];
+    // Hero upgraded Blink Dagger (1) into Overwhelming Blink (600) while owning Blade Mail (127);
+    // Swift Blink (603) attaches as a sibling direct-upgrade variant beneath Blink Dagger.
+    session.owned_items = vec![ItemId(127), ItemId(600)];
+    session.game_time_secs = 2100;
     session.toggle_post_draft_build_view();
 
     let build = session.compute_recommended_build().unwrap();
@@ -5821,6 +5838,11 @@ fn build_bar_and_overlay_clear_upg_ready_after_prerequisite_is_upgraded() {
     assert!(
         blink_step.owned,
         "Blink Dagger (1) must be marked satisfied when Overwhelming Blink (600) is owned"
+    );
+    assert!(
+        blink_step.variants.iter().any(|v| v.item_id == ItemId(603)),
+        "Swift Blink (603) must attach under Blink Dagger to exercise UPG READY suppression: {:?}",
+        blink_step.variants
     );
     assert_eq!(
         build.next_unowned_index.map(|i| build.steps[i].item_id),
@@ -5853,6 +5875,10 @@ fn build_bar_and_overlay_clear_upg_ready_after_prerequisite_is_upgraded() {
     assert!(
         desk_texts.iter().any(|t| t == "OK"),
         "desktop build bar must mark upgraded Blink Dagger OK: {desk_texts:?}"
+    );
+    assert!(
+        desk_texts.iter().any(|t| t == "UPG · Swift Blink"),
+        "Swift Blink chip must render informatively as UPG · Swift Blink: {desk_texts:?}"
     );
     assert!(
         desk_texts.iter().all(|t| !t.starts_with("UPG READY")),

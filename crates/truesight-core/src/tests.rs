@@ -2532,3 +2532,192 @@ fn recommend_item_build_skips_sold_or_skipped_earlier_phase_items_for_next_point
         late_done.steps
     );
 }
+
+#[test]
+fn recommend_item_build_keeps_manta_eligible_after_out_of_order_abyssal_and_supports_early_aghs_brown_boots_turbo()
+ {
+    use crate::domain::{Bracket, ItemId, ItemPhase};
+    use crate::math::{is_item_owned_or_upgraded, recommend_item_build};
+
+    let enemies = [None; 5];
+
+    // 1. Out-of-order Anti-Mage: Yasha (170) + Abyssal Blade (208, Late) bought at 26:00 (1560s).
+    // Skull Basher (143) must be satisfied while Manta Style (147) remains NEXT instead of Skadi (160).
+    let am_repo = MockItemRepo {
+        catalog: vec![
+            catalog_entry(63, "Power Treads", 1400, &[29, 25, 17], false, false),
+            catalog_entry(36, "Magic Wand", 450, &[], false, false),
+            catalog_entry(145, "Battle Fury", 4100, &[65, 69], false, false),
+            catalog_entry(170, "Yasha", 2100, &[], false, false),
+            catalog_entry(147, "Manta Style", 4650, &[170, 24], false, false),
+            catalog_entry(143, "Skull Basher", 2875, &[21], false, false),
+            catalog_entry(160, "Eye of Skadi", 5300, &[24], false, false),
+            catalog_entry(208, "Abyssal Blade", 6150, &[143, 236], false, false),
+        ],
+        stats: vec![
+            item_stat(63, ItemPhase::Early, 6.5, 1400, 740),
+            item_stat(36, ItemPhase::Early, 5.5, 950, 500),
+            item_stat(145, ItemPhase::Core, 14.5, 1350, 735),
+            item_stat(147, ItemPhase::Core, 21.5, 1300, 725),
+            item_stat(143, ItemPhase::Core, 25.0, 680, 380),
+            item_stat(160, ItemPhase::Late, 28.5, 780, 445),
+            item_stat(208, ItemPhase::Late, 37.0, 620, 365),
+        ],
+    };
+    let am_owned = [ItemId(63), ItemId(145), ItemId(170), ItemId(208)];
+    let am_build = recommend_item_build(
+        &am_repo,
+        HeroId(1),
+        Role::Carry,
+        Bracket::Legend,
+        &enemies,
+        &am_owned,
+        1560,
+    )
+    .expect("Anti-Mage out-of-order build should succeed");
+    assert!(is_item_owned_or_upgraded(&am_repo, ItemId(143), &am_owned));
+    let manta = am_build
+        .steps
+        .iter()
+        .find(|s| s.item_id == ItemId(147))
+        .expect("Manta Style step must be present");
+    assert_eq!(manta.owned_components, 1);
+    assert_eq!(
+        am_build
+            .next_unowned_index
+            .map(|i| am_build.steps[i].item_id),
+        Some(ItemId(147)),
+        "Manta Style (147) with Yasha in inventory must remain NEXT after early Abyssal Blade (208): {:?}",
+        am_build.steps
+    );
+
+    // 2. Witch Doctor early Aghanim's Scepter (108, sole Late item) at 22:00 (1320s):
+    // NEXT must stay on Glimmer Cape (254) instead of returning None.
+    let wd_repo = MockItemRepo {
+        catalog: vec![
+            catalog_entry(214, "Tranquil Boots", 900, &[29], false, false),
+            catalog_entry(36, "Magic Wand", 450, &[], false, false),
+            catalog_entry(254, "Glimmer Cape", 2150, &[], false, false),
+            catalog_entry(102, "Force Staff", 2200, &[], false, false),
+            catalog_entry(108, "Aghanim's Scepter", 4200, &[], false, false),
+        ],
+        stats: vec![
+            item_stat(214, ItemPhase::Early, 7.5, 1120, 590),
+            item_stat(36, ItemPhase::Early, 6.5, 1050, 550),
+            item_stat(254, ItemPhase::Core, 17.5, 1020, 555),
+            item_stat(102, ItemPhase::Core, 22.0, 940, 510),
+            item_stat(108, ItemPhase::Late, 31.0, 540, 305),
+        ],
+    };
+    let wd_build = recommend_item_build(
+        &wd_repo,
+        HeroId(30),
+        Role::HardSupport,
+        Bracket::Legend,
+        &enemies,
+        &[ItemId(214), ItemId(108)],
+        1320,
+    )
+    .expect("Witch Doctor early Aghs build should succeed");
+    assert_eq!(
+        wd_build
+            .next_unowned_index
+            .map(|i| wd_build.steps[i].item_id),
+        Some(ItemId(254)),
+        "sole Late item (Aghs) bought early must not hide NEXT from pending Core Glimmer Cape: {:?}",
+        wd_build.steps
+    );
+
+    // 3. Brown Boots (29) alone in mid-game must not pin NEXT to Phase Boots when skipping toward Boots of Travel,
+    // whereas owning a specific Phase component (Blades of Attack, id 2) keeps Phase Boots active as NEXT.
+    let boots_repo = MockItemRepo {
+        catalog: vec![
+            catalog_entry(29, "Boots of Speed", 500, &[], false, false),
+            catalog_entry(2, "Blades of Attack", 450, &[], false, false),
+            catalog_entry(4, "Chainmail", 550, &[], false, false),
+            catalog_entry(50, "Phase Boots", 1450, &[29, 4, 2], false, false),
+            catalog_entry(1, "Blink Dagger", 2250, &[], false, false),
+            catalog_entry(48, "Boots of Travel", 2500, &[29], false, false),
+        ],
+        stats: vec![
+            item_stat(50, ItemPhase::Early, 7.0, 1800, 960),
+            item_stat(1, ItemPhase::Core, 14.0, 1700, 920),
+            item_stat(48, ItemPhase::Late, 25.0, 900, 510),
+        ],
+    };
+    let brown_boots_skip = recommend_item_build(
+        &boots_repo,
+        HeroId(2),
+        Role::Offlane,
+        Bracket::Legend,
+        &enemies,
+        &[ItemId(29), ItemId(1)],
+        1440,
+    )
+    .expect("brown boots skip build should succeed");
+    assert_eq!(
+        brown_boots_skip
+            .next_unowned_index
+            .map(|i| brown_boots_skip.steps[i].item_id),
+        Some(ItemId(48)),
+        "generic Boots of Speed (29) past Early window with Core owned must advance NEXT toward Boots of Travel: {:?}",
+        brown_boots_skip.steps
+    );
+    let specific_comp_keep = recommend_item_build(
+        &boots_repo,
+        HeroId(2),
+        Role::Offlane,
+        Bracket::Legend,
+        &enemies,
+        &[ItemId(29), ItemId(2), ItemId(1)],
+        1440,
+    )
+    .expect("specific boot component build should succeed");
+    assert_eq!(
+        specific_comp_keep
+            .next_unowned_index
+            .map(|i| specific_comp_keep.steps[i].item_id),
+        Some(ItemId(50)),
+        "holding specific Phase Boots component (Blades of Attack 2) must keep Phase Boots as NEXT: {:?}",
+        specific_comp_keep.steps
+    );
+
+    // 4. Turbo-paced 5-slotted inventory at 15:00 (900s): owning BKB (Core) + AC (Late) + Heart (Late)
+    // skips sold Magic Wand (Early) & Echo Sabre (Core) purely via inventory saturation.
+    let turbo_repo = MockItemRepo {
+        catalog: vec![
+            catalog_entry(36, "Magic Wand", 450, &[], false, false),
+            catalog_entry(252, "Echo Sabre", 2700, &[21, 3, 57], false, false),
+            catalog_entry(116, "Black King Bar", 4050, &[], false, false),
+            catalog_entry(112, "Assault Cuirass", 5125, &[], false, false),
+            catalog_entry(114, "Heart of Tarrasque", 5100, &[], false, false),
+            catalog_entry(939, "Harpoon", 4700, &[252, 236], false, false),
+        ],
+        stats: vec![
+            item_stat(36, ItemPhase::Early, 4.0, 2000, 1080),
+            item_stat(252, ItemPhase::Core, 14.0, 1800, 970),
+            item_stat(116, ItemPhase::Core, 22.0, 1900, 1040),
+            item_stat(112, ItemPhase::Late, 32.0, 1200, 680),
+            item_stat(114, ItemPhase::Late, 35.0, 1100, 620),
+            item_stat(939, ItemPhase::Late, 38.0, 1000, 560),
+        ],
+    };
+    let turbo_build = recommend_item_build(
+        &turbo_repo,
+        HeroId(135),
+        Role::Offlane,
+        Bracket::Legend,
+        &enemies,
+        &[ItemId(116), ItemId(112), ItemId(114)],
+        900,
+    )
+    .expect("Turbo-paced build should succeed");
+    assert_eq!(
+        turbo_build
+            .next_unowned_index
+            .map(|i| turbo_build.steps[i].item_id),
+        Some(ItemId(939)),
+        "Turbo late inventory (2+ Late items at 15:00) must skip sold Wand & Echo Sabre and point NEXT to Harpoon: {:?}",
+        turbo_build.steps
+    );
+}

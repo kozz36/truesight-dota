@@ -592,7 +592,5 @@ fn default_role_for_slot(slot: usize) -> Role {
     Role::ALL.get(slot).copied().unwrap_or(Role::Carry)
 }
 
-pub use crate::item_math::{
-    ITEM_VARIANT_SCORE_EPSILON, compute_next_unowned_index, is_item_owned_or_upgraded,
-    recommend_item_build,
-};
+pub use crate::item_math::{ITEM_VARIANT_SCORE_EPSILON, recommend_item_build};
+pub use crate::item_ownership::{compute_next_unowned_index, is_item_owned_or_upgraded};

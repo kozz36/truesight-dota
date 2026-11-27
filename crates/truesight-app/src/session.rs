@@ -1616,7 +1616,8 @@ impl AppSession {
             step.variants.insert(var_pos, old_primary);
         }
 
-        build.next_unowned_index = compute_next_unowned_index(&build.steps);
+        build.next_unowned_index =
+            compute_next_unowned_index(&build.steps, owned_items, self.game_time_secs);
         Some(build)
     }
 

@@ -8628,3 +8628,75 @@ fn dota_process_parsers_detect_exact_linux_comm_and_windows_tasklist_csv() {
     ));
     assert!(!parse_tasklist_has_dota2(""));
 }
+
+#[test]
+fn embedded_antimage_and_witch_doctor_preserve_next_after_out_of_order_late_buys() {
+    use crate::item_repo::SeededItemMetaRepository;
+    use truesight_core::domain::{Bracket, HeroId, ItemId, Role};
+    use truesight_core::math::{is_item_owned_or_upgraded, recommend_item_build};
+
+    let repo = SeededItemMetaRepository::new();
+    let enemies = [None; 5];
+
+    // 1. Embedded Anti-Mage Carry: Treads (63) + BF (145) + Yasha (170) + Abyssal Blade (208) at 26:00 (1560s).
+    let am_owned = [ItemId(63), ItemId(145), ItemId(170), ItemId(208)];
+    let am_build = recommend_item_build(
+        &repo,
+        HeroId(1),
+        Role::Carry,
+        Bracket::Legend,
+        &enemies,
+        &am_owned,
+        1560,
+    )
+    .expect("embedded Anti-Mage build should succeed");
+    assert!(
+        is_item_owned_or_upgraded(&repo, ItemId(143), &am_owned),
+        "Skull Basher (143) must be satisfied when Abyssal Blade (208) is owned"
+    );
+    assert_eq!(
+        am_build
+            .next_unowned_index
+            .map(|i| am_build.steps[i].item_id),
+        Some(ItemId(147)),
+        "embedded Anti-Mage must keep Manta Style (147) as NEXT with Yasha + Abyssal at 26:00: {:?}",
+        am_build.steps
+    );
+
+    // 2. Embedded Witch Doctor Hard Support: Arcane Boots (180) + early Aghanim's Scepter (108) at 22:00 (1320s).
+    let wd_build = recommend_item_build(
+        &repo,
+        HeroId(30),
+        Role::HardSupport,
+        Bracket::Legend,
+        &enemies,
+        &[ItemId(180), ItemId(108)],
+        1320,
+    )
+    .expect("embedded Witch Doctor build should succeed");
+    assert_eq!(
+        wd_build
+            .next_unowned_index
+            .map(|i| wd_build.steps[i].item_id),
+        Some(ItemId(1)),
+        "embedded Witch Doctor with early Aghanim's Scepter must keep NEXT on Blink Dagger (1): {:?}",
+        wd_build.steps
+    );
+
+    // Even before finishing Arcane Boots, rushing Aghanim's Scepter must keep NEXT visible.
+    let wd_scepter_only = recommend_item_build(
+        &repo,
+        HeroId(30),
+        Role::HardSupport,
+        Bracket::Legend,
+        &enemies,
+        &[ItemId(108)],
+        1320,
+    )
+    .expect("embedded Witch Doctor rush Aghs build should succeed");
+    assert!(
+        wd_scepter_only.next_unowned_index.is_some(),
+        "rushing sole Late Aghanim's Scepter must never hide NEXT: {:?}",
+        wd_scepter_only.steps
+    );
+}
