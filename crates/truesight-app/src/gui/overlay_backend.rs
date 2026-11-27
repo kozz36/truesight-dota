@@ -597,6 +597,7 @@ impl super::TrueSightGuiApp {
                     }
                 }
                 LayerEvent::MonitorsUpdated(outputs) => {
+                    self.wayland_outputs_unavailable = outputs.is_empty();
                     self.wayland_logical_outputs = outputs;
                 }
                 LayerEvent::PointerMoved { x, y } => {
@@ -626,7 +627,8 @@ impl super::TrueSightGuiApp {
                     });
                 }
                 LayerEvent::Closed => {
-                    self.session.dismiss_overlay();
+                    // Compositor teardown (e.g. output unplugged) only drops the surface; keep
+                    // auto-overlay eligible so the next repaint recovers on an available output.
                     self.reset_wayland_layer_surface_state();
                     main_ctx.request_repaint();
                 }
@@ -640,6 +642,9 @@ impl super::TrueSightGuiApp {
                 }
                 self.reset_wayland_layer_surface_state();
             }
+            return;
+        }
+        if self.wayland_outputs_unavailable {
             return;
         }
 

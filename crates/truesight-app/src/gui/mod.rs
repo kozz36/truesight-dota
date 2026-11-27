@@ -123,6 +123,8 @@ pub struct TrueSightGuiApp {
     ),
     #[cfg(target_os = "linux")]
     wayland_logical_outputs: Vec<overlay_backend::LogicalOutputBounds>,
+    #[cfg(target_os = "linux")]
+    wayland_outputs_unavailable: bool,
     hotkey_listener: Option<hotkey::GlobalHotkeyListener>,
     dota_watcher: Option<dota_watch::DotaProcessWatcher>,
 }
@@ -213,6 +215,8 @@ impl TrueSightGuiApp {
             wayland_last_hit_regions: (None, None),
             #[cfg(target_os = "linux")]
             wayland_logical_outputs: Vec::new(),
+            #[cfg(target_os = "linux")]
+            wayland_outputs_unavailable: false,
             hotkey_listener: None,
             dota_watcher: None,
         }

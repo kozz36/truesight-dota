@@ -1160,3 +1160,93 @@ fn wayland_overlay_glass_surface_renders_lower_default_alpha_and_responds_to_opa
         "lowering overlay_opacity to 0.42 must visibly reduce glass alpha ({lower_alpha} vs {default_alpha})"
     );
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn wayland_compositor_closed_keeps_auto_overlay_eligible_and_recovers_on_available_output() {
+    use super::overlay_backend::{LayerCommand, LayerEvent};
+    use super::wayland_layer::WaylandLayerHandle;
+
+    let mut session = AppSession::new().unwrap();
+    session.overlay_mode = false;
+    session.auto_overlay_with_dota = true;
+    session.set_dota_process_running(true);
+
+    let (cmd_tx, cmd_rx) =
+        smithay_client_toolkit::reexports::calloop::channel::channel::<LayerCommand>();
+    let (event_tx, event_rx) = std::sync::mpsc::channel::<LayerEvent>();
+
+    let mut app = TrueSightGuiApp::new(session, None, None);
+    app.overlay_backend = OverlayBackendKind::WaylandLayerShell;
+    app.wayland_layer = Some(WaylandLayerHandle::from_test_channels(cmd_tx, event_rx));
+
+    let main_ctx = egui::Context::default();
+    let drain_show_count = || -> usize {
+        let mut shows = 0;
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            if matches!(cmd, LayerCommand::Show { .. }) {
+                shows += 1;
+            }
+        }
+        shows
+    };
+
+    // Initial auto-open emits Show while Dota 2 is running.
+    app.step_wayland_layer_overlay(&main_ctx);
+    assert_eq!(drain_show_count(), 1, "initial step must show auto-overlay");
+    assert!(app.session.is_overlay_visible());
+
+    // Compositor teardown (`LayerEvent::Closed`) must reset layer surface state WITHOUT
+    // setting `auto_overlay_dismissed`, allowing immediate recovery on an available output.
+    event_tx.send(LayerEvent::Closed).unwrap();
+    app.step_wayland_layer_overlay(&main_ctx);
+    assert!(
+        app.session.is_overlay_visible(),
+        "compositor-driven Closed must keep auto-overlay eligible while Dota is running"
+    );
+    assert!(
+        !app.session.auto_overlay_dismissed,
+        "compositor Closed must not set session-long user dismissal"
+    );
+    assert_eq!(
+        drain_show_count(),
+        1,
+        "overlay must recover and emit Show after compositor Closed while outputs exist"
+    );
+
+    // When all outputs temporarily disappear on Wayland, wait until an output returns before showing.
+    event_tx
+        .send(LayerEvent::MonitorsUpdated(Vec::new()))
+        .unwrap();
+    event_tx.send(LayerEvent::Closed).unwrap();
+    app.step_wayland_layer_overlay(&main_ctx);
+    assert!(app.session.is_overlay_visible());
+    assert_eq!(
+        drain_show_count(),
+        0,
+        "must not respawn layer surface while compositor reports zero outputs"
+    );
+
+    event_tx
+        .send(LayerEvent::MonitorsUpdated(vec![LogicalOutputBounds {
+            id: 1,
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        }]))
+        .unwrap();
+    app.step_wayland_layer_overlay(&main_ctx);
+    assert_eq!(
+        drain_show_count(),
+        1,
+        "auto-overlay must recover as soon as an output becomes available again"
+    );
+
+    // Explicit user dismissal (`X` / `F8`) still suppresses auto-reopen until Dota exits.
+    app.session.dismiss_overlay();
+    app.step_wayland_layer_overlay(&main_ctx);
+    assert!(!app.session.is_overlay_visible());
+    assert!(app.session.auto_overlay_dismissed);
+    assert_eq!(drain_show_count(), 0);
+}

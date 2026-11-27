@@ -5559,3 +5559,42 @@ fn auto_overlay_lifecycle_follows_dota_while_manual_pin_stays_always_on() {
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+#[test]
+fn auto_overlay_dota_exit_persists_cleared_click_through_to_disk() {
+    use crate::session::load_ui_config_from_dir;
+
+    let tmp_dir = std::env::temp_dir().join(format!("ts_auto_ov_pass_exit_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    let cfg_path = tmp_dir.join("config.toml");
+    let mgr =
+        truesight_adapters::sync::LocalCacheManager::with_optional_account(tmp_dir.clone(), None);
+    let mut session = AppSession::with_cache_and_config(mgr, Some(cfg_path)).unwrap();
+    session.overlay_mode = false;
+    session.auto_overlay_with_dota = true;
+
+    assert!(session.set_dota_process_running(true));
+    assert!(session.is_overlay_visible());
+
+    // User turns click-through ON during the Dota match (persisted to ui_config.toml).
+    session.set_overlay_click_through(true);
+    assert!(
+        load_ui_config_from_dir(&tmp_dir)
+            .overlay_geometry
+            .click_through
+    );
+
+    // Dota exits: auto-overlay hides, clears PASS, and persists cleared click-through so a restart
+    // before the next UI write does not resurrect stale PASS=ON.
+    assert!(session.set_dota_process_running(false));
+    assert!(!session.is_overlay_visible());
+    let reloaded = load_ui_config_from_dir(&tmp_dir);
+    assert!(
+        !reloaded.overlay_geometry.click_through && !reloaded.build_overlay_geometry.click_through,
+        "clearing PASS when Dota exits must persist click_through=false to ui_config.toml"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}

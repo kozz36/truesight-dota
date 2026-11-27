@@ -2040,6 +2040,16 @@ impl AppSession {
         let _ = self.persist_ui_config();
     }
 
+    fn clear_overlay_click_through_and_persist(&mut self) {
+        let had_click_through =
+            self.overlay_geometry.click_through || self.build_overlay_geometry.click_through;
+        self.overlay_geometry.click_through = false;
+        self.build_overlay_geometry.click_through = false;
+        if had_click_through {
+            let _ = self.persist_ui_config();
+        }
+    }
+
     /// Updates Dota 2 process liveness and returns `true` when effective overlay visibility changes.
     pub fn set_dota_process_running(&mut self, running: bool) -> bool {
         let was_visible = self.is_overlay_visible();
@@ -2049,8 +2059,7 @@ impl AppSession {
         }
         let now_visible = self.is_overlay_visible();
         if was_visible && !now_visible {
-            self.overlay_geometry.click_through = false;
-            self.build_overlay_geometry.click_through = false;
+            self.clear_overlay_click_through_and_persist();
         }
         was_visible != now_visible
     }
@@ -2063,8 +2072,7 @@ impl AppSession {
         if self.overlay_mode {
             self.set_overlay_mode(false);
         } else if !self.is_overlay_visible() {
-            self.overlay_geometry.click_through = false;
-            self.build_overlay_geometry.click_through = false;
+            self.clear_overlay_click_through_and_persist();
         }
     }
 
