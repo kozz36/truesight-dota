@@ -123,7 +123,7 @@ impl ItemMetaRepository for SeededItemMetaRepository {
         bracket: Bracket,
     ) -> Result<Vec<HeroItemStat>, PortError> {
         let scale = bracket_timing_scale(bracket);
-        if let Some((_, matched_role, matched_bracket, stats)) = self
+        if let Some((_, _, matched_bracket, stats)) = self
             .custom_hero_stats
             .iter()
             .find(|(hid, r, b, _)| *hid == hero_id && *r == Some(role) && *b == Some(bracket))
@@ -164,96 +164,76 @@ impl ItemMetaRepository for SeededItemMetaRepository {
                     stat
                 })
                 .collect();
-            if matched_role.is_some() && count_non_boot_late_items(&out) < 2 {
-                self.backfill_sparse_role_late_items(&mut out, hero_id, role, bracket, scale);
-            }
             append_counter_situational_candidates(&mut out, role, scale);
             return Ok(out);
         }
 
         Ok(build_embedded_hero_stats(hero_id, role, bracket))
     }
-}
 
-impl SeededItemMetaRepository {
-    /// Enriches a sparse role-specific item build (`< 2` non-boot `Late` items) with `Late`
-    /// non-boot candidates from unroled stats (or embedded hero builds), scaling their sample
-    /// weights below the role's existing progression items so role `Early`/`Core`/`Late`
-    /// priorities remain dominant.
-    fn backfill_sparse_role_late_items(
+    fn hero_item_late_fallback_tiers(
         &self,
-        out: &mut Vec<HeroItemStat>,
         hero_id: HeroId,
         role: Role,
         bracket: Bracket,
-        scale: f32,
-    ) {
-        let embedded_fallback;
-        let (fallback_stats, apply_fb_scale): (&[HeroItemStat], bool) =
-            if let Some((_, _, _, stats)) = self
-                .custom_hero_stats
-                .iter()
-                .find(|(hid, r, b, _)| *hid == hero_id && r.is_none() && *b == Some(bracket))
-            {
-                (stats.as_slice(), false)
-            } else if let Some((_, _, _, stats)) = self
-                .custom_hero_stats
-                .iter()
-                .find(|(hid, r, b, _)| *hid == hero_id && r.is_none() && b.is_none())
-            {
-                (stats.as_slice(), true)
-            } else {
-                embedded_fallback = build_embedded_hero_stats(hero_id, role, bracket);
-                (embedded_fallback.as_slice(), false)
-            };
-
-        let candidates: Vec<HeroItemStat> = fallback_stats
-            .iter()
-            .copied()
-            .filter(|s| {
-                s.phase == ItemPhase::Late
-                    && !is_boot_item_id(s.item_id)
-                    && is_valid_timed_progression_item_for_phase(self, s.item_id, ItemPhase::Late)
-                    && !out.iter().any(|existing| existing.item_id == s.item_id)
-            })
-            .collect();
-        if candidates.is_empty() {
-            return;
+    ) -> Vec<Vec<HeroItemStat>> {
+        let has_role_specific_custom = self.custom_hero_stats.iter().any(|(hid, r, b, _)| {
+            *hid == hero_id && *r == Some(role) && (*b == Some(bracket) || b.is_none())
+        });
+        if !has_role_specific_custom {
+            return Vec::new();
         }
 
-        let max_mc_for = |phase: ItemPhase| {
-            out.iter()
-                .filter(|s| s.phase == phase)
-                .map(|s| s.match_count)
-                .max()
+        let scale = bracket_timing_scale(bracket);
+        let extract_late_tier = |stats: &[HeroItemStat], apply_scale: bool| -> Vec<HeroItemStat> {
+            stats
+                .iter()
+                .copied()
+                .filter(|stat| {
+                    stat.phase == ItemPhase::Late
+                        && !is_boot_item_id(stat.item_id)
+                        && is_valid_timed_progression_item_for_phase(
+                            self,
+                            stat.item_id,
+                            ItemPhase::Late,
+                        )
+                })
+                .map(|mut stat| {
+                    if apply_scale {
+                        stat.avg_time_mins = (stat.avg_time_mins * scale).max(1.0);
+                    }
+                    stat
+                })
+                .collect()
         };
-        let role_ref_mc = max_mc_for(ItemPhase::Late)
-            .or_else(|| max_mc_for(ItemPhase::Core))
-            .or_else(|| max_mc_for(ItemPhase::Early))
-            .unwrap_or(100);
-        let target_top_mc = ((role_ref_mc as f64 * 0.70).round() as u32).max(40);
-        let fb_max_mc = candidates
-            .iter()
-            .map(|s| s.match_count)
-            .max()
-            .unwrap_or(1)
-            .max(1);
 
-        for mut stat in candidates {
-            if apply_fb_scale {
-                stat.avg_time_mins = (stat.avg_time_mins * scale).max(1.0);
+        let mut tiers: Vec<Vec<HeroItemStat>> = Vec::new();
+        if let Some((_, _, _, stats)) = self
+            .custom_hero_stats
+            .iter()
+            .find(|(hid, r, b, _)| *hid == hero_id && r.is_none() && *b == Some(bracket))
+        {
+            let tier = extract_late_tier(stats, false);
+            if !tier.is_empty() {
+                tiers.push(tier);
             }
-            let raw_mc = stat.match_count.max(1);
-            let scaled_mc = (((stat.match_count as f64 / fb_max_mc as f64) * target_top_mc as f64)
-                .round() as u32)
-                .max(1);
-            let scaled_wc = (((stat.win_count as f64 / raw_mc as f64) * scaled_mc as f64).round()
-                as u32)
-                .min(scaled_mc);
-            stat.match_count = scaled_mc;
-            stat.win_count = scaled_wc;
-            out.push(stat);
         }
+        if let Some((_, _, _, stats)) = self
+            .custom_hero_stats
+            .iter()
+            .find(|(hid, r, b, _)| *hid == hero_id && r.is_none() && b.is_none())
+        {
+            let tier = extract_late_tier(stats, true);
+            if !tier.is_empty() {
+                tiers.push(tier);
+            }
+        }
+        let embedded = build_embedded_hero_stats(hero_id, role, bracket);
+        let embedded_tier = extract_late_tier(&embedded, false);
+        if !embedded_tier.is_empty() {
+            tiers.push(embedded_tier);
+        }
+        tiers
     }
 }
 
@@ -263,15 +243,6 @@ const fn is_boot_item_id(item_id: ItemId) -> bool {
         item_id.0,
         29 | 48 | 50 | 63 | 180 | 214 | 220 | 231 | 931 | 1953
     )
-}
-
-/// Counts `Late`-phase non-boot progression items in `stats` to detect sparse secondary-role
-/// datasets that need unroled `Late` backfill.
-fn count_non_boot_late_items(stats: &[HeroItemStat]) -> usize {
-    stats
-        .iter()
-        .filter(|s| s.phase == ItemPhase::Late && !is_boot_item_id(s.item_id))
-        .count()
 }
 
 /// Returns `true` if `item_id` represents a completed build target, a standalone non-combinable

@@ -8802,7 +8802,6 @@ fn sparse_role_stratz_build_backfills_late_items_preserving_role_early_core_and_
     use crate::item_repo::SeededItemMetaRepository;
     use truesight_core::domain::{Bracket, HeroId, HeroItemStat, ItemId, ItemPhase, Role};
     use truesight_core::math::recommend_item_build;
-    use truesight_core::ports::ItemMetaRepository;
 
     let stat =
         |item_id: u16, phase: ItemPhase, avg_time_mins: f32, mc: u32, wc: u32| HeroItemStat {
@@ -8845,32 +8844,6 @@ fn sparse_role_stratz_build_backfills_late_items_preserving_role_early_core_and_
             stat(156, ItemPhase::Late, 37.0, 22000, 12500),
         ],
     ));
-
-    let mk_mid_stats = repo
-        .hero_item_stats(HeroId(114), Role::Mid, Bracket::Legend)
-        .expect("MK Mid stats should succeed");
-    assert!(
-        mk_mid_stats
-            .iter()
-            .any(|s| s.item_id == ItemId(252) && s.phase == ItemPhase::Core),
-        "role-specific Echo Sabre (252, Core) must be preserved: {mk_mid_stats:?}"
-    );
-    assert!(
-        !mk_mid_stats.iter().any(|s| s.item_id == ItemId(145)),
-        "unroled Battle Fury (145, Core) must NOT pollute Mid role build: {mk_mid_stats:?}"
-    );
-    for expected_late in [160_u16, 108, 139, 156] {
-        let row = mk_mid_stats
-            .iter()
-            .find(|s| s.item_id == ItemId(expected_late) && s.phase == ItemPhase::Late)
-            .unwrap_or_else(|| {
-                panic!("expected backfilled Late item {expected_late} in {mk_mid_stats:?}")
-            });
-        assert!(
-            row.match_count > 25 && row.match_count < 8768,
-            "backfilled Late item {expected_late} must scale below Mid BKB (8768) and stay above noise: {row:?}"
-        );
-    }
 
     let mk_mid_build = recommend_item_build(
         &repo,
@@ -8920,19 +8893,28 @@ fn sparse_role_stratz_build_backfills_late_items_preserving_role_early_core_and_
             stat(116, ItemPhase::Late, 26.0, 1000, 520),
         ],
     ));
-    let am_off_stats = embedded_fb_repo
-        .hero_item_stats(HeroId(1), Role::Offlane, Bracket::Legend)
-        .expect("embedded fallback for sparse role should succeed");
-    let embedded_fb_non_boot_late = am_off_stats
+    let embedded_fb_build = recommend_item_build(
+        &embedded_fb_repo,
+        HeroId(1),
+        Role::Offlane,
+        Bracket::Legend,
+        &[None; 5],
+        &[],
+        0,
+    )
+    .expect("embedded fallback for sparse role build should succeed");
+    let embedded_fb_non_boot_late = embedded_fb_build
+        .steps
         .iter()
         .filter(|s| s.phase == ItemPhase::Late && is_non_boot(s.item_id))
         .count();
     assert!(
         embedded_fb_non_boot_late >= 2,
-        "sparse role with no unroled custom entry must backfill Late items from embedded hero stats: {am_off_stats:?}"
+        "sparse role with no unroled custom entry must backfill Late items from embedded hero stats: {:?}",
+        embedded_fb_build.steps
     );
 
-    // 3. Non-sparse role (>= 2 non-boot Late items) must NOT merge unroled Late items:
+    // 3. Non-sparse role (>= 2 surviving non-boot Late items) must NOT merge unroled Late items:
     let mut non_sparse_repo = SeededItemMetaRepository::new();
     non_sparse_repo.custom_hero_stats.push((
         HeroId(114),
@@ -8956,14 +8938,23 @@ fn sparse_role_stratz_build_backfills_late_items_preserving_role_early_core_and_
             stat(156, ItemPhase::Late, 37.0, 22000, 12500),
         ],
     ));
-    let non_sparse_stats = non_sparse_repo
-        .hero_item_stats(HeroId(114), Role::Mid, Bracket::Legend)
-        .expect("non-sparse role stats should succeed");
+    let non_sparse_build = recommend_item_build(
+        &non_sparse_repo,
+        HeroId(114),
+        Role::Mid,
+        Bracket::Legend,
+        &[None; 5],
+        &[],
+        0,
+    )
+    .expect("non-sparse role build should succeed");
     assert!(
-        !non_sparse_stats
-            .iter()
-            .any(|s| matches!(s.item_id.0, 139 | 156)),
-        "non-sparse role with >= 2 non-boot Late items must NOT merge unroled Late items: {non_sparse_stats:?}"
+        !non_sparse_build.steps.iter().any(|s| {
+            matches!(s.item_id.0, 139 | 156)
+                || s.variants.iter().any(|v| matches!(v.item_id.0, 139 | 156))
+        }),
+        "non-sparse role with >= 2 surviving non-boot Late items must NOT merge unroled Late items: {:?}",
+        non_sparse_build.steps
     );
 }
 
@@ -8973,7 +8964,6 @@ fn sparse_role_cache_backfills_from_unroled_stratz_and_opendota_without_extra_sy
     use crate::sync::LocalCacheManager;
     use truesight_core::domain::{Bracket, HeroId, HeroItemStat, ItemId, ItemPhase, Role};
     use truesight_core::math::recommend_item_build;
-    use truesight_core::ports::ItemMetaRepository;
 
     let hero_stats_json = r#"[{"id": 114, "4_pick": 1000, "4_win": 530}]"#;
     let item_constants_json = r#"{
@@ -9148,15 +9138,236 @@ fn sparse_role_cache_backfills_from_unroled_stratz_and_opendota_without_extra_sy
             stat(139, ItemPhase::Late, 34.0, 25000, 14200),
         ],
     ));
-    let divine_stats = od_repo
-        .hero_item_stats(HeroId(114), Role::Mid, Bracket::Divine)
-        .expect("Divine OpenDota unroled backfill should succeed");
-    let skadi = divine_stats
+    let divine_build = recommend_item_build(
+        &od_repo,
+        HeroId(114),
+        Role::Mid,
+        Bracket::Divine,
+        &[None; 5],
+        &[],
+        0,
+    )
+    .expect("Divine OpenDota unroled backfill should succeed");
+    let skadi = divine_build
+        .steps
         .iter()
         .find(|s| s.item_id == ItemId(160) && s.phase == ItemPhase::Late)
         .expect("Skadi (160) must be backfilled from unbracketed OpenDota entry");
     assert!(
-        skadi.avg_time_mins < 30.0 && skadi.match_count > 25 && skadi.match_count < 3900,
-        "unbracketed OpenDota backfill for Divine must scale avg_time_mins < 30.0 and match_count below Divine BKB (3900): {skadi:?}"
+        skadi.avg_time_mins < 30.0,
+        "unbracketed OpenDota backfill for Divine must scale avg_time_mins < 30.0: {skadi:?}"
+    );
+}
+
+#[test]
+fn sparse_role_backfill_handles_exhausted_tier_low_sample_noise_and_preserves_role_steps() {
+    use crate::item_repo::SeededItemMetaRepository;
+    use truesight_core::domain::{Bracket, HeroId, HeroItemStat, ItemId, ItemPhase, Role};
+    use truesight_core::math::recommend_item_build;
+
+    let stat =
+        |item_id: u16, phase: ItemPhase, avg_time_mins: f32, mc: u32, wc: u32| HeroItemStat {
+            item_id: ItemId(item_id),
+            phase,
+            avg_time_mins,
+            match_count: mc,
+            win_count: wc,
+        };
+
+    // 1. Exhausted higher-priority tier (P2 #1):
+    // Unroled same-bracket STRATZ only has BKB (already in Mid build); must continue to
+    // unbracketed OpenDota entry containing Butterfly (139) and Eye of Skadi (160).
+    let mut exhausted_repo = SeededItemMetaRepository::new();
+    exhausted_repo.custom_hero_stats.push((
+        HeroId(114),
+        Some(Role::Mid),
+        Some(Bracket::Legend),
+        vec![
+            stat(63, ItemPhase::Early, 6.5, 1200, 620),
+            stat(252, ItemPhase::Core, 15.5, 900, 480),
+            stat(116, ItemPhase::Late, 26.0, 1000, 520),
+        ],
+    ));
+    exhausted_repo.custom_hero_stats.push((
+        HeroId(114),
+        None,
+        Some(Bracket::Legend),
+        vec![stat(116, ItemPhase::Late, 25.5, 42000, 22500)],
+    ));
+    exhausted_repo.custom_hero_stats.push((
+        HeroId(114),
+        None,
+        None,
+        vec![
+            stat(139, ItemPhase::Late, 33.0, 28000, 15900),
+            stat(160, ItemPhase::Late, 29.0, 34000, 19000),
+        ],
+    ));
+    let exhausted_build = recommend_item_build(
+        &exhausted_repo,
+        HeroId(114),
+        Role::Mid,
+        Bracket::Legend,
+        &[None; 5],
+        &[],
+        0,
+    )
+    .expect("exhausted-tier backfill build should succeed");
+    assert!(
+        [116, 139, 160].iter().all(|&id| exhausted_build
+            .steps
+            .iter()
+            .any(|s| s.item_id == ItemId(id))),
+        "must continue past duplicate-only unroled STRATZ tier into OpenDota (BKB 116, Butterfly 139, Skadi 160): {:?}",
+        exhausted_build.steps
+    );
+
+    // 2. Low-sample noise filtered by recommender (P2 #2):
+    // BKB (1000 matches) + Satanic (1 match) must still trigger backfill because Satanic is
+    // dropped by min_mc, surfacing Butterfly (139) and Skadi (160) while excluding Satanic (156).
+    let mut noise_repo = SeededItemMetaRepository::new();
+    noise_repo.custom_hero_stats.push((
+        HeroId(114),
+        Some(Role::Mid),
+        Some(Bracket::Legend),
+        vec![
+            stat(63, ItemPhase::Early, 6.5, 1200, 620),
+            stat(252, ItemPhase::Core, 15.5, 900, 480),
+            stat(116, ItemPhase::Late, 26.0, 1000, 520),
+            stat(156, ItemPhase::Late, 37.0, 1, 1),
+        ],
+    ));
+    noise_repo.custom_hero_stats.push((
+        HeroId(114),
+        None,
+        Some(Bracket::Legend),
+        vec![
+            stat(139, ItemPhase::Late, 33.0, 28000, 15900),
+            stat(160, ItemPhase::Late, 29.0, 34000, 19000),
+        ],
+    ));
+    let noise_build = recommend_item_build(
+        &noise_repo,
+        HeroId(114),
+        Role::Mid,
+        Bracket::Legend,
+        &[None; 5],
+        &[],
+        0,
+    )
+    .expect("low-sample sparse role build should succeed");
+    assert!(
+        !noise_build.steps.iter().any(|s| s.item_id == ItemId(156)),
+        "1-match Satanic noise row must be filtered out: {:?}",
+        noise_build.steps
+    );
+    assert!(
+        [116, 139, 160]
+            .iter()
+            .all(|&id| noise_build.steps.iter().any(|s| s.item_id == ItemId(id))),
+        "backfill must trigger after 1-match Satanic is dropped, surfacing BKB, Butterfly, Skadi: {:?}",
+        noise_build.steps
+    );
+
+    // 3. Preserve role BKB (50% WR at 26m) as primary against higher-WR fallback Aghanim's Scepter (54% WR at 25.5m) (P2 #3a):
+    let mut bkb_preserve_repo = SeededItemMetaRepository::new();
+    bkb_preserve_repo.custom_hero_stats.push((
+        HeroId(114),
+        Some(Role::Mid),
+        Some(Bracket::Legend),
+        vec![
+            stat(63, ItemPhase::Early, 6.5, 1200, 620),
+            stat(252, ItemPhase::Core, 15.5, 900, 480),
+            stat(116, ItemPhase::Late, 26.0, 1000, 500),
+        ],
+    ));
+    bkb_preserve_repo.custom_hero_stats.push((
+        HeroId(114),
+        None,
+        Some(Bracket::Legend),
+        vec![
+            stat(108, ItemPhase::Late, 25.5, 40000, 21600),
+            stat(160, ItemPhase::Late, 29.0, 30000, 16500),
+        ],
+    ));
+    let bkb_preserve_build = recommend_item_build(
+        &bkb_preserve_repo,
+        HeroId(114),
+        Role::Mid,
+        Bracket::Legend,
+        &[None; 5],
+        &[],
+        0,
+    )
+    .expect("role BKB preservation build should succeed");
+    assert!(
+        bkb_preserve_build
+            .steps
+            .iter()
+            .any(|s| s.item_id == ItemId(116) && s.phase == ItemPhase::Late),
+        "role-specific BKB (116) must stay a primary Late step and NOT be demoted by higher-WR fallback Scepter: {:?}",
+        bkb_preserve_build.steps
+    );
+    assert!(
+        bkb_preserve_build
+            .steps
+            .iter()
+            .any(|s| s.item_id == ItemId(108))
+            && bkb_preserve_build
+                .steps
+                .iter()
+                .any(|s| s.item_id == ItemId(160)),
+        "fallback Scepter (108) and Skadi (160) should fill remaining Late gaps: {:?}",
+        bkb_preserve_build.steps
+    );
+
+    // 4. Preserve role Yasha (Core at 22m) against nearby fallback Manta Style (Late at 25m) (P2 #3b):
+    let mut yasha_preserve_repo = SeededItemMetaRepository::new();
+    yasha_preserve_repo.custom_hero_stats.push((
+        HeroId(114),
+        Some(Role::Mid),
+        Some(Bracket::Legend),
+        vec![
+            stat(63, ItemPhase::Early, 6.5, 1200, 620),
+            stat(170, ItemPhase::Core, 22.0, 1200, 630),
+            stat(116, ItemPhase::Late, 26.0, 1000, 520),
+        ],
+    ));
+    yasha_preserve_repo.custom_hero_stats.push((
+        HeroId(114),
+        None,
+        Some(Bracket::Legend),
+        vec![
+            stat(147, ItemPhase::Late, 25.0, 35000, 19250),
+            stat(160, ItemPhase::Late, 29.0, 30000, 16500),
+        ],
+    ));
+    let yasha_preserve_build = recommend_item_build(
+        &yasha_preserve_repo,
+        HeroId(114),
+        Role::Mid,
+        Bracket::Legend,
+        &[None; 5],
+        &[],
+        0,
+    )
+    .expect("role Yasha preservation build should succeed");
+    assert!(
+        yasha_preserve_build
+            .steps
+            .iter()
+            .any(|s| s.item_id == ItemId(170) && s.phase == ItemPhase::Core),
+        "role-specific Yasha (170, Core) must NOT be deleted by nearby fallback Manta Style (147): {:?}",
+        yasha_preserve_build.steps
+    );
+    assert!(
+        yasha_preserve_build
+            .steps
+            .iter()
+            .filter(|s| s.phase == ItemPhase::Late)
+            .count()
+            >= 2,
+        "Late phase must still be filled by fallback candidates alongside retained Yasha: {:?}",
+        yasha_preserve_build.steps
     );
 }

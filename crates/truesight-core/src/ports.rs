@@ -21,6 +21,17 @@ pub trait ItemMetaRepository {
         role: Role,
         bracket: Bracket,
     ) -> Result<Vec<HeroItemStat>, PortError>;
+
+    /// Returns ordered fallback `Late`-item candidate tiers (highest priority first) used only
+    /// when a role-specific build yields fewer than 2 surviving non-boot `Late` primary steps.
+    fn hero_item_late_fallback_tiers(
+        &self,
+        _hero_id: HeroId,
+        _role: Role,
+        _bracket: Bracket,
+    ) -> Vec<Vec<HeroItemStat>> {
+        Vec::new()
+    }
 }
 
 /// Driving/Driven port for live draft events (GSI game state, manual quick-pick, or Phase 2 vision).

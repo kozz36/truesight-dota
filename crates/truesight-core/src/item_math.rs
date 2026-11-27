@@ -47,6 +47,66 @@ const MAX_VARIANTS_PER_STEP: usize = 3;
 /// Maximum number of optional/counter items surfaced in the separate Optional section.
 const MAX_OPTIONAL_BUILD_ITEMS: usize = 6;
 
+struct ScoredCandidate {
+    step: BuildStep,
+    match_count: u32,
+    is_protected_upgrade: bool,
+    directly_owned: bool,
+}
+
+fn score_timed_candidate(
+    repo: &dyn ItemMetaRepository,
+    stat: HeroItemStat,
+    enemies: &[Option<HeroId>; TEAM_SIZE],
+    owned_items: &[ItemId],
+    is_protected_upgrade: bool,
+) -> ScoredCandidate {
+    let directly_owned = owned_items.contains(&stat.item_id);
+    let satisfied = is_item_owned_or_upgraded(repo, stat.item_id, owned_items);
+    let (owned_components, total_components) =
+        count_owned_components(repo, stat.item_id, owned_items);
+    let component_bonus = if !satisfied && total_components > 0 {
+        0.06 * (owned_components as f32 / total_components as f32)
+    } else {
+        0.0
+    };
+
+    let (matching_enemy_traits, counter_trait) =
+        evaluate_enemy_counter_traits(stat.item_id, enemies);
+    let counter_bonus = 0.09 * (matching_enemy_traits as f32);
+    let upgrade_bonus = if is_protected_upgrade {
+        UPGRADE_CHAIN_BONUS
+    } else {
+        0.0
+    };
+
+    let shrunk_wr = (stat.win_count as f32 + 60.0 * 0.50) / (stat.match_count as f32 + 60.0);
+    let volume_score = 0.06 * (1.0 + stat.match_count as f32).ln();
+    let score = shrunk_wr + volume_score + component_bonus + counter_bonus + upgrade_bonus;
+
+    let step_phase = if is_early_boots(stat.item_id) && stat.avg_time_mins <= 16.0 {
+        ItemPhase::Early
+    } else {
+        stat.phase
+    };
+    ScoredCandidate {
+        step: BuildStep {
+            item_id: stat.item_id,
+            phase: step_phase,
+            avg_time_mins: stat.avg_time_mins,
+            score,
+            owned: satisfied,
+            owned_components,
+            total_components,
+            counter_trait,
+            variants: Vec::new(),
+        },
+        match_count: stat.match_count,
+        is_protected_upgrade,
+        directly_owned,
+    }
+}
+
 /// Pure, deterministic item-build recommender combining empirical role/bracket item stats,
 /// component completion state, and patch-versioned enemy counter-trait bonuses.
 ///
@@ -229,63 +289,12 @@ pub fn recommend_item_build(
         }
     }
 
-    struct ScoredCandidate {
-        step: BuildStep,
-        match_count: u32,
-        is_protected_upgrade: bool,
-        directly_owned: bool,
-    }
-
     // Score each timed progression candidate (`Early`, `Core`, `Late`) deterministically.
     let mut scored: Vec<ScoredCandidate> = timed_core_stats
         .into_iter()
         .map(|stat| {
-            let directly_owned = owned_items.contains(&stat.item_id);
-            let satisfied = is_item_owned_or_upgraded(repo, stat.item_id, owned_items);
-            let (owned_components, total_components) =
-                count_owned_components(repo, stat.item_id, owned_items);
-            let component_bonus = if !satisfied && total_components > 0 {
-                0.06 * (owned_components as f32 / total_components as f32)
-            } else {
-                0.0
-            };
-
-            let (matching_enemy_traits, counter_trait) =
-                evaluate_enemy_counter_traits(stat.item_id, enemies);
-            let counter_bonus = 0.09 * (matching_enemy_traits as f32);
             let is_protected_upgrade = protected_upgrade_ids.contains(&stat.item_id);
-            let upgrade_bonus = if is_protected_upgrade {
-                UPGRADE_CHAIN_BONUS
-            } else {
-                0.0
-            };
-
-            let shrunk_wr =
-                (stat.win_count as f32 + 60.0 * 0.50) / (stat.match_count as f32 + 60.0);
-            let volume_score = 0.06 * (1.0 + stat.match_count as f32).ln();
-            let score = shrunk_wr + volume_score + component_bonus + counter_bonus + upgrade_bonus;
-
-            let step_phase = if is_early_boots(stat.item_id) && stat.avg_time_mins <= 16.0 {
-                ItemPhase::Early
-            } else {
-                stat.phase
-            };
-            ScoredCandidate {
-                step: BuildStep {
-                    item_id: stat.item_id,
-                    phase: step_phase,
-                    avg_time_mins: stat.avg_time_mins,
-                    score,
-                    owned: satisfied,
-                    owned_components,
-                    total_components,
-                    counter_trait,
-                    variants: Vec::new(),
-                },
-                match_count: stat.match_count,
-                is_protected_upgrade,
-                directly_owned,
-            }
+            score_timed_candidate(repo, stat, enemies, owned_items, is_protected_upgrade)
         })
         .collect();
 
@@ -455,6 +464,20 @@ pub fn recommend_item_build(
             remainder.push(cand);
         }
     }
+
+    // Backfill sparse role-specific builds (< 2 surviving non-boot Late primary steps) across
+    // ordered fallback tiers AFTER role primary selection so role priorities and Core steps stay intact.
+    backfill_sparse_late_steps(
+        repo,
+        hero_id,
+        role,
+        bracket,
+        enemies,
+        owned_items,
+        &starting_items,
+        &mut steps,
+        &mut remainder,
+    );
 
     // Only surface unowned Aghanim's Blessing when Aghanim's Scepter is a shown primary step;
     // if Scepter was absorbed into a competing slot or demoted to remainder, keep Blessing deferred.
@@ -736,4 +759,125 @@ fn is_phase_filler(phase: ItemPhase, match_count: u32, phase_max_mc: u32) -> boo
         _ => EARLY_CORE_LEADER_MIN_SHARE,
     };
     (match_count as f32) < (phase_max_mc as f32) * min_share
+}
+
+#[allow(clippy::too_many_arguments)]
+fn backfill_sparse_late_steps(
+    repo: &dyn ItemMetaRepository,
+    hero_id: HeroId,
+    role: Role,
+    bracket: Bracket,
+    enemies: &[Option<HeroId>; TEAM_SIZE],
+    owned_items: &[ItemId],
+    starting_items: &[ItemId],
+    steps: &mut Vec<BuildStep>,
+    remainder: &mut Vec<ScoredCandidate>,
+) {
+    let surviving_non_boot_late = |cur_steps: &[BuildStep]| {
+        cur_steps
+            .iter()
+            .filter(|s| s.phase == ItemPhase::Late && !is_any_boots(s.item_id) && s.item_id.0 != 29)
+            .count()
+    };
+    if surviving_non_boot_late(steps) >= 2 {
+        return;
+    }
+
+    for tier in repo.hero_item_late_fallback_tiers(hero_id, role, bracket) {
+        if surviving_non_boot_late(steps) >= 2 {
+            break;
+        }
+        let mut deduped: Vec<HeroItemStat> = Vec::with_capacity(tier.len());
+        for stat in tier {
+            if stat.phase != ItemPhase::Late || is_any_boots(stat.item_id) || stat.item_id.0 == 29 {
+                continue;
+            }
+            if matches!(stat.item_id.0, 30 | 40 | 43) {
+                continue;
+            }
+            if all_referenced_counter_item_ids().contains(&stat.item_id)
+                && !is_counter_item_eligible_for_role(stat.item_id, role)
+            {
+                continue;
+            }
+            let owned = owned_items.contains(&stat.item_id);
+            if !owned
+                && (is_excluded_basic_subcomponent(stat.item_id)
+                    || is_early_only_aura_component(stat.item_id))
+            {
+                continue;
+            }
+            if let Some(entry) = repo.item_catalog(stat.item_id)
+                && ((entry.cost == 0 && entry.is_consumable_drop) || entry.is_recipe)
+            {
+                continue;
+            }
+            let already_present = starting_items.contains(&stat.item_id)
+                || steps.iter().any(|s| {
+                    s.item_id == stat.item_id
+                        || s.variants.iter().any(|v| v.item_id == stat.item_id)
+                })
+                || remainder.iter().any(|r| r.step.item_id == stat.item_id);
+            if already_present {
+                continue;
+            }
+            if let Some(existing) = deduped.iter_mut().find(|s| s.item_id == stat.item_id) {
+                if stat.match_count > existing.match_count
+                    || (stat.match_count == existing.match_count
+                        && stat.win_count > existing.win_count)
+                {
+                    *existing = stat;
+                }
+            } else {
+                deduped.push(stat);
+            }
+        }
+
+        let has_scepter =
+            steps.iter().any(|s| s.item_id.0 == 108) || deduped.iter().any(|s| s.item_id.0 == 108);
+        deduped
+            .retain(|s| owned_items.contains(&s.item_id) || !(has_scepter && s.item_id.0 == 271));
+
+        let tier_max_mc = deduped.iter().map(|s| s.match_count).max().unwrap_or(0);
+        if tier_max_mc >= 50 {
+            let min_mc = ((tier_max_mc as f32 * 0.025).ceil() as u32).clamp(8, 25);
+            if deduped
+                .iter()
+                .any(|s| owned_items.contains(&s.item_id) || s.match_count >= min_mc)
+            {
+                deduped.retain(|s| owned_items.contains(&s.item_id) || s.match_count >= min_mc);
+            }
+        }
+        deduped.retain(|s| {
+            owned_items.contains(&s.item_id)
+                || !is_phase_filler(ItemPhase::Late, s.match_count, tier_max_mc)
+        });
+        if deduped.is_empty() {
+            continue;
+        }
+
+        let mut scored_tier: Vec<ScoredCandidate> = deduped
+            .into_iter()
+            .map(|stat| score_timed_candidate(repo, stat, enemies, owned_items, false))
+            .collect();
+        scored_tier.sort_by(|a, b| {
+            b.step
+                .score
+                .total_cmp(&a.step.score)
+                .then_with(|| a.step.avg_time_mins.total_cmp(&b.step.avg_time_mins))
+                .then_with(|| a.step.item_id.cmp(&b.step.item_id))
+        });
+
+        let mut late_count = steps.iter().filter(|s| s.phase == ItemPhase::Late).count();
+        for cand in scored_tier {
+            if steps.len() < MAX_PRIMARY_BUILD_STEPS
+                && late_count < phase_primary_cap(ItemPhase::Late)
+            {
+                steps.push(cand.step);
+                late_count += 1;
+            } else {
+                remainder.push(cand);
+            }
+        }
+    }
 }
