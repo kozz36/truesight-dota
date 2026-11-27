@@ -2850,3 +2850,276 @@ fn recommend_item_build_keeps_obsolete_core_skipped_after_final_late_purchase() 
         sparse_complete.steps
     );
 }
+
+#[test]
+fn recommend_item_build_counts_each_distinct_owned_item_once_for_phase_progression() {
+    use crate::domain::{Bracket, ItemId, ItemPhase};
+    use crate::math::{is_item_owned_or_upgraded, recommend_item_build};
+
+    let enemies = [None; 5];
+
+    // 1. PA at 27:00 (1620s) with Skull Basher (143) & Abyssal Blade (208) both labeled Late:
+    // upgrading Basher -> Abyssal satisfies both steps via recipe, yet Abyssal is only ONE
+    // held Late item so BKB (116) must stay NEXT; owning Abyssal + Satanic (2 held Late items)
+    // reaches the two-item threshold and advances NEXT to Butterfly (139).
+    let pa_repo = MockItemRepo {
+        catalog: vec![
+            catalog_entry(63, "Power Treads", 1400, &[29, 25, 17], false, false),
+            catalog_entry(145, "Battle Fury", 4100, &[65, 69], false, false),
+            catalog_entry(116, "Black King Bar", 4050, &[21, 8], false, false),
+            catalog_entry(143, "Skull Basher", 2875, &[21], false, false),
+            catalog_entry(208, "Abyssal Blade", 6150, &[143, 236], false, false),
+            catalog_entry(156, "Satanic", 5050, &[15, 53], false, false),
+            catalog_entry(139, "Butterfly", 4975, &[52], false, false),
+        ],
+        stats: vec![
+            item_stat(63, ItemPhase::Early, 7.0, 1500, 800),
+            item_stat(145, ItemPhase::Core, 15.0, 1450, 780),
+            item_stat(116, ItemPhase::Core, 23.0, 1400, 760),
+            item_stat(143, ItemPhase::Late, 26.0, 1200, 660),
+            item_stat(208, ItemPhase::Late, 30.0, 1150, 650),
+            item_stat(156, ItemPhase::Late, 34.0, 1050, 600),
+            item_stat(139, ItemPhase::Late, 38.0, 950, 550),
+        ],
+    };
+
+    let pa_basher = recommend_item_build(
+        &pa_repo,
+        HeroId(44),
+        Role::Carry,
+        Bracket::Legend,
+        &enemies,
+        &[ItemId(63), ItemId(145), ItemId(143)],
+        1620,
+    )
+    .expect("PA Basher build should succeed");
+    assert_eq!(
+        pa_basher
+            .next_unowned_index
+            .map(|i| pa_basher.steps[i].item_id),
+        Some(ItemId(116)),
+        "before upgrading Basher, PA NEXT must point to BKB (116): {:?}",
+        pa_basher.steps
+    );
+
+    let pa_abyssal = recommend_item_build(
+        &pa_repo,
+        HeroId(44),
+        Role::Carry,
+        Bracket::Legend,
+        &enemies,
+        &[ItemId(63), ItemId(145), ItemId(208)],
+        1620,
+    )
+    .expect("PA Abyssal build should succeed");
+    let pa_basher_step = pa_abyssal
+        .steps
+        .iter()
+        .find(|s| s.item_id == ItemId(143))
+        .expect("Skull Basher step must be present");
+    assert!(
+        pa_basher_step.owned,
+        "Skull Basher (143) must stay satisfied via Abyssal Blade (208): {:?}",
+        pa_abyssal.steps
+    );
+    assert_eq!(
+        pa_abyssal
+            .next_unowned_index
+            .map(|i| pa_abyssal.steps[i].item_id),
+        Some(ItemId(116)),
+        "upgrading Basher -> Abyssal must count as 1 held Late item and keep BKB (116) as NEXT: {:?}",
+        pa_abyssal.steps
+    );
+
+    let pa_two_late = recommend_item_build(
+        &pa_repo,
+        HeroId(44),
+        Role::Carry,
+        Bracket::Legend,
+        &enemies,
+        &[ItemId(63), ItemId(145), ItemId(208), ItemId(156)],
+        1620,
+    )
+    .expect("PA two independent Late items build should succeed");
+    assert_eq!(
+        pa_two_late
+            .next_unowned_index
+            .map(|i| pa_two_late.steps[i].item_id),
+        Some(ItemId(139)),
+        "owning Abyssal Blade + Satanic (2 independent Late items) must skip BKB and point NEXT to Butterfly (139): {:?}",
+        pa_two_late.steps
+    );
+
+    // 2. Transitive 3-tier upgrade chain on `owned_core_or_late`:
+    // owning only top tier 9003 satisfies 9001 (Core), 9002 (Core), and 9003 (Late), yet counts as
+    // 1 held item so Phase Boots (50, Early, 7.0m) at 18:00 (1080s) remains NEXT.
+    let chain_core_repo = MockItemRepo {
+        catalog: vec![
+            catalog_entry(50, "Phase Boots", 1450, &[29, 4, 2], false, false),
+            catalog_entry(9001, "Tier 1 Core", 2000, &[], false, false),
+            catalog_entry(9002, "Tier 2 Core", 4000, &[9001], false, false),
+            catalog_entry(9003, "Tier 3 Late", 6000, &[9002], false, false),
+        ],
+        stats: vec![
+            item_stat(50, ItemPhase::Early, 7.0, 1500, 800),
+            item_stat(9001, ItemPhase::Core, 14.0, 1400, 760),
+            item_stat(9002, ItemPhase::Core, 20.0, 1300, 715),
+            item_stat(9003, ItemPhase::Late, 28.0, 1200, 680),
+        ],
+    };
+    let chain_core_build = recommend_item_build(
+        &chain_core_repo,
+        HeroId(2),
+        Role::Offlane,
+        Bracket::Legend,
+        &enemies,
+        &[ItemId(9003)],
+        1080,
+    )
+    .expect("transitive Core/Late chain build should succeed");
+    assert!(
+        [9001, 9002, 9003].iter().all(|&id| chain_core_build
+            .steps
+            .iter()
+            .any(|s| s.item_id == ItemId(id) && s.owned)),
+        "all 3 transitive chain steps must be marked owned: {:?}",
+        chain_core_build.steps
+    );
+    assert_eq!(
+        chain_core_build
+            .next_unowned_index
+            .map(|i| chain_core_build.steps[i].item_id),
+        Some(ItemId(50)),
+        "1 held top-tier upgrade (9003) satisfying 3 steps must count once and keep Phase Boots (50) as NEXT at 18:00: {:?}",
+        chain_core_build.steps
+    );
+
+    // 3. Transitive 3-tier upgrade chain on `owned_late`:
+    // owning only 9103 satisfies 9101, 9102, 9103 (all Late) yet counts once so BKB (116) stays NEXT;
+    // adding independent Satanic (156) yields 2 distinct Late items and advances NEXT to None.
+    let chain_late_repo = MockItemRepo {
+        catalog: vec![
+            catalog_entry(116, "Black King Bar", 4050, &[], false, false),
+            catalog_entry(9101, "Late Tier 1", 2500, &[], false, false),
+            catalog_entry(9102, "Late Tier 2", 4500, &[9101], false, false),
+            catalog_entry(9103, "Late Tier 3", 6500, &[9102], false, false),
+            catalog_entry(156, "Satanic", 5050, &[], false, false),
+        ],
+        stats: vec![
+            item_stat(116, ItemPhase::Core, 23.0, 1500, 820),
+            item_stat(9101, ItemPhase::Late, 26.0, 1400, 780),
+            item_stat(9102, ItemPhase::Late, 30.0, 1300, 740),
+            item_stat(9103, ItemPhase::Late, 34.0, 1200, 700),
+            item_stat(156, ItemPhase::Late, 38.0, 1100, 645),
+        ],
+    };
+    let chain_late_one = recommend_item_build(
+        &chain_late_repo,
+        HeroId(44),
+        Role::Carry,
+        Bracket::Legend,
+        &enemies,
+        &[ItemId(9103)],
+        1620,
+    )
+    .expect("transitive Late chain single-item build should succeed");
+    assert!(
+        [9101, 9102, 9103].iter().all(|&id| chain_late_one
+            .steps
+            .iter()
+            .any(|s| s.item_id == ItemId(id) && s.owned)),
+        "all 3 transitive Late chain steps must be marked owned: {:?}",
+        chain_late_one.steps
+    );
+    assert_eq!(
+        chain_late_one
+            .next_unowned_index
+            .map(|i| chain_late_one.steps[i].item_id),
+        Some(ItemId(116)),
+        "1 held top-tier Late upgrade (9103) must count once and keep BKB (116) as NEXT: {:?}",
+        chain_late_one.steps
+    );
+
+    let chain_late_two = recommend_item_build(
+        &chain_late_repo,
+        HeroId(44),
+        Role::Carry,
+        Bracket::Legend,
+        &enemies,
+        &[ItemId(9103), ItemId(156)],
+        1620,
+    )
+    .expect("transitive Late chain two-item build should succeed");
+    assert_eq!(
+        chain_late_two.next_unowned_index, None,
+        "2 distinct held Late items (9103 + Satanic 156) must advance past BKB to None: {:?}",
+        chain_late_two.steps
+    );
+
+    // 4. Sabatons of Mordiggian (1953) acts as Late boots (satisfies Phase 50, Armlet 151, AND Treads 63)
+    // and contributes only once to progression when satisfying multiple steps.
+    let sabatons_repo = MockItemRepo {
+        catalog: vec![
+            catalog_entry(50, "Phase Boots", 1450, &[29, 4, 2], false, false),
+            catalog_entry(63, "Power Treads", 1400, &[29, 25, 17], false, false),
+            catalog_entry(151, "Armlet of Mordiggian", 2500, &[6, 25, 2], false, false),
+            catalog_entry(116, "Black King Bar", 4050, &[], false, false),
+            catalog_entry(
+                1953,
+                "Sabatons of Mordiggian",
+                5950,
+                &[50, 151],
+                false,
+                false,
+            ),
+            catalog_entry(112, "Assault Cuirass", 5125, &[], false, false),
+        ],
+        stats: vec![
+            item_stat(63, ItemPhase::Early, 6.5, 1500, 800),
+            item_stat(151, ItemPhase::Core, 15.0, 1450, 780),
+            item_stat(116, ItemPhase::Core, 22.0, 1400, 760),
+            item_stat(1953, ItemPhase::Late, 29.0, 1200, 680),
+            item_stat(112, ItemPhase::Late, 34.0, 1100, 630),
+        ],
+    };
+    let sabatons_owned = [ItemId(1953)];
+    assert!(
+        is_item_owned_or_upgraded(&sabatons_repo, ItemId(50), &sabatons_owned),
+        "Sabatons of Mordiggian (1953) must satisfy recipe prerequisite Phase Boots (50)"
+    );
+    assert!(
+        is_item_owned_or_upgraded(&sabatons_repo, ItemId(151), &sabatons_owned),
+        "Sabatons of Mordiggian (1953) must satisfy recipe prerequisite Armlet (151)"
+    );
+    assert!(
+        is_item_owned_or_upgraded(&sabatons_repo, ItemId(63), &sabatons_owned),
+        "Sabatons of Mordiggian (1953) as Late boots must supersede early Power Treads (63)"
+    );
+
+    let sabatons_build = recommend_item_build(
+        &sabatons_repo,
+        HeroId(81),
+        Role::Carry,
+        Bracket::Legend,
+        &enemies,
+        &sabatons_owned,
+        1440,
+    )
+    .expect("Sabatons of Mordiggian build should succeed");
+    assert!(
+        [63, 151, 1953].iter().all(|&id| sabatons_build
+            .steps
+            .iter()
+            .any(|s| s.item_id == ItemId(id) && s.owned)),
+        "Sabatons (1953) must mark Treads (63), Armlet (151), and Sabatons (1953) satisfied: {:?}",
+        sabatons_build.steps
+    );
+    assert_eq!(
+        sabatons_build
+            .next_unowned_index
+            .map(|i| sabatons_build.steps[i].item_id),
+        Some(ItemId(116)),
+        "Sabatons (1953) alone must count as 1 Late item and keep BKB (116) as NEXT at 24:00: {:?}",
+        sabatons_build.steps
+    );
+}

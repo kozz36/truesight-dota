@@ -657,7 +657,7 @@ pub fn recommend_item_build(
         optional_items.push(item);
     }
 
-    let next_unowned_index = compute_next_unowned_index(&steps, owned_items, game_time_secs);
+    let next_unowned_index = compute_next_unowned_index(repo, &steps, owned_items, game_time_secs);
 
     Ok(RecommendedBuild {
         target_patch: counter_trait_table_patch(),

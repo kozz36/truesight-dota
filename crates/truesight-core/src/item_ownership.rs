@@ -43,24 +43,28 @@ fn item_contains_component(
     false
 }
 
-/// Computes the active `NEXT` primary step index using inventory progression and timing so
-/// in-progress or out-of-order purchases stay eligible while obsolete Early/Core steps are
+/// Computes the active `NEXT` primary step index using distinct inventory progression and timing
+/// so in-progress or out-of-order purchases stay eligible while obsolete Early/Core steps are
 /// skipped in late game or fast-paced matches.
 pub fn compute_next_unowned_index(
+    repo: &dyn ItemMetaRepository,
     steps: &[BuildStep],
     owned_items: &[ItemId],
     game_time_secs: i32,
 ) -> Option<usize> {
     let game_mins = (game_time_secs.max(0) as f32) / 60.0;
-    let owned_core_or_late = steps
-        .iter()
-        .filter(|s| s.owned && matches!(s.phase, ItemPhase::Core | ItemPhase::Late))
-        .count();
-    let owned_late = steps
-        .iter()
-        .filter(|s| s.owned && s.phase == ItemPhase::Late)
-        .count();
-    let has_brown_boots = owned_items.contains(&ItemId(29));
+    let mut distinct_owned: Vec<ItemId> = Vec::with_capacity(owned_items.len());
+    for &id in owned_items {
+        if !distinct_owned.contains(&id) {
+            distinct_owned.push(id);
+        }
+    }
+    let owned_core_or_late = count_distinct_owned_for_phases(repo, steps, &distinct_owned, |p| {
+        matches!(p, ItemPhase::Core | ItemPhase::Late)
+    });
+    let owned_late =
+        count_distinct_owned_for_phases(repo, steps, &distinct_owned, |p| p == ItemPhase::Late);
+    let has_brown_boots = distinct_owned.contains(&ItemId(29));
 
     let is_obsolete_for_next = |step: &BuildStep| -> bool {
         let only_generic_brown_boots =
@@ -84,6 +88,24 @@ pub fn compute_next_unowned_index(
     steps
         .iter()
         .position(|s| !s.owned && !is_obsolete_for_next(s))
+}
+
+fn count_distinct_owned_for_phases(
+    repo: &dyn ItemMetaRepository,
+    steps: &[BuildStep],
+    distinct_owned: &[ItemId],
+    phase_matches: impl Fn(ItemPhase) -> bool,
+) -> usize {
+    distinct_owned
+        .iter()
+        .filter(|&&owned_id| {
+            steps.iter().any(|s| {
+                s.owned
+                    && phase_matches(s.phase)
+                    && is_item_owned_or_upgraded(repo, s.item_id, &[owned_id])
+            })
+        })
+        .count()
 }
 
 pub(crate) fn count_owned_components(
@@ -116,7 +138,7 @@ pub(crate) const fn is_early_boots(item_id: ItemId) -> bool {
 
 #[inline]
 pub(crate) const fn is_late_boots(item_id: ItemId) -> bool {
-    matches!(item_id.0, 48 | 220 | 231 | 931)
+    matches!(item_id.0, 48 | 220 | 231 | 931 | 1953)
 }
 
 #[inline]
