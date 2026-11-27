@@ -175,7 +175,7 @@ impl GuiTextureCache {
 
 fn transform_rgb(rgb: &[u8], gray_mix: f32, brightness: f32) -> Vec<u8> {
     let mut out = Vec::with_capacity(rgb.len());
-    for px in rgb.chunks_exact(3) {
+    for px in rgb.as_chunks::<3>().0 {
         let r = px[0] as f32;
         let g = px[1] as f32;
         let b = px[2] as f32;
@@ -261,7 +261,7 @@ pub(super) fn hud_card_fill(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut eg
 }
 
 pub(super) fn hud_modal_frame(ctx: &egui::Context) -> egui::Frame {
-    egui::Frame::window(&ctx.style())
+    egui::Frame::window(&ctx.global_style())
         .fill(P_INDIGO_1)
         .stroke(Stroke::new(1.0_f32, P_LINE))
         .corner_radius(CornerRadius::ZERO)

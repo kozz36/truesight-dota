@@ -116,53 +116,57 @@ impl OverlayRasterizer {
         self.last_frame_hash = None;
     }
 
-    /// Applies incremental `TexturesDelta` uploads, sub-rectangle patches, and evictions.
-    pub(super) fn apply_textures_delta(&mut self, delta: &TexturesDelta) {
+    /// Applies incremental `TexturesDelta` uploads, sub-rectangle patches, and evictions, clearing
+    /// `delta` afterwards as required by `epaint`'s drop invariant.
+    pub(super) fn apply_textures_delta(&mut self, delta: &mut TexturesDelta) {
         if delta.set.is_empty() && delta.free.is_empty() {
             return;
         }
-        for (id, image_delta) in &delta.set {
-            let egui::ImageData::Color(img) = &image_delta.image;
-            let linear = image_delta.options.magnification == TextureFilter::Linear;
-            let repeat = image_delta.options.wrap_mode == egui::TextureWrapMode::Repeat;
-            if let Some([pos_x, pos_y]) = image_delta.pos
-                && let Some(existing) = self.textures.get_mut(id)
-            {
-                let patch_w = img.size[0];
-                let patch_h = img.size[1];
-                for sy in 0..patch_h {
-                    let dy = pos_y + sy;
-                    if dy >= existing.height {
-                        break;
-                    }
-                    for sx in 0..patch_w {
-                        let dx = pos_x + sx;
-                        if dx >= existing.width {
+        for (id, deltas) in &delta.set {
+            for image_delta in deltas {
+                let egui::ImageData::Color(img) = &image_delta.image;
+                let linear = image_delta.options.magnification == TextureFilter::Linear;
+                let repeat = image_delta.options.wrap_mode == egui::TextureWrapMode::Repeat;
+                if let Some([pos_x, pos_y]) = image_delta.pos
+                    && let Some(existing) = self.textures.get_mut(id)
+                {
+                    let patch_w = img.size[0];
+                    let patch_h = img.size[1];
+                    for sy in 0..patch_h {
+                        let dy = pos_y + sy;
+                        if dy >= existing.height {
                             break;
                         }
-                        if let Some(&px) = img.pixels.get(sy * patch_w + sx) {
-                            existing.pixels[dy * existing.width + dx] = px;
+                        for sx in 0..patch_w {
+                            let dx = pos_x + sx;
+                            if dx >= existing.width {
+                                break;
+                            }
+                            if let Some(&px) = img.pixels.get(sy * patch_w + sx) {
+                                existing.pixels[dy * existing.width + dx] = px;
+                            }
                         }
                     }
+                    existing.linear = linear;
+                    existing.repeat = repeat;
+                } else {
+                    self.textures.insert(
+                        *id,
+                        RasterTexture {
+                            width: img.size[0],
+                            height: img.size[1],
+                            pixels: img.pixels.clone(),
+                            linear,
+                            repeat,
+                        },
+                    );
                 }
-                existing.linear = linear;
-                existing.repeat = repeat;
-            } else {
-                self.textures.insert(
-                    *id,
-                    RasterTexture {
-                        width: img.size[0],
-                        height: img.size[1],
-                        pixels: img.pixels.clone(),
-                        linear,
-                        repeat,
-                    },
-                );
             }
         }
         for id in &delta.free {
             self.textures.remove(id);
         }
+        delta.clear();
         self.texture_epoch = self.texture_epoch.wrapping_add(1);
     }
 
@@ -634,11 +638,17 @@ fn fill_rect_premultiplied(
         let row_start = (y as usize * stride_px as usize + x0 as usize) * 4;
         let count = (x1 - x0) as usize;
         if src_rgba[3] == 255 {
-            for px in buffer[row_start..row_start + count * 4].chunks_exact_mut(4) {
+            for px in buffer[row_start..row_start + count * 4]
+                .as_chunks_mut::<4>()
+                .0
+            {
                 px.copy_from_slice(&argb_bytes);
             }
         } else {
-            for px in buffer[row_start..row_start + count * 4].chunks_exact_mut(4) {
+            for px in buffer[row_start..row_start + count * 4]
+                .as_chunks_mut::<4>()
+                .0
+            {
                 blend_argb8888_pixel(px, src_rgba);
             }
         }

@@ -12,7 +12,7 @@ Thank you for contributing to `truesight-dota` (`Apache-2.0`).
 
 ## Development Setup
 
-- **Rust Toolchain**: Edition `2024`, MSRV `1.85` (local development pinned via `rust-toolchain.toml`).
+- **Rust Toolchain**: Edition `2024`, MSRV `1.95` (local development pinned via `rust-toolchain.toml`).
 - **Linux System Libraries** (required for default `gui` feature):
   ```bash
   sudo apt-get install -y pkg-config libxkbcommon-dev libxcb-render0-dev \

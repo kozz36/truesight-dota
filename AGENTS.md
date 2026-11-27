@@ -18,7 +18,7 @@ This file defines the mandatory implementation, architectural, statistical, and 
 
 | Boundary / Rule | Requirement |
 |-----------------|-------------|
-| **Toolchain & Edition** | `edition = "2024"`, `rust-version = "1.85"` (MSRV), pinned to `rustc 1.99.1` via `rust-toolchain.toml`. |
+| **Toolchain & Edition** | `edition = "2024"`, `rust-version = "1.95"` (MSRV), pinned to `rustc 1.99.1` via `rust-toolchain.toml`. |
 | **Memory & Safety** | `#![forbid(unsafe_code)]` and `unused_must_use = "deny"` across all workspace crates. Zero `.unwrap()` / `.expect()` on runtime external input. |
 | **`crates/truesight-core`** | **100% pure Hexagon Core**: zero I/O, zero filesystem, zero network, zero async, zero external dependencies. Owns `domain`, `math`, and `ports`. |
 | **`crates/truesight-adapters`** | **Driven & Driving Infrastructure**: owns `SeededMetaRepository`, `LocalCacheManager` (`24h`/`1h` TTL), and `BoundedGsiListener` (`MAX_GSI_PAYLOAD_BYTES = 64 KiB`, `sync_channel(16)`). |
@@ -60,4 +60,4 @@ Every change to `truesight-core::math` or `truesight-adapters` MUST preserve the
 | Skill | Trigger & Purpose | Path |
 |-------|-------------------|------|
 | `truesight-dota-domain` | Trigger: `truesight-dota`, Dota 2 5v5 draft math, counter synergy matrix, OpenDota cache sync, Comfort v3. Enforce TrueSight Dota domain and TDD invariants. | [`skills/truesight-dota-domain/SKILL.md`](skills/truesight-dota-domain/SKILL.md) |
-| `rust-architect` | Systems-grade Rust engineering skill (`edition = "2024"`, MSRV `1.85`, `#![forbid(unsafe_code)]`, hexagonal boundaries, CLI/TUI & desktop architecture). | [`.agents/skills/rust-architect/SKILL.md`](.agents/skills/rust-architect/SKILL.md) |
+| `rust-architect` | Systems-grade Rust engineering skill (`edition = "2024"`, MSRV `1.95`, `#![forbid(unsafe_code)]`, hexagonal boundaries, CLI/TUI & desktop architecture). | [`.agents/skills/rust-architect/SKILL.md`](.agents/skills/rust-architect/SKILL.md) |

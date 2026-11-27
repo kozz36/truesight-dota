@@ -116,55 +116,54 @@ fn parse_gsi_events_from_root(root: &JsonVal) -> Vec<DraftEvent> {
                 hero_slug: slug.clone(),
             });
         }
-        if let Some(items_node) = root.get("items") {
-            if matches!(items_node, JsonVal::Obj(_))
-                && items_node.get("team2").is_none()
-                && items_node.get("team3").is_none()
-                && items_node.get("player0").is_none()
-            {
-                const ITEM_SLOT_KEYS: &[&str] = &[
-                    "slot0",
-                    "slot1",
-                    "slot2",
-                    "slot3",
-                    "slot4",
-                    "slot5",
-                    "slot6",
-                    "slot7",
-                    "slot8",
-                    "stash0",
-                    "stash1",
-                    "stash2",
-                    "stash3",
-                    "stash4",
-                    "stash5",
-                    "teleport0",
-                    "teleport",
-                    "neutral0",
-                    "neutral",
-                ];
-                let mut saw_recognized_slot = false;
-                let mut item_slugs = Vec::new();
-                for &key in ITEM_SLOT_KEYS {
-                    if let Some(slot_obj) = items_node.get(key) {
-                        saw_recognized_slot = true;
-                        if let Some(raw_name) = slot_obj.get("name").and_then(JsonVal::as_str) {
-                            let trimmed = raw_name.trim();
-                            if !trimmed.is_empty() && trimmed != "item_empty" {
-                                let canonical = trimmed.strip_prefix("item_").unwrap_or(trimmed);
-                                if !canonical.is_empty() {
-                                    item_slugs.push(canonical.to_string());
-                                }
+        if let Some(items_node) = root.get("items")
+            && matches!(items_node, JsonVal::Obj(_))
+            && items_node.get("team2").is_none()
+            && items_node.get("team3").is_none()
+            && items_node.get("player0").is_none()
+        {
+            const ITEM_SLOT_KEYS: &[&str] = &[
+                "slot0",
+                "slot1",
+                "slot2",
+                "slot3",
+                "slot4",
+                "slot5",
+                "slot6",
+                "slot7",
+                "slot8",
+                "stash0",
+                "stash1",
+                "stash2",
+                "stash3",
+                "stash4",
+                "stash5",
+                "teleport0",
+                "teleport",
+                "neutral0",
+                "neutral",
+            ];
+            let mut saw_recognized_slot = false;
+            let mut item_slugs = Vec::new();
+            for &key in ITEM_SLOT_KEYS {
+                if let Some(slot_obj) = items_node.get(key) {
+                    saw_recognized_slot = true;
+                    if let Some(raw_name) = slot_obj.get("name").and_then(JsonVal::as_str) {
+                        let trimmed = raw_name.trim();
+                        if !trimmed.is_empty() && trimmed != "item_empty" {
+                            let canonical = trimmed.strip_prefix("item_").unwrap_or(trimmed);
+                            if !canonical.is_empty() {
+                                item_slugs.push(canonical.to_string());
                             }
                         }
                     }
                 }
-                if saw_recognized_slot {
-                    events.push(DraftEvent::InventoryUpdated {
-                        hero_slug: local_hero_slug,
-                        item_slugs,
-                    });
-                }
+            }
+            if saw_recognized_slot {
+                events.push(DraftEvent::InventoryUpdated {
+                    hero_slug: local_hero_slug,
+                    item_slugs,
+                });
             }
         }
     }
@@ -177,15 +176,15 @@ fn parse_gsi_events_from_root(root: &JsonVal) -> Vec<DraftEvent> {
         if let (Some(slot), Some(hero_id)) = (
             pick.get("slot").and_then(JsonVal::as_i32),
             pick.get("hero_id").and_then(JsonVal::as_i32),
-        ) {
-            if (0..5).contains(&slot) && (1..160).contains(&hero_id) {
-                events.push(DraftEvent::PickDetected {
-                    side,
-                    slot: slot as usize,
-                    hero_id: HeroId(hero_id as u16),
-                    role: Role::ALL.get(slot as usize).copied(),
-                });
-            }
+        ) && (0..5).contains(&slot)
+            && (1..160).contains(&hero_id)
+        {
+            events.push(DraftEvent::PickDetected {
+                side,
+                slot: slot as usize,
+                hero_id: HeroId(hero_id as u16),
+                role: Role::ALL.get(slot as usize).copied(),
+            });
         }
     }
 
@@ -200,29 +199,28 @@ fn parse_gsi_events_from_root(root: &JsonVal) -> Vec<DraftEvent> {
         {
             for idx in 0..16_usize {
                 let key = format!("ban{idx}_id");
-                if let Some(hid) = sub.get(&key).and_then(JsonVal::as_i32) {
-                    if (1..160).contains(&hid) {
-                        let ev = DraftEvent::BanDetected {
-                            hero_id: HeroId(hid as u16),
-                        };
-                        if !events.contains(&ev) {
-                            events.push(ev);
-                        }
+                if let Some(hid) = sub.get(&key).and_then(JsonVal::as_i32)
+                    && (1..160).contains(&hid)
+                {
+                    let ev = DraftEvent::BanDetected {
+                        hero_id: HeroId(hid as u16),
+                    };
+                    if !events.contains(&ev) {
+                        events.push(ev);
                     }
                 }
             }
         }
     }
-    if let Some(ban_node) = root.get("truesight_ban") {
-        if let Some(hid) = ban_node.get("hero_id").and_then(JsonVal::as_i32) {
-            if (1..160).contains(&hid) {
-                let ev = DraftEvent::BanDetected {
-                    hero_id: HeroId(hid as u16),
-                };
-                if !events.contains(&ev) {
-                    events.push(ev);
-                }
-            }
+    if let Some(ban_node) = root.get("truesight_ban")
+        && let Some(hid) = ban_node.get("hero_id").and_then(JsonVal::as_i32)
+        && (1..160).contains(&hid)
+    {
+        let ev = DraftEvent::BanDetected {
+            hero_id: HeroId(hid as u16),
+        };
+        if !events.contains(&ev) {
+            events.push(ev);
         }
     }
 
@@ -813,11 +811,11 @@ impl BoundedDraftQueue {
         } else {
             g.overflow_resync = true;
             g.stats.dropped += 1;
-            if is_critical_event(&ev) {
-                if let Some(idx) = g.queue.iter().position(|e| !is_critical_event(e)) {
-                    g.queue.remove(idx);
-                    g.queue.push_back(ev);
-                }
+            if is_critical_event(&ev)
+                && let Some(idx) = g.queue.iter().position(|e| !is_critical_event(e))
+            {
+                g.queue.remove(idx);
+                g.queue.push_back(ev);
             }
         }
         true
@@ -1047,10 +1045,10 @@ fn handle_gsi_connection(mut stream: TcpStream, queue: &BoundedDraftQueue) {
                         return;
                     }
                 }
-                if let Some(need) = expected_total {
-                    if raw_buf.len() >= need {
-                        break;
-                    }
+                if let Some(need) = expected_total
+                    && raw_buf.len() >= need
+                {
+                    break;
                 }
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,

@@ -425,7 +425,9 @@ pub struct LayoutRects {
 }
 
 impl TrueSightGuiApp {
-    pub fn render_frame(&mut self, ctx: &egui::Context) -> LayoutRects {
+    pub fn render_frame(&mut self, ui: &mut egui::Ui) -> LayoutRects {
+        let ctx_owned = ui.ctx().clone();
+        let ctx = &ctx_owned;
         self.configure_visuals(ctx);
         self.textures.ensure_loaded(ctx);
 
@@ -493,7 +495,7 @@ impl TrueSightGuiApp {
                     .fill(P_VOID)
                     .inner_margin(Margin::same(10)),
             )
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 let avail_w = ui.available_width();
                 let avail_h = ui.available_height();
                 let needs_h_scroll = avail_w < MIN_UNSCROLLED_W;
@@ -541,7 +543,7 @@ impl TrueSightGuiApp {
 
         if self.account_editor_open {
             let mut close_modal = ctx.input(|i| i.key_pressed(egui::Key::Escape));
-            let screen = ctx.screen_rect();
+            let screen = ctx.content_rect();
             let top_anchor_y =
                 (rects.top_bar.max.y + 4.0).clamp(14.0, (screen.height() - 120.0).max(14.0));
             let (anchor_offset, max_acct_w, input_w) = if let Some(opts_rect) = rects.options_window
@@ -577,7 +579,7 @@ impl TrueSightGuiApp {
 
             let tr = i18n::strings(self.session.ui_language);
             let acct_resp = egui::Window::new(tr.account_window_title)
-                .id(egui::Id::new("truesight_account_editor_window"))
+                .id(egui::Id::unique("truesight_account_editor_window"))
                 .collapsible(false)
                 .resizable(false)
                 .fade_in(false)
@@ -607,11 +609,11 @@ impl TrueSightGuiApp {
                     ui.horizontal(|ui| {
                         let apply_resp = ui.button(tr.apply_btn);
                         apply_rect = Some(apply_resp.rect);
-                        if apply_resp.clicked() || enter_pressed {
-                            if let Some(cfg) = self.apply_account_input() {
-                                let _ = save_account_config(cfg);
-                                close_modal = true;
-                            }
+                        if (apply_resp.clicked() || enter_pressed)
+                            && let Some(cfg) = self.apply_account_input()
+                        {
+                            let _ = save_account_config(cfg);
+                            close_modal = true;
                         }
                         if ui.button(tr.auto_vdf_btn).clicked() {
                             let cfg = self.apply_auto_account();
@@ -809,9 +811,15 @@ impl TrueSightGuiApp {
 }
 
 impl eframe::App for TrueSightGuiApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let _ = self.render_frame(ctx);
-        ctx.request_repaint_after(std::time::Duration::from_millis(250));
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        // Keep secondary overlay viewports transparent (primary viewport fills P_VOID explicitly).
+        egui::Color32::TRANSPARENT.to_normalized_gamma_f32()
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let _ = self.render_frame(ui);
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(250));
     }
 }
 
@@ -820,15 +828,22 @@ pub(crate) use top_bar::build_viewport_builder;
 #[cfg(not(test))]
 use top_bar::build_viewport_builder;
 
+/// Builds the native `eframe` host configuration, explicitly pinning `Renderer::Glow` so
+/// Windows executes the upstream transparent WGL/DWM viewport handling in `eframe 0.37`.
+pub(crate) fn build_native_options() -> eframe::NativeOptions {
+    eframe::NativeOptions {
+        viewport: build_viewport_builder(),
+        renderer: eframe::Renderer::Glow,
+        ..Default::default()
+    }
+}
+
 pub fn run_gui(
     session: AppSession,
     gsi_listener: Option<BoundedGsiListener>,
     vision_worker: Option<BoundedVisionWorker>,
 ) -> Result<(), String> {
-    let options = eframe::NativeOptions {
-        viewport: build_viewport_builder(),
-        ..Default::default()
-    };
+    let options = build_native_options();
     eframe::run_native(
         "TrueSight Dota",
         options,

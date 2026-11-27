@@ -472,10 +472,10 @@ impl TrueSightGuiApp {
                 let Some(b) = self.session.draft.allies[k] else {
                     continue;
                 };
-                if let Some(s) = analysis.ally_synergy_grid[i][k] {
-                    if best_syn.is_none_or(|cur| s > cur.2) {
-                        best_syn = Some((a.hero_id, b.hero_id, s));
-                    }
+                if let Some(s) = analysis.ally_synergy_grid[i][k]
+                    && best_syn.is_none_or(|cur| s > cur.2)
+                {
+                    best_syn = Some((a.hero_id, b.hero_id, s));
                 }
             }
         }
@@ -489,10 +489,10 @@ impl TrueSightGuiApp {
                 let Some(e) = self.session.draft.enemies[j] else {
                     continue;
                 };
-                if let Some(c) = analysis.counter_grid[i][j] {
-                    if worst_cnt.is_none_or(|cur| c < cur.3) {
-                        worst_cnt = Some((a.hero_id, e.hero_id, i, c));
-                    }
+                if let Some(c) = analysis.counter_grid[i][j]
+                    && worst_cnt.is_none_or(|cur| c < cur.3)
+                {
+                    worst_cnt = Some((a.hero_id, e.hero_id, i, c));
                 }
             }
         }
@@ -563,25 +563,25 @@ impl TrueSightGuiApp {
                         );
                     }
 
-                    if let Some((_ally_id, enemy_id, slot_idx, cnt)) = worst_cnt {
-                        if cnt * 100.0 <= -EPS_PCT {
-                            let ne = self
-                                .session
-                                .matrix
-                                .hero(enemy_id)
-                                .map(|h| h.display_name.as_str())
-                                .unwrap_or("Enemy");
-                            ui.label(RichText::new(ne).size(txt_sz).strong().color(P_GLINT));
-                            ui.label(
-                                RichText::new(format!(
-                                    "counters your Pos {} ({}).",
-                                    slot_idx + 1,
-                                    fmt_pct(cnt * 100.0)
-                                ))
-                                .size(txt_sz)
-                                .color(P_MUTED),
-                            );
-                        }
+                    if let Some((_ally_id, enemy_id, slot_idx, cnt)) = worst_cnt
+                        && cnt * 100.0 <= -EPS_PCT
+                    {
+                        let ne = self
+                            .session
+                            .matrix
+                            .hero(enemy_id)
+                            .map(|h| h.display_name.as_str())
+                            .unwrap_or("Enemy");
+                        ui.label(RichText::new(ne).size(txt_sz).strong().color(P_GLINT));
+                        ui.label(
+                            RichText::new(format!(
+                                "counters your Pos {} ({}).",
+                                slot_idx + 1,
+                                fmt_pct(cnt * 100.0)
+                            ))
+                            .size(txt_sz)
+                            .color(P_MUTED),
+                        );
                     }
                 });
             });
@@ -781,11 +781,11 @@ impl TrueSightGuiApp {
                         resp.request_focus();
                         self.focus_picker_input = false;
                     }
-                    if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        if let Some(&(hid, ref hname)) = matches.first() {
-                            self.apply_picker_choice(target, hid, hname);
-                            return;
-                        }
+                    if ui.input(|i| i.key_pressed(egui::Key::Enter))
+                        && let Some(&(hid, ref hname)) = matches.first()
+                    {
+                        self.apply_picker_choice(target, hid, hname);
+                        return;
                     }
                     if ui.small_button("Close ×").clicked()
                         || ui.input(|i| i.key_pressed(egui::Key::Escape))

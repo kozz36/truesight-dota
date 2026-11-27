@@ -348,11 +348,10 @@ impl TrueSightGuiApp {
                     .fill(P_GEM),
                 )
                 .clicked()
+                && let Some(linked) = self.session.confirm_pending_stratz_steam_link()
             {
-                if let Some(linked) = self.session.confirm_pending_stratz_steam_link() {
-                    self.account_input = linked.to_string();
-                    self.status_banner = format!("Linked Steam32 account #{linked} from STRATZ.");
-                }
+                self.account_input = linked.to_string();
+                self.status_banner = format!("Linked Steam32 account #{linked} from STRATZ.");
             }
             if ui
                 .add(
@@ -384,11 +383,11 @@ impl TrueSightGuiApp {
         let tr = super::i18n::strings(self.session.ui_language);
         let mut close_window = ctx.input(|i| i.key_pressed(egui::Key::Escape));
         let mut lang_btn_rects: Option<[Rect; 3]> = None;
-        let screen = ctx.screen_rect();
+        let screen = ctx.content_rect();
         let modal_w = (screen.width() - 32.0).clamp(320.0, 480.0);
 
         let resp = egui::Window::new(tr.guide_window_title)
-            .id(egui::Id::new("truesight_quick_guide_window"))
+            .id(egui::Id::unique("truesight_quick_guide_window"))
             .collapsible(false)
             .resizable(false)
             .fade_in(false)

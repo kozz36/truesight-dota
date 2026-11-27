@@ -219,12 +219,11 @@ impl DraftState {
         if slot >= TEAM_SIZE {
             return Err(DomainError::InvalidSlot(slot));
         }
-        if let Some(p) = pick {
-            if self.is_unavailable(p.hero_id)
-                && self.allies[slot].map(|cur| cur.hero_id) != Some(p.hero_id)
-            {
-                return Err(DomainError::DuplicateHero(p.hero_id));
-            }
+        if let Some(p) = pick
+            && self.is_unavailable(p.hero_id)
+            && self.allies[slot].map(|cur| cur.hero_id) != Some(p.hero_id)
+        {
+            return Err(DomainError::DuplicateHero(p.hero_id));
         }
         self.allies[slot] = pick;
         Ok(())
@@ -234,12 +233,11 @@ impl DraftState {
         if slot >= TEAM_SIZE {
             return Err(DomainError::InvalidSlot(slot));
         }
-        if let Some(p) = pick {
-            if self.is_unavailable(p.hero_id)
-                && self.enemies[slot].map(|cur| cur.hero_id) != Some(p.hero_id)
-            {
-                return Err(DomainError::DuplicateHero(p.hero_id));
-            }
+        if let Some(p) = pick
+            && self.is_unavailable(p.hero_id)
+            && self.enemies[slot].map(|cur| cur.hero_id) != Some(p.hero_id)
+        {
+            return Err(DomainError::DuplicateHero(p.hero_id));
         }
         self.enemies[slot] = pick;
         Ok(())

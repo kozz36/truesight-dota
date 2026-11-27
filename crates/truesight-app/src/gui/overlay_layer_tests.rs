@@ -105,14 +105,14 @@ fn rasterizer_renders_solid_blended_and_clipped_quads_in_argb8888() {
     let mut raster = OverlayRasterizer::new();
     let white_tex = TextureId::Managed(0);
     let mut delta = TexturesDelta::default();
-    delta.set.push((
+    delta.push(
         white_tex,
         egui::epaint::ImageDelta::full(
             ColorImage::filled([1, 1], Color32::WHITE),
             TextureOptions::NEAREST,
         ),
-    ));
-    raster.apply_textures_delta(&delta);
+    );
+    raster.apply_textures_delta(&mut delta);
 
     let mut mesh = Mesh::with_texture(white_tex);
     // Solid premultiplied opaque green rect in [2..6, 2..6]
@@ -197,7 +197,7 @@ fn rasterizer_supports_partial_texture_delta_and_free() {
     let mut raster = OverlayRasterizer::new();
     let tex_id = TextureId::Managed(7);
     let mut delta1 = TexturesDelta::default();
-    delta1.set.push((
+    delta1.push(
         tex_id,
         egui::epaint::ImageDelta::full(
             ColorImage::filled([4, 4], Color32::from_rgba_premultiplied(10, 20, 30, 255)),
@@ -207,13 +207,13 @@ fn rasterizer_supports_partial_texture_delta_and_free() {
                 ..Default::default()
             },
         ),
-    ));
-    raster.apply_textures_delta(&delta1);
+    );
+    raster.apply_textures_delta(&mut delta1);
     assert_eq!(raster.texture_count(), 1);
 
     // Patch pixel [2, 1] only
     let mut delta2 = TexturesDelta::default();
-    delta2.set.push((
+    delta2.push(
         tex_id,
         egui::epaint::ImageDelta::partial(
             [2, 1],
@@ -224,8 +224,8 @@ fn rasterizer_supports_partial_texture_delta_and_free() {
                 ..Default::default()
             },
         ),
-    ));
-    raster.apply_textures_delta(&delta2);
+    );
+    raster.apply_textures_delta(&mut delta2);
 
     let mut mesh = Mesh::with_texture(tex_id);
     push_quad(
@@ -245,8 +245,8 @@ fn rasterizer_supports_partial_texture_delta_and_free() {
     assert_eq!(&bytes[untouched..untouched + 4], &[30, 20, 10, 255]);
 
     let mut free_delta = TexturesDelta::default();
-    free_delta.free.push(tex_id);
-    raster.apply_textures_delta(&free_delta);
+    free_delta.free(tex_id);
+    raster.apply_textures_delta(&mut free_delta);
     assert_eq!(raster.texture_count(), 0);
 }
 
@@ -274,28 +274,28 @@ fn layer_shell_overlay_headless_tessellation_and_rasterization_picks_and_build()
     let mut raster = OverlayRasterizer::new();
 
     // 1. Draft Picks mode
-    let out_picks = overlay_ctx.run(
+    let mut out_picks = overlay_ctx.run_ui(
         egui::RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(380.0, 230.0))),
             ..Default::default()
         },
-        |ctx| {
-            TrueSightGuiApp::configure_visuals_for(ctx);
+        |ui| {
+            TrueSightGuiApp::configure_visuals_for(ui.ctx());
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)
-                .show(ctx, |ui| {
+                .show(ui, |ui| {
                     let _ = app.render_overlay_panel_with_host(ui, OverlayHostMode::LayerShell);
                 });
         },
     );
-    raster.apply_textures_delta(&out_picks.textures_delta);
+    raster.apply_textures_delta(&mut out_picks.textures_delta);
     let prims_picks = overlay_ctx.tessellate(out_picks.shapes, out_picks.pixels_per_point);
     let buf_picks = raster
         .rasterize_if_dirty(380, 230, out_picks.pixels_per_point, &prims_picks)
         .expect("picks overlay should rasterize");
     let mut saw_translucent_bg = false;
     let mut saw_opaque_fg = false;
-    for px in buf_picks.chunks_exact(4) {
+    for px in buf_picks.as_chunks::<4>().0 {
         if px[3] > 140 && px[3] < 250 {
             saw_translucent_bg = true;
         }
@@ -308,25 +308,25 @@ fn layer_shell_overlay_headless_tessellation_and_rasterization_picks_and_build()
 
     // 2. Post-Draft Build mode
     app.session.toggle_post_draft_build_view();
-    let out_build = overlay_ctx.run(
+    let mut out_build = overlay_ctx.run_ui(
         egui::RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(420.0, 168.0))),
             ..Default::default()
         },
-        |ctx| {
+        |ui| {
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)
-                .show(ctx, |ui| {
+                .show(ui, |ui| {
                     let _ = app.render_overlay_panel_with_host(ui, OverlayHostMode::LayerShell);
                 });
         },
     );
-    raster.apply_textures_delta(&out_build.textures_delta);
+    raster.apply_textures_delta(&mut out_build.textures_delta);
     let prims_build = overlay_ctx.tessellate(out_build.shapes, out_build.pixels_per_point);
     let buf_build = raster
         .rasterize_if_dirty(420, 168, out_build.pixels_per_point, &prims_build)
         .expect("build overlay should rasterize");
-    assert!(buf_build.chunks_exact(4).any(|px| px[3] > 0));
+    assert!(buf_build.as_chunks::<4>().0.iter().any(|px| px[3] > 0));
 }
 
 #[test]
@@ -334,14 +334,14 @@ fn rasterizer_clears_buffer_on_resize_without_stale_noise() {
     let mut raster = OverlayRasterizer::new();
     let white_tex = TextureId::Managed(0);
     let mut delta = TexturesDelta::default();
-    delta.set.push((
+    delta.push(
         white_tex,
         egui::epaint::ImageDelta::full(
             ColorImage::filled([1, 1], Color32::WHITE),
             TextureOptions::NEAREST,
         ),
-    ));
-    raster.apply_textures_delta(&delta);
+    );
+    raster.apply_textures_delta(&mut delta);
 
     let mut solid_mesh = Mesh::with_texture(white_tex);
     push_quad(
@@ -355,7 +355,7 @@ fn rasterizer_clears_buffer_on_resize_without_stale_noise() {
         primitive: egui::epaint::Primitive::Mesh(solid_mesh),
     }];
     let first = raster.rasterize_if_dirty(10, 10, 1.0, &prims1).unwrap();
-    assert!(first.chunks_exact(4).all(|px| px[3] == 255));
+    assert!(first.as_chunks::<4>().0.iter().all(|px| px[3] == 255));
 
     // Grow width & shrink height with only a tiny 2x2 quad in top-left.
     let mut small_mesh = Mesh::with_texture(white_tex);
@@ -598,30 +598,33 @@ fn wayland_overlay_context_matches_rasterizer_scale_on_first_dpi_transition_fram
     let ctx = egui::Context::default();
 
     let raw_1x = build_wayland_overlay_raw_input((380, 230), 1, Some(0.0), Vec::new(), true);
-    let out_1x = ctx.run(raw_1x, |ctx| {
-        egui::CentralPanel::default().show(ctx, |ui| {
+    let mut out_1x = ctx.run_ui(raw_1x, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             ui.label("scale 1x");
         });
     });
+    out_1x.textures_delta.clear();
     assert_eq!(out_1x.pixels_per_point, 1.0);
 
     let raw_2x = build_wayland_overlay_raw_input((380, 230), 2, Some(0.016), Vec::new(), true);
-    let out_2x = ctx.run(raw_2x, |ctx| {
-        egui::CentralPanel::default().show(ctx, |ui| {
+    let mut out_2x = ctx.run_ui(raw_2x, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             ui.label("scale 2x first frame");
         });
     });
+    out_2x.textures_delta.clear();
     assert_eq!(
         out_2x.pixels_per_point, 2.0,
         "1x -> 2x first frame must use 2.0 to match rasterizer"
     );
 
     let raw_back_1x = build_wayland_overlay_raw_input((380, 230), 1, Some(0.032), Vec::new(), true);
-    let out_back_1x = ctx.run(raw_back_1x, |ctx| {
-        egui::CentralPanel::default().show(ctx, |ui| {
+    let mut out_back_1x = ctx.run_ui(raw_back_1x, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             ui.label("scale 1x first frame");
         });
     });
+    out_back_1x.textures_delta.clear();
     assert_eq!(
         out_back_1x.pixels_per_point, 1.0,
         "2x -> 1x first frame must use 1.0 to match rasterizer"
@@ -633,14 +636,14 @@ fn rasterizer_textured_semi_transparent_quad_has_no_diagonal_seam() {
     let mut raster = OverlayRasterizer::new();
     let tex_id = TextureId::User(7);
     let mut delta = TexturesDelta::default();
-    delta.set.push((
+    delta.push(
         tex_id,
         egui::epaint::ImageDelta::full(
             ColorImage::filled([2, 2], Color32::from_rgba_premultiplied(100, 50, 25, 128)),
             TextureOptions::NEAREST,
         ),
-    ));
-    raster.apply_textures_delta(&delta);
+    );
+    raster.apply_textures_delta(&mut delta);
 
     let quad = Rect::from_min_max(pos2(0.0, 0.0), pos2(8.0, 8.0));
     let uvs = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
@@ -1041,7 +1044,7 @@ fn overlay_rasterizer_tiles_repeat_wrapped_textures_seamlessly() {
         ],
     };
     let mut delta = TexturesDelta::default();
-    delta.set.push((
+    delta.push(
         tex_id,
         egui::epaint::ImageDelta::full(
             checkerboard,
@@ -1052,8 +1055,8 @@ fn overlay_rasterizer_tiles_repeat_wrapped_textures_seamlessly() {
                 mipmap_mode: None,
             },
         ),
-    ));
-    raster.apply_textures_delta(&delta);
+    );
+    raster.apply_textures_delta(&mut delta);
 
     let mut mesh = Mesh::with_texture(tex_id);
     push_quad(
@@ -1095,21 +1098,21 @@ fn wayland_overlay_glass_surface_renders_lower_default_alpha_and_responds_to_opa
                              opacity: f32|
      -> (u32, u32) {
         app.session.set_overlay_opacity(opacity);
-        let out = overlay_ctx.run(
+        let mut out = overlay_ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(380.0, 230.0))),
                 ..Default::default()
             },
-            |ctx| {
-                TrueSightGuiApp::configure_visuals_for(ctx);
+            |ui| {
+                TrueSightGuiApp::configure_visuals_for(ui.ctx());
                 egui::CentralPanel::default()
                     .frame(egui::Frame::NONE)
-                    .show(ctx, |ui| {
+                    .show(ui, |ui| {
                         let _ = app.render_overlay_panel_with_host(ui, OverlayHostMode::LayerShell);
                     });
             },
         );
-        raster.apply_textures_delta(&out.textures_delta);
+        raster.apply_textures_delta(&mut out.textures_delta);
         let prims = overlay_ctx.tessellate(out.shapes, out.pixels_per_point);
         raster.invalidate();
         let bytes = raster
@@ -1246,7 +1249,7 @@ fn rasterizer_fast_paths_match_uniform_uv_flipped_glow_and_repeat_grain() {
     }
 
     let mut delta = TexturesDelta::default();
-    delta.set.push((
+    delta.push(
         atlas_id,
         egui::epaint::ImageDelta::full(
             ColorImage {
@@ -1256,8 +1259,8 @@ fn rasterizer_fast_paths_match_uniform_uv_flipped_glow_and_repeat_grain() {
             },
             TextureOptions::NEAREST,
         ),
-    ));
-    delta.set.push((
+    );
+    delta.push(
         glow_id,
         egui::epaint::ImageDelta::full(
             ColorImage {
@@ -1272,8 +1275,8 @@ fn rasterizer_fast_paths_match_uniform_uv_flipped_glow_and_repeat_grain() {
                 mipmap_mode: None,
             },
         ),
-    ));
-    delta.set.push((
+    );
+    delta.push(
         grain_id,
         egui::epaint::ImageDelta::full(
             ColorImage {
@@ -1288,8 +1291,8 @@ fn rasterizer_fast_paths_match_uniform_uv_flipped_glow_and_repeat_grain() {
                 mipmap_mode: None,
             },
         ),
-    ));
-    raster.apply_textures_delta(&delta);
+    );
+    raster.apply_textures_delta(&mut delta);
 
     let mut atlas_mesh = Mesh::with_texture(atlas_id);
     push_quad(

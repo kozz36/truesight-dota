@@ -18,16 +18,26 @@ required-features = ["gui"]
 
 [features]
 default = ["gui"]
-gui = ["dep:eframe", "dep:global-hotkey", "dep:smithay-client-toolkit", "dep:zbus"]
+gui = ["dep:eframe", "dep:global-hotkey", "dep:smithay-client-toolkit", "dep:winit", "dep:zbus"]
 
 [dependencies]
 truesight-core = { path = "../truesight-core" }
 truesight-adapters = { path = "../truesight-adapters" }
-eframe = { version = "0.32", optional = true }
+eframe = { version = "0.37", default-features = false, features = [
+    "accesskit",
+    "clipboard",
+    "default_fonts",
+    "glow",
+    "links",
+    "system_fonts",
+    "wayland",
+    "x11",
+], optional = true }
 global-hotkey = { version = "0.10", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 smithay-client-toolkit = { version = "0.20", default-features = false, features = ["calloop"], optional = true }
+winit = { version = "0.30", optional = true }
 zbus = { version = "4", optional = true }
 
 [lints]

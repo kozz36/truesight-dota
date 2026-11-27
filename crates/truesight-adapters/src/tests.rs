@@ -2909,7 +2909,7 @@ fn windows_capture_filter_and_rgba_strip_reject_browsers_minimized_and_convert_t
     let w = 1280_usize;
     let h = 720_usize;
     let mut full_rgba = vec![14_u8; w * h * 4];
-    for px in full_rgba.chunks_exact_mut(4) {
+    for px in full_rgba.as_chunks_mut::<4>().0 {
         px[3] = 255;
     }
 
@@ -2981,7 +2981,7 @@ fn windows_non_16_9_crop_preserves_source_height_and_detects_4_3_pickphase() {
 
     let atlas = parse_hero_atlas().unwrap();
     let mut full_rgba = vec![14_u8; w * h * 4];
-    for px in full_rgba.chunks_exact_mut(4) {
+    for px in full_rgba.as_chunks_mut::<4>().0 {
         px[3] = 255;
     }
 

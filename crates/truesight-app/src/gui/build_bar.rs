@@ -455,7 +455,7 @@ impl TrueSightGuiApp {
                                 let _ = ui
                                     .interact(
                                         chip_resp.rect,
-                                        ui.id().with(("opt_chip", opt.item_id.0)),
+                                        ui.scope_id().with(("opt_chip", opt.item_id.0)),
                                         Sense::hover(),
                                     )
                                     .on_hover_text(hover);
