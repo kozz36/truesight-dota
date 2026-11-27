@@ -2602,7 +2602,7 @@ fn overlay_click_through_unlocks_via_top_bar_button_options_and_ctrl_shift_p_hot
     let (tx, rx) = std::sync::mpsc::sync_channel(8);
     app.hotkey_listener = Some(super::hotkey::GlobalHotkeyListener::from_channel_for_test(
         rx,
-        "Ctrl+Shift+P (Test Global)",
+        "Ctrl+Shift+T (Test Global)",
     ));
 
     let ctx = egui::Context::default();
@@ -2676,21 +2676,21 @@ fn overlay_click_through_unlocks_via_top_bar_button_options_and_ctrl_shift_p_hot
         "F9 must never toggle TrueSight overlay click-through (reserved for Dota 2 Pause)"
     );
 
-    // 3. Pressing Ctrl+Shift+P toggles click-through ON then back OFF without double-toggling.
+    // 3. Pressing Ctrl+Shift+T toggles click-through ON then back OFF without double-toggling.
     let ctrl_shift = egui::Modifiers {
         ctrl: true,
         shift: true,
         ..Default::default()
     };
-    press_key(egui::Key::P, ctrl_shift, &mut app);
+    press_key(egui::Key::T, ctrl_shift, &mut app);
     assert!(
         app.session.overlay_geometry.click_through,
-        "Ctrl+Shift+P must enable click-through without child viewport double-toggling"
+        "Ctrl+Shift+T must enable click-through without child viewport double-toggling"
     );
-    press_key(egui::Key::P, ctrl_shift, &mut app);
+    press_key(egui::Key::T, ctrl_shift, &mut app);
     assert!(
         !app.session.overlay_geometry.click_through,
-        "second Ctrl+Shift+P press must disable click-through"
+        "second Ctrl+Shift+T press must disable click-through"
     );
 
     // 4. Out-of-focus global hotkey event via channel toggles click-through automatically.
@@ -2979,7 +2979,7 @@ fn hotkey_ignores_key_repeats_and_processes_multiple_queued_global_presses() {
     let (tx, rx) = std::sync::mpsc::sync_channel(8);
     app.hotkey_listener = Some(super::hotkey::GlobalHotkeyListener::from_channel_for_test(
         rx,
-        "Ctrl+Shift+P (Test Global)",
+        "Ctrl+Shift+T (Test Global)",
     ));
 
     let ctx = egui::Context::default();
@@ -3015,17 +3015,17 @@ fn hotkey_ignores_key_repeats_and_processes_multiple_queued_global_presses() {
     };
     // Initial press toggles ON (`false -> true`), held auto-repeat (`keys_down` active -> egui `repeat: true`)
     // MUST NOT flicker back OFF; release afterwards cleans `keys_down`.
-    send_key_event(egui::Key::P, true, false, ctrl_shift, &mut app);
+    send_key_event(egui::Key::T, true, false, ctrl_shift, &mut app);
     assert!(
         app.session.overlay_geometry.click_through,
-        "initial Ctrl+Shift+P press must toggle overlay click-through ON"
+        "initial Ctrl+Shift+T press must toggle overlay click-through ON"
     );
-    send_key_event(egui::Key::P, true, true, ctrl_shift, &mut app);
+    send_key_event(egui::Key::T, true, true, ctrl_shift, &mut app);
     assert!(
         app.session.overlay_geometry.click_through,
-        "repeating Ctrl+Shift+P key event while held must not toggle overlay click-through"
+        "repeating Ctrl+Shift+T key event while held must not toggle overlay click-through"
     );
-    send_key_event(egui::Key::P, false, false, ctrl_shift, &mut app);
+    send_key_event(egui::Key::T, false, false, ctrl_shift, &mut app);
 
     // Same for F8: initial press toggles overlay OFF (`true -> false`), held auto-repeat MUST NOT flicker back ON.
     send_key_event(
@@ -3093,13 +3093,22 @@ fn wayland_portal_shortcut_syntax_binding_status_and_cancel_handling() {
         should_fallback_to_xwayland,
     };
 
-    assert_eq!(PORTAL_PREFERRED_TRIGGER, "CTRL+SHIFT+p");
-    assert_eq!(portal_status_label(None), "Ctrl+Shift+P (In-App)");
-    assert_eq!(portal_status_label(Some("")), "Ctrl+Shift+P (In-App)");
-    assert_eq!(portal_status_label(Some("   ")), "Ctrl+Shift+P (In-App)");
+    assert_eq!(PORTAL_PREFERRED_TRIGGER, "CTRL+SHIFT+t");
     assert_eq!(
-        portal_status_label(Some("Meta+Shift+P")),
-        "Meta+Shift+P (Global · Wayland Portal)"
+        portal_status_label(None, "Ctrl+Shift+T"),
+        "Ctrl+Shift+T (In-App)"
+    );
+    assert_eq!(
+        portal_status_label(Some(""), "Ctrl+Shift+T"),
+        "Ctrl+Shift+T (In-App)"
+    );
+    assert_eq!(
+        portal_status_label(Some("   "), "Ctrl+Shift+T"),
+        "Ctrl+Shift+T (In-App)"
+    );
+    assert_eq!(
+        portal_status_label(Some("Meta+Shift+T"), "Ctrl+Shift+T"),
+        "Meta+Shift+T (Global · Wayland Portal)"
     );
 
     // Explicit user cancellation (`response_code == 1`) must NEVER fall back to XWayland XGrabKey.
@@ -3147,31 +3156,31 @@ fn wayland_portal_shortcut_syntax_binding_status_and_cancel_handling() {
             "blank trigger_description must NOT report Global"
         );
         assert_eq!(
-            portal_status_label(trigger.as_deref()),
-            "Ctrl+Shift+P (In-App)"
+            portal_status_label(trigger.as_deref(), "Ctrl+Shift+T"),
+            "Ctrl+Shift+T (In-App)"
         );
 
         let mut bound_props: HashMap<String, Value<'_>> = HashMap::new();
         bound_props.insert("description".into(), Value::from("Toggle Overlay"));
-        bound_props.insert("trigger_description".into(), Value::from("Ctrl+Shift+P"));
+        bound_props.insert("trigger_description".into(), Value::from("Ctrl+Shift+T"));
         let bound_val = Value::Value(Box::new(Value::from(vec![(
             "toggle_overlay_pass".to_string(),
             bound_props,
         )])));
         assert_eq!(
             inspect_portal_shortcuts_value(&bound_val, "toggle_overlay_pass"),
-            (true, Some("Ctrl+Shift+P".to_string()))
+            (true, Some("Ctrl+Shift+T".to_string()))
         );
 
         let mut changed_bound: HashMap<String, OwnedValue> = HashMap::new();
         changed_bound.insert(
             "trigger_description".into(),
-            OwnedValue::try_from(Value::from("Meta+P")).unwrap(),
+            OwnedValue::try_from(Value::from("Meta+T")).unwrap(),
         );
         let changed_pairs = vec![("toggle_overlay_pass".to_string(), changed_bound)];
         assert_eq!(
             extract_assigned_trigger_from_pairs(&changed_pairs, "toggle_overlay_pass"),
-            Some("Meta+P".to_string())
+            Some("Meta+T".to_string())
         );
 
         let mut changed_cleared: HashMap<String, OwnedValue> = HashMap::new();
@@ -4895,6 +4904,419 @@ fn overlay_small_text_scrim_clears_wcag_aa_contrast_over_white_backdrop_at_defau
     assert_eq!(
         scrim_count, 2,
         "both labeled empty matrix headers (A1, E1) must paint an opaque-enough dark scrim backing; fills={fills:?}"
+    );
+}
+
+#[test]
+fn pass_hotkey_egui_recording_captures_modified_key_and_rejects_unmodified() {
+    use crate::session::{PassHotkey, PassHotkeyKey};
+
+    let ctrl_shift = egui::Modifiers {
+        ctrl: true,
+        shift: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        super::hotkey::from_egui_key(egui::Key::T, ctrl_shift),
+        Some(PassHotkey {
+            ctrl: true,
+            alt: false,
+            shift: true,
+            key: PassHotkeyKey::T,
+        })
+    );
+
+    let alt_only = egui::Modifiers {
+        alt: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        super::hotkey::from_egui_key(egui::Key::F10, alt_only),
+        Some(PassHotkey {
+            ctrl: false,
+            alt: true,
+            shift: false,
+            key: PassHotkeyKey::F10,
+        })
+    );
+
+    assert_eq!(
+        super::hotkey::from_egui_key(egui::Key::T, egui::Modifiers::default()),
+        None,
+        "unmodified keys must be rejected when recording pass-through shortcut"
+    );
+    assert_eq!(
+        super::hotkey::from_egui_key(egui::Key::F9, egui::Modifiers::default()),
+        None
+    );
+}
+
+#[test]
+fn custom_pass_hotkey_triggers_in_app_toggle_and_suppresses_old_default() {
+    use crate::session::PassHotkey;
+
+    let mut app = TrueSightGuiApp::new(make_5v5_gui_session(), None, None);
+    app.onboarding_open = false;
+    app.session.overlay_mode = true;
+    app.session.set_overlay_click_through(false);
+
+    let custom = PassHotkey::parse("Ctrl+Alt+K").unwrap();
+    app.session.set_pass_hotkey(custom);
+
+    let ctx = egui::Context::default();
+    let viewport = vec2(1280.0, 800.0);
+    let press_key = |key: egui::Key, modifiers: egui::Modifiers, app: &mut TrueSightGuiApp| {
+        for pressed in [true, false] {
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), viewport)),
+                    modifiers,
+                    events: vec![egui::Event::Key {
+                        key,
+                        physical_key: None,
+                        pressed,
+                        repeat: false,
+                        modifiers,
+                    }],
+                    ..Default::default()
+                },
+                |ctx| {
+                    app.render_frame(ctx);
+                },
+            );
+        }
+    };
+
+    let ctrl_shift = egui::Modifiers {
+        ctrl: true,
+        shift: true,
+        ..Default::default()
+    };
+    press_key(egui::Key::T, ctrl_shift, &mut app);
+    assert!(
+        !app.session.overlay_geometry.click_through,
+        "old default Ctrl+Shift+T must NOT toggle after switching pass_hotkey to Ctrl+Alt+K"
+    );
+
+    let ctrl_alt = egui::Modifiers {
+        ctrl: true,
+        alt: true,
+        ..Default::default()
+    };
+    press_key(egui::Key::K, ctrl_alt, &mut app);
+    assert!(
+        app.session.overlay_geometry.click_through,
+        "custom Ctrl+Alt+K must toggle click-through ON"
+    );
+    press_key(egui::Key::K, ctrl_alt, &mut app);
+    assert!(
+        !app.session.overlay_geometry.click_through,
+        "second Ctrl+Alt+K press must toggle click-through OFF"
+    );
+}
+
+#[test]
+fn options_window_shows_wayland_configure_shortcut_button_and_custom_recorder() {
+    let mut app = TrueSightGuiApp::new(make_5v5_gui_session(), None, None);
+    app.onboarding_open = false;
+    app.options_open = true;
+    let (_tx, rx) = std::sync::mpsc::sync_channel(8);
+    app.hotkey_listener = Some(
+        super::hotkey::GlobalHotkeyListener::from_channel_for_test_with_wayland(
+            rx,
+            "Ctrl+Shift+T (In-App)",
+            true,
+        ),
+    );
+    let ctx = egui::Context::default();
+    let mut out = None;
+    for _ in 0..2 {
+        out = Some(ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, 800.0))),
+                ..Default::default()
+            },
+            |ctx| {
+                let _ = app.render_options_window(ctx, 48.0);
+            },
+        ));
+    }
+    let out = out.expect("second pass options window output");
+    let mut texts = Vec::new();
+    for clipped in &out.shapes {
+        collect_painted_texts(&clipped.shape, &mut texts);
+    }
+    let tr = super::i18n::strings(app.session.ui_language);
+    assert!(
+        texts.iter().any(|t| t.contains(tr.pass_hotkey_label)),
+        "options window must render PASS HOTKEY section; texts={texts:?}"
+    );
+    assert!(
+        texts.iter().any(|t| t.contains(tr.hotkey_change_btn)),
+        "options window must render custom hotkey CHANGE button; texts={texts:?}"
+    );
+    assert!(
+        texts.iter().any(|t| t.contains(tr.configure_shortcut_btn)),
+        "options window must render Wayland CONFIGURE SHORTCUT button; texts={texts:?}"
+    );
+}
+
+#[test]
+fn portal_v2_shortcut_routing_and_startup_bind_decisions() {
+    use super::hotkey::{should_bind_on_startup, should_use_configure_shortcuts};
+
+    assert!(!should_use_configure_shortcuts(0));
+    assert!(!should_use_configure_shortcuts(1));
+    assert!(should_use_configure_shortcuts(2));
+    assert!(should_use_configure_shortcuts(3));
+
+    // Startup must always bind when forced or when no shortcut entry is listed yet.
+    assert!(should_bind_on_startup(true, true, false, 2));
+    assert!(should_bind_on_startup(false, false, false, 1));
+    assert!(should_bind_on_startup(false, false, false, 2));
+
+    // When already listed with an active trigger on Portal v2, bind cleanly on startup so
+    // KDE KGlobalAccel keeps Activated signals active without prompting.
+    assert!(should_bind_on_startup(false, true, true, 2));
+
+    // When listed with empty/unbound trigger (`none,none`) or on Portal v1, skip startup prompt
+    // unless force_bind is requested.
+    assert!(!should_bind_on_startup(false, true, false, 2));
+    assert!(!should_bind_on_startup(false, true, true, 1));
+    assert!(!should_bind_on_startup(false, true, false, 1));
+}
+
+#[test]
+fn modified_f8_pass_hotkey_toggles_click_through_without_closing_overlay() {
+    use crate::session::PassHotkey;
+
+    let mut app = TrueSightGuiApp::new(make_5v5_gui_session(), None, None);
+    app.onboarding_open = false;
+    app.session.overlay_mode = true;
+    app.session.set_overlay_click_through(false);
+    app.session
+        .set_pass_hotkey(PassHotkey::parse("Ctrl+F8").unwrap());
+
+    let ctx = egui::Context::default();
+    let viewport = vec2(1280.0, 800.0);
+    let ctrl = egui::Modifiers {
+        ctrl: true,
+        ..Default::default()
+    };
+
+    // Sending Ctrl+F8 must NOT toggle overlay visibility; it must trigger PASS only.
+    for pressed in [true, false] {
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), viewport)),
+                modifiers: ctrl,
+                events: vec![egui::Event::Key {
+                    key: egui::Key::F8,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers: ctrl,
+                }],
+                ..Default::default()
+            },
+            |ctx| {
+                app.render_frame(ctx);
+            },
+        );
+    }
+    assert!(
+        app.session.overlay_mode,
+        "Ctrl+F8 must keep overlay open instead of triggering unmodified F8 visibility toggle"
+    );
+    assert!(
+        app.session.overlay_geometry.click_through,
+        "Ctrl+F8 must toggle PASS click-through ON"
+    );
+
+    // Sending unmodified F8 still closes the overlay cleanly.
+    for pressed in [true, false] {
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), viewport)),
+                events: vec![egui::Event::Key {
+                    key: egui::Key::F8,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ctx| {
+                app.render_frame(ctx);
+            },
+        );
+    }
+    assert!(
+        !app.session.overlay_mode,
+        "unmodified F8 must close the overlay"
+    );
+}
+
+#[test]
+fn recording_pass_hotkey_consumes_capture_keypress_without_toggling_overlay() {
+    use crate::session::PassHotkey;
+
+    let mut app = TrueSightGuiApp::new(make_5v5_gui_session(), None, None);
+    app.onboarding_open = false;
+    app.options_open = true;
+    app.hotkey_recording = true;
+    app.session.overlay_mode = true;
+    app.session.set_overlay_click_through(false);
+
+    let ctx = egui::Context::default();
+    let viewport = vec2(1280.0, 800.0);
+    let send_key = |key: egui::Key, modifiers: egui::Modifiers, app: &mut TrueSightGuiApp| {
+        for pressed in [true, false] {
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), viewport)),
+                    modifiers,
+                    events: vec![egui::Event::Key {
+                        key,
+                        physical_key: None,
+                        pressed,
+                        repeat: false,
+                        modifiers,
+                    }],
+                    ..Default::default()
+                },
+                |ctx| {
+                    app.render_frame(ctx);
+                },
+            );
+        }
+    };
+
+    let ctrl_alt = egui::Modifiers {
+        ctrl: true,
+        alt: true,
+        ..Default::default()
+    };
+    send_key(egui::Key::K, ctrl_alt, &mut app);
+    assert_eq!(
+        app.session.pass_hotkey,
+        PassHotkey::parse("Ctrl+Alt+K").unwrap()
+    );
+    assert!(!app.hotkey_recording);
+    assert!(
+        !app.session.overlay_geometry.click_through,
+        "capture keypress Ctrl+Alt+K must NOT immediately toggle click-through on the capture frame"
+    );
+
+    // Next Ctrl+Alt+K press activates the newly recorded binding.
+    send_key(egui::Key::K, ctrl_alt, &mut app);
+    assert!(
+        app.session.overlay_geometry.click_through,
+        "subsequent Ctrl+Alt+K press must toggle click-through ON"
+    );
+
+    // Also test recording Ctrl+F8 while overlay is open: must neither close overlay nor toggle PASS.
+    app.hotkey_recording = true;
+    app.session.set_overlay_click_through(false);
+    let ctrl = egui::Modifiers {
+        ctrl: true,
+        ..Default::default()
+    };
+    send_key(egui::Key::F8, ctrl, &mut app);
+    assert_eq!(
+        app.session.pass_hotkey,
+        PassHotkey::parse("Ctrl+F8").unwrap()
+    );
+    assert!(!app.hotkey_recording);
+    assert!(app.session.overlay_mode);
+    assert!(!app.session.overlay_geometry.click_through);
+}
+
+#[test]
+fn recording_pass_hotkey_suppresses_queued_global_action_on_capture_frame() {
+    use super::hotkey::{GlobalHotkeyAction, GlobalHotkeyListener};
+    use crate::session::PassHotkey;
+
+    let mut app = TrueSightGuiApp::new(make_5v5_gui_session(), None, None);
+    let (tx, rx) = std::sync::mpsc::sync_channel(8);
+    app.hotkey_listener = Some(GlobalHotkeyListener::from_channel_for_test(
+        rx,
+        "Ctrl+Shift+T (Global)",
+    ));
+    app.onboarding_open = false;
+    app.options_open = true;
+    app.hotkey_recording = true;
+    app.session.overlay_mode = true;
+    app.session.set_overlay_click_through(false);
+
+    let ctx = egui::Context::default();
+    let viewport = vec2(1280.0, 800.0);
+    let ctrl_shift = egui::Modifiers {
+        ctrl: true,
+        shift: true,
+        ..Default::default()
+    };
+
+    // Re-record current Ctrl+Shift+T while the global shortcut thread also enqueues
+    // ToggleOverlayPass in the same frame: must save without toggling PASS.
+    tx.send(GlobalHotkeyAction::ToggleOverlayPass).unwrap();
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), viewport)),
+            modifiers: ctrl_shift,
+            events: vec![egui::Event::Key {
+                key: egui::Key::T,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: ctrl_shift,
+            }],
+            ..Default::default()
+        },
+        |ctx| {
+            app.render_frame(ctx);
+        },
+    );
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), viewport)),
+            modifiers: ctrl_shift,
+            events: vec![egui::Event::Key {
+                key: egui::Key::T,
+                physical_key: None,
+                pressed: false,
+                repeat: false,
+                modifiers: ctrl_shift,
+            }],
+            ..Default::default()
+        },
+        |ctx| {
+            app.render_frame(ctx);
+        },
+    );
+
+    assert_eq!(app.session.pass_hotkey, PassHotkey::default());
+    assert!(!app.hotkey_recording);
+    assert!(
+        !app.session.overlay_geometry.click_through,
+        "queued global ToggleOverlayPass on capture frame must NOT toggle PASS"
+    );
+
+    // Subsequent global action when not recording works normally.
+    tx.send(GlobalHotkeyAction::ToggleOverlayPass).unwrap();
+    let _ = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), viewport)),
+            ..Default::default()
+        },
+        |ctx| {
+            app.render_frame(ctx);
+        },
+    );
+    assert!(
+        app.session.overlay_geometry.click_through,
+        "subsequent global ToggleOverlayPass outside capture frame must toggle PASS ON"
     );
 }
 

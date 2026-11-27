@@ -301,13 +301,19 @@ impl TrueSightGuiApp {
                                     });
                                 })
                                 .response
-                                .on_hover_text(tr.top_bar_pass_unlock_hover);
+                                .on_hover_text(super::i18n::with_hotkey_label(
+                                    tr.top_bar_pass_unlock_hover,
+                                    &self.session.pass_hotkey.format_label(),
+                                ));
                         } else if overlay_icon_button(
                             ui,
                             icon_sz,
                             P_NEUTRAL,
                             false,
-                            tr.overlay_pass_hover,
+                            &super::i18n::with_hotkey_label(
+                                tr.overlay_pass_hover,
+                                &self.session.pass_hotkey.format_label(),
+                            ),
                             |p, r, c| paint_pass_icon(p, r, c, false),
                         )
                         .clicked()
