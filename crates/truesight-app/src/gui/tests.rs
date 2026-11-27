@@ -5721,3 +5721,191 @@ fn eframe_app_clear_color_is_transparent_and_overlay_builder_disables_native_sha
         "native GUI must explicitly select eframe::Renderer::Glow so Windows executes the upstream transparent viewport fix"
     );
 }
+
+#[test]
+fn build_bar_and_overlay_clear_upg_ready_after_prerequisite_is_upgraded() {
+    use truesight_adapters::item_repo::SeededItemMetaRepository;
+    use truesight_core::domain::{HeroItemStat, ItemCatalogEntry, ItemId, ItemPhase};
+
+    let mut session = AppSession::new().unwrap();
+    assert!(execute_command(&mut session, "ally 3 axe").unwrap());
+    session.local_player_hero = Some(HeroId(2));
+    session.owned_items_owner = Some(HeroId(2));
+    session.item_repo = SeededItemMetaRepository {
+        custom_catalog: vec![
+            ItemCatalogEntry {
+                id: ItemId(127),
+                slug: "blade_mail".into(),
+                display_name: "Blade Mail".into(),
+                cost: 2100,
+                components: vec![],
+                is_recipe: false,
+                is_consumable_drop: false,
+            },
+            ItemCatalogEntry {
+                id: ItemId(1),
+                slug: "blink".into(),
+                display_name: "Blink Dagger".into(),
+                cost: 2250,
+                components: vec![],
+                is_recipe: false,
+                is_consumable_drop: false,
+            },
+            ItemCatalogEntry {
+                id: ItemId(600),
+                slug: "overwhelming_blink".into(),
+                display_name: "Overwhelming Blink".into(),
+                cost: 6800,
+                components: vec![ItemId(1), ItemId(53)],
+                is_recipe: false,
+                is_consumable_drop: false,
+            },
+            ItemCatalogEntry {
+                id: ItemId(603),
+                slug: "swift_blink".into(),
+                display_name: "Swift Blink".into(),
+                cost: 6800,
+                components: vec![ItemId(1), ItemId(52)],
+                is_recipe: false,
+                is_consumable_drop: false,
+            },
+            ItemCatalogEntry {
+                id: ItemId(114),
+                slug: "heart".into(),
+                display_name: "Heart of Tarrasque".into(),
+                cost: 5100,
+                components: vec![],
+                is_recipe: false,
+                is_consumable_drop: false,
+            },
+        ],
+        custom_hero_stats: vec![(
+            HeroId(2),
+            None,
+            None,
+            vec![
+                HeroItemStat {
+                    item_id: ItemId(1),
+                    phase: ItemPhase::Core,
+                    avg_time_mins: 12.0,
+                    match_count: 2500,
+                    win_count: 1375,
+                },
+                HeroItemStat {
+                    item_id: ItemId(127),
+                    phase: ItemPhase::Core,
+                    avg_time_mins: 16.0,
+                    match_count: 2200,
+                    win_count: 1210,
+                },
+                HeroItemStat {
+                    item_id: ItemId(603),
+                    phase: ItemPhase::Core,
+                    avg_time_mins: 24.0,
+                    match_count: 1200,
+                    win_count: 660,
+                },
+                HeroItemStat {
+                    item_id: ItemId(600),
+                    phase: ItemPhase::Late,
+                    avg_time_mins: 32.0,
+                    match_count: 1600,
+                    win_count: 920,
+                },
+                HeroItemStat {
+                    item_id: ItemId(114),
+                    phase: ItemPhase::Late,
+                    avg_time_mins: 36.0,
+                    match_count: 1200,
+                    win_count: 680,
+                },
+            ],
+        )],
+        ..Default::default()
+    };
+    // Hero upgraded Blink Dagger (1) into Overwhelming Blink (600) while owning Blade Mail (127);
+    // Swift Blink (603) attaches as a sibling direct-upgrade variant beneath Blink Dagger.
+    session.owned_items = vec![ItemId(127), ItemId(600)];
+    session.game_time_secs = 2100;
+    session.toggle_post_draft_build_view();
+
+    let build = session.compute_recommended_build().unwrap();
+    let blink_step = build
+        .steps
+        .iter()
+        .find(|s| s.item_id == ItemId(1))
+        .expect("Blink Dagger step present");
+    assert!(
+        blink_step.owned,
+        "Blink Dagger (1) must be marked satisfied when Overwhelming Blink (600) is owned"
+    );
+    assert!(
+        blink_step.variants.iter().any(|v| v.item_id == ItemId(603)),
+        "Swift Blink (603) must attach under Blink Dagger to exercise UPG READY suppression: {:?}",
+        blink_step.variants
+    );
+    assert_eq!(
+        build.next_unowned_index.map(|i| build.steps[i].item_id),
+        Some(ItemId(114)),
+        "NEXT must advance past upgraded Blink Dagger directly to Heart (114): {:?}",
+        build.steps
+    );
+
+    let mut app = TrueSightGuiApp::new(session, None, None);
+    app.onboarding_open = false;
+    let ctx = egui::Context::default();
+    let desk_out = run_test_ui(
+        &ctx,
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(920.0, 420.0))),
+            ..Default::default()
+        },
+        |ui| {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE)
+                .show(ui, |ui| {
+                    let _ = app.render_item_build_card(ui);
+                });
+        },
+    );
+    let mut desk_texts = Vec::new();
+    for c in &desk_out.shapes {
+        collect_painted_texts(&c.shape, &mut desk_texts);
+    }
+    assert!(
+        desk_texts.iter().any(|t| t == "OK"),
+        "desktop build bar must mark upgraded Blink Dagger OK: {desk_texts:?}"
+    );
+    assert!(
+        desk_texts.iter().any(|t| t == "UPG · Swift Blink"),
+        "Swift Blink chip must render informatively as UPG · Swift Blink: {desk_texts:?}"
+    );
+    assert!(
+        desk_texts.iter().all(|t| !t.starts_with("UPG READY")),
+        "sibling upgrade must NOT highlight UPG READY when base item was already upgraded: {desk_texts:?}"
+    );
+
+    app.session.overlay_mode = true;
+    let ovl_out = run_test_ui(
+        &ctx,
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(520.0, 240.0))),
+            ..Default::default()
+        },
+        |ui| {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE)
+                .show(ui, |ui| {
+                    let _ = app.render_overlay_panel(ui);
+                });
+        },
+    );
+    let mut ovl_texts = Vec::new();
+    for c in &ovl_out.shapes {
+        collect_painted_texts(&c.shape, &mut ovl_texts);
+    }
+    assert!(
+        ovl_texts.iter().any(|t| t == "OK"),
+        "overlay must mark upgraded Blink Dagger OK: {ovl_texts:?}"
+    );
+}

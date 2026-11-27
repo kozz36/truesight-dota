@@ -8628,3 +8628,165 @@ fn dota_process_parsers_detect_exact_linux_comm_and_windows_tasklist_csv() {
     ));
     assert!(!parse_tasklist_has_dota2(""));
 }
+
+#[test]
+fn embedded_antimage_and_witch_doctor_preserve_next_after_out_of_order_late_buys() {
+    use crate::item_repo::SeededItemMetaRepository;
+    use truesight_core::domain::{Bracket, HeroId, ItemId, Role};
+    use truesight_core::math::{is_item_owned_or_upgraded, recommend_item_build};
+
+    let repo = SeededItemMetaRepository::new();
+    let enemies = [None; 5];
+
+    // 1. Embedded Anti-Mage Carry: Treads (63) + BF (145) + Yasha (170) + Abyssal Blade (208) at 26:00 (1560s).
+    let am_owned = [ItemId(63), ItemId(145), ItemId(170), ItemId(208)];
+    let am_build = recommend_item_build(
+        &repo,
+        HeroId(1),
+        Role::Carry,
+        Bracket::Legend,
+        &enemies,
+        &am_owned,
+        1560,
+    )
+    .expect("embedded Anti-Mage build should succeed");
+    assert!(
+        is_item_owned_or_upgraded(&repo, ItemId(143), &am_owned),
+        "Skull Basher (143) must be satisfied when Abyssal Blade (208) is owned"
+    );
+    assert_eq!(
+        am_build
+            .next_unowned_index
+            .map(|i| am_build.steps[i].item_id),
+        Some(ItemId(147)),
+        "embedded Anti-Mage must keep Manta Style (147) as NEXT with Yasha + Abyssal at 26:00: {:?}",
+        am_build.steps
+    );
+
+    // 2. Embedded Witch Doctor Hard Support: Arcane Boots (180) + early Aghanim's Scepter (108) at 22:00 (1320s).
+    let wd_build = recommend_item_build(
+        &repo,
+        HeroId(30),
+        Role::HardSupport,
+        Bracket::Legend,
+        &enemies,
+        &[ItemId(180), ItemId(108)],
+        1320,
+    )
+    .expect("embedded Witch Doctor build should succeed");
+    assert_eq!(
+        wd_build
+            .next_unowned_index
+            .map(|i| wd_build.steps[i].item_id),
+        Some(ItemId(1)),
+        "embedded Witch Doctor with early Aghanim's Scepter must keep NEXT on Blink Dagger (1): {:?}",
+        wd_build.steps
+    );
+
+    // Even before finishing Arcane Boots, rushing Aghanim's Scepter must keep NEXT visible.
+    let wd_scepter_only = recommend_item_build(
+        &repo,
+        HeroId(30),
+        Role::HardSupport,
+        Bracket::Legend,
+        &enemies,
+        &[ItemId(108)],
+        1320,
+    )
+    .expect("embedded Witch Doctor rush Aghs build should succeed");
+    assert!(
+        wd_scepter_only.next_unowned_index.is_some(),
+        "rushing sole Late Aghanim's Scepter must never hide NEXT: {:?}",
+        wd_scepter_only.steps
+    );
+}
+
+#[test]
+fn embedded_antimage_and_faceless_void_keep_core_skipped_after_final_late_buy() {
+    use crate::item_repo::SeededItemMetaRepository;
+    use truesight_core::domain::{Bracket, HeroId, ItemId, Role};
+    use truesight_core::math::recommend_item_build;
+
+    let repo = SeededItemMetaRepository::new();
+    let enemies = [None; 5];
+
+    // 1. Embedded Anti-Mage Carry at 54:00 (3240s):
+    // owning Treads (63), Battle Fury (145), Abyssal Blade (208), Butterfly (139) with no Yasha -> NEXT is Skadi (160).
+    let am_before_skadi = recommend_item_build(
+        &repo,
+        HeroId(1),
+        Role::Carry,
+        Bracket::Legend,
+        &enemies,
+        &[ItemId(63), ItemId(145), ItemId(208), ItemId(139)],
+        3240,
+    )
+    .expect("embedded Anti-Mage pre-Skadi build should succeed");
+    assert_eq!(
+        am_before_skadi
+            .next_unowned_index
+            .map(|i| am_before_skadi.steps[i].item_id),
+        Some(ItemId(160)),
+        "embedded Anti-Mage before buying Skadi must show Eye of Skadi (160) as NEXT: {:?}",
+        am_before_skadi.steps
+    );
+
+    let am_after_skadi = recommend_item_build(
+        &repo,
+        HeroId(1),
+        Role::Carry,
+        Bracket::Legend,
+        &enemies,
+        &[
+            ItemId(63),
+            ItemId(145),
+            ItemId(208),
+            ItemId(139),
+            ItemId(160),
+        ],
+        3240,
+    )
+    .expect("embedded Anti-Mage post-Skadi build should succeed");
+    assert_eq!(
+        am_after_skadi.next_unowned_index, None,
+        "embedded Anti-Mage after buying final Late Eye of Skadi (160) must show NEXT = None, not revert to Manta Style (147): {:?}",
+        am_after_skadi.steps
+    );
+
+    // 2. Embedded Faceless Void Carry at 54:00 (3240s):
+    // owning Treads (63), Mjollnir (158), BKB (116) -> NEXT is Butterfly (139); after buying Butterfly -> None.
+    let fv_before_bfly = recommend_item_build(
+        &repo,
+        HeroId(41),
+        Role::Carry,
+        Bracket::Legend,
+        &enemies,
+        &[ItemId(63), ItemId(158), ItemId(116)],
+        3240,
+    )
+    .expect("embedded Faceless Void pre-Butterfly build should succeed");
+    assert_eq!(
+        fv_before_bfly
+            .next_unowned_index
+            .map(|i| fv_before_bfly.steps[i].item_id),
+        Some(ItemId(139)),
+        "embedded Faceless Void before buying Butterfly must show Butterfly (139) as NEXT: {:?}",
+        fv_before_bfly.steps
+    );
+
+    let fv_after_bfly = recommend_item_build(
+        &repo,
+        HeroId(41),
+        Role::Carry,
+        Bracket::Legend,
+        &enemies,
+        &[ItemId(63), ItemId(158), ItemId(116), ItemId(139)],
+        3240,
+    )
+    .expect("embedded Faceless Void post-Butterfly build should succeed");
+    assert_eq!(
+        fv_after_bfly.next_unowned_index, None,
+        "embedded Faceless Void after buying final Late Butterfly (139) must show NEXT = None, not revert to Manta Style (147): {:?}",
+        fv_after_bfly.steps
+    );
+}

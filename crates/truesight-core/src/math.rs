@@ -593,3 +593,4 @@ fn default_role_for_slot(slot: usize) -> Role {
 }
 
 pub use crate::item_math::{ITEM_VARIANT_SCORE_EPSILON, recommend_item_build};
+pub use crate::item_ownership::{compute_next_unowned_index, is_item_owned_or_upgraded};
