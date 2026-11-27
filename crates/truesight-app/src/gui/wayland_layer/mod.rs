@@ -174,58 +174,13 @@ enum InteractionMode {
     Resizing {
         start_local: (f32, f32),
         start_size: (u32, u32),
+        pacer: pointer::ResizePacer,
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct PendingSetGeometry {
-    pub(super) is_post_draft: bool,
-    pub(super) x: i32,
-    pub(super) y: i32,
-    pub(super) width: u32,
-    pub(super) height: u32,
-    pub(super) min_w: u32,
-    pub(super) min_h: u32,
-}
-
-/// Buffers view transitions (`LayerCommand::SetGeometry`) sent while a native pointer drag or
-/// resize is active so the gesture finishes cleanly under the view that started it and the target
-/// view geometry applies immediately on release.
-#[derive(Debug, Default, Clone, Copy)]
-pub(super) struct DeferredGeometryQueue {
-    pending: Option<PendingSetGeometry>,
-}
-
-impl DeferredGeometryQueue {
-    pub(super) fn clear(&mut self) {
-        self.pending = None;
-    }
-
-    pub(super) fn on_set_geometry(
-        &mut self,
-        gesture_active: bool,
-        req: PendingSetGeometry,
-    ) -> Option<PendingSetGeometry> {
-        if gesture_active {
-            self.pending = Some(req);
-            None
-        } else {
-            self.pending = None;
-            Some(req)
-        }
-    }
-
-    pub(super) fn on_gesture_finished(
-        &mut self,
-        gesture_active: bool,
-    ) -> Option<PendingSetGeometry> {
-        if gesture_active {
-            None
-        } else {
-            self.pending.take()
-        }
-    }
-}
+#[cfg(test)]
+pub(super) use pointer::ResizePacer;
+pub(super) use pointer::{DeferredGeometryQueue, PendingSetGeometry};
 
 pub(super) fn surface_geometry_after_set(
     req: PendingSetGeometry,
@@ -299,15 +254,15 @@ impl WaylandLayerState {
         }
     }
 
-    fn commit_pending_frame(&mut self) {
+    fn commit_pending_frame(&mut self) -> bool {
         let Some(active) = self.active_surface.as_mut() else {
-            return;
+            return false;
         };
         if !active.configured {
-            return;
+            return false;
         }
         let Some(frame_ref) = active.pending_frame.as_ref() else {
-            return;
+            return false;
         };
         if !frame_matches_surface_dims(
             frame_ref.width_px,
@@ -316,16 +271,16 @@ impl WaylandLayerState {
             active.height,
             active.scale,
         ) {
-            return;
+            return false;
         }
         let Some(frame) = active.pending_frame.take() else {
-            return;
+            return false;
         };
         let expected_len = (frame.width_px as usize)
             .saturating_mul(frame.height_px as usize)
             .saturating_mul(4);
         if frame.argb8888.len() < expected_len {
-            return;
+            return false;
         }
 
         let stride = (frame.width_px as i32).saturating_mul(4);
@@ -335,7 +290,7 @@ impl WaylandLayerState {
             stride,
             wl_shm::Format::Argb8888,
         ) else {
-            return;
+            return false;
         };
         if canvas.len() >= expected_len {
             canvas[..expected_len].copy_from_slice(&frame.argb8888[..expected_len]);
@@ -347,6 +302,9 @@ impl WaylandLayerState {
         if buffer.attach_to(wl_surface).is_ok() {
             active.layer.commit();
             self.last_frame = Some(frame);
+            true
+        } else {
+            false
         }
     }
 
@@ -716,6 +674,14 @@ impl WaylandLayerState {
                     && let Some(active) = self.active_surface.as_mut()
                     && (had_anchor || !matches!(active.interaction, InteractionMode::None))
                 {
+                    if let InteractionMode::Resizing { ref mut pacer, .. } = active.interaction
+                        && let Some((w, h)) = pacer.on_finish((active.width, active.height))
+                    {
+                        active.width = w;
+                        active.height = h;
+                        active.layer.set_size(active.width, active.height);
+                        active.layer.commit();
+                    }
                     active.interaction = InteractionMode::None;
                     Some((
                         active.is_post_draft,
@@ -777,7 +743,9 @@ impl WaylandLayerState {
                         scale,
                         argb8888,
                     });
-                    self.commit_pending_frame();
+                    if self.commit_pending_frame() {
+                        self.advance_queued_resize();
+                    }
                 }
             }
             LayerCommand::Shutdown => {

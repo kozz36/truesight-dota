@@ -8,7 +8,46 @@ use eframe::egui::{
     self, Align, Color32, CornerRadius, Layout, Margin, Rect, RichText, Sense, Stroke, StrokeKind,
     Vec2, pos2, vec2,
 };
-use truesight_core::domain::{ItemId, Role, TEAM_SIZE};
+use truesight_core::domain::{Faction, HeroId, ItemId, Role, TEAM_SIZE};
+
+pub(super) fn centered_leading_space(available_width: f32, content_width: f32) -> f32 {
+    ((available_width - content_width) * 0.5).max(0.0)
+}
+
+fn paint_faction_swap_icon(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let c = rect.center();
+    let stroke = Stroke::new(1.4_f32, color);
+    let dx = 4.6_f32;
+    let dy = 2.4_f32;
+    // Upper arrow pointing right
+    painter.line_segment(
+        [pos2(c.x - dx, c.y - dy), pos2(c.x + dx - 1.5, c.y - dy)],
+        stroke,
+    );
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            pos2(c.x + dx, c.y - dy),
+            pos2(c.x + dx - 3.2, c.y - dy - 2.3),
+            pos2(c.x + dx - 3.2, c.y - dy + 2.3),
+        ],
+        color,
+        Stroke::NONE,
+    ));
+    // Lower arrow pointing left
+    painter.line_segment(
+        [pos2(c.x - dx + 1.5, c.y + dy), pos2(c.x + dx, c.y + dy)],
+        stroke,
+    );
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            pos2(c.x - dx, c.y + dy),
+            pos2(c.x - dx + 3.2, c.y + dy - 2.3),
+            pos2(c.x - dx + 3.2, c.y + dy + 2.3),
+        ],
+        color,
+        Stroke::NONE,
+    ));
+}
 
 fn paint_monitor_switch_icon(painter: &egui::Painter, rect: Rect, color: Color32) {
     let c = rect.center();
@@ -65,6 +104,11 @@ pub(super) struct OverlayPanelOutput {
     pub(super) drag_handle: Rect,
     pub(super) resize_handle: Rect,
     pub(super) reset_button: Rect,
+    pub(super) faction_swap_button: Rect,
+    pub(super) picks_col_rect: Rect,
+    pub(super) matrix_rect: Rect,
+    pub(super) build_ally_buttons: [Rect; TEAM_SIZE],
+    pub(super) build_phases_rect: Option<Rect>,
     pub(super) drag_started: bool,
     pub(super) resize_started: bool,
 }
@@ -120,14 +164,21 @@ impl TrueSightGuiApp {
         let interactive = !self.session.overlay_geometry.click_through;
         let mut clicked_role: Option<Role> = None;
         let mut toggle_build_view = false;
+        let mut toggle_faction = false;
         let mut reset_draft = false;
         let mut toggle_click_through = false;
         let mut cycle_monitor = false;
         let mut exit_overlay = false;
         let mut clicked_variant: Option<(ItemId, ItemId)> = None;
+        let mut clicked_build_ally: Option<HeroId> = None;
         let mut drag_handle = Rect::NOTHING;
         let mut drag_hit_rect = Rect::NOTHING;
         let mut reset_button = Rect::NOTHING;
+        let mut faction_swap_button = Rect::NOTHING;
+        let mut picks_col_rect = Rect::NOTHING;
+        let mut matrix_rect = Rect::NOTHING;
+        let mut build_ally_buttons = [Rect::NOTHING; TEAM_SIZE];
+        let mut build_phases_rect = None;
 
         let bg_idx = ui.painter().add(egui::Shape::Noop);
         let panel_resp = egui::Frame::NONE
@@ -301,6 +352,23 @@ impl TrueSightGuiApp {
                             toggle_build_view = true;
                         }
 
+                        let faction_accent = match self.session.draft.ally_faction {
+                            Faction::Radiant => P_GEM,
+                            Faction::Dire => P_DIRE,
+                        };
+                        let faction_resp = overlay_icon_button(
+                            ui,
+                            icon_sz,
+                            faction_accent,
+                            false,
+                            tr.toggle_faction_hover,
+                            paint_faction_swap_icon,
+                        );
+                        faction_swap_button = faction_resp.rect;
+                        if faction_resp.clicked() {
+                            toggle_faction = true;
+                        }
+
                         if self.has_multiple_overlay_monitors(host_mode)
                             && overlay_icon_button(
                                 ui,
@@ -362,15 +430,16 @@ impl TrueSightGuiApp {
                     let cell_side = ((matrix_col_w - 5.0 * grid_gap) / 6.0)
                         .min(((body_h - 14.0 - 5.0 * grid_gap) / 6.0).max(10.0))
                         .clamp(10.0, 38.0);
+                    let matrix_content_w = 6.0 * cell_side + 5.0 * grid_gap;
                     let cell_sz = vec2(cell_side, cell_side);
                     let cell_font = (cell_side * 0.27).clamp(6.8, 10.5);
                     let max_picks = ((body_h - 14.0) / 18.0).floor().clamp(2.0, 8.0) as usize;
 
-                    // Draft phase: Hero-portrait Top Suggestions (left) + 5x5 Intensity Matrix (right)
+                    // Draft phase: Hero-portrait Top Suggestions (left) + 5x5 Intensity Matrix (centered right)
                     ui.horizontal_top(|ui| {
                         ui.spacing_mut().item_spacing.x = 8.0;
 
-                        ui.allocate_ui_with_layout(
+                        let picks_resp = ui.allocate_ui_with_layout(
                             vec2(picks_col_w, body_h),
                             Layout::top_down(Align::Min),
                             |ui| {
@@ -436,141 +505,179 @@ impl TrueSightGuiApp {
                                 }
                             },
                         );
+                        picks_col_rect = picks_resp.response.rect;
+                        let matrix_area_w = (body_w - picks_col_rect.width() - 8.0).max(0.0);
+                        let matrix_lead = centered_leading_space(matrix_area_w, matrix_content_w);
 
-                        ui.vertical(|ui| {
-                            super::surfaces::overlay_scrim_label(
-                                ui,
-                                tr.overlay_cnt_label,
-                                9.0,
-                                true,
-                                P_SILVER,
-                            );
-                            ui.spacing_mut().item_spacing = vec2(grid_gap, grid_gap);
-
-                            // Column Header Row: Blank corner + 5 Enemy Hero Portraits
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = grid_gap;
-                                ui.allocate_exact_size(cell_sz, Sense::hover());
-                                for (col, enemy) in self
-                                    .session
-                                    .draft
-                                    .enemies
-                                    .iter()
-                                    .enumerate()
-                                    .take(TEAM_SIZE)
-                                {
-                                    let (r, _) = ui.allocate_exact_size(cell_sz, Sense::hover());
-                                    if let Some(ep) = enemy {
-                                        if let Some(t) =
-                                            textures.heroes.get(&ep.hero_id).map(|s| &s.color)
-                                        {
-                                            ui.painter().image(
-                                                t.id(),
-                                                r,
-                                                uv_aspect_crop(cell_sz),
-                                                Color32::WHITE,
-                                            );
-                                        } else {
-                                            ui.painter().rect_filled(r, 0.0, P_INDIGO_2);
-                                        }
-                                    } else {
-                                        let lbl = format!("E{}", col + 1);
-                                        paint_empty_matrix_slot(
-                                            ui.painter(),
-                                            r,
-                                            36,
-                                            120,
-                                            Some(&lbl),
-                                            (cell_side * 0.32).max(6.5),
-                                        );
-                                    }
-                                    ui.painter().line_segment(
-                                        [pos2(r.min.x, r.max.y), r.max],
-                                        Stroke::new(1.5_f32, P_DIRE),
-                                    );
-                                }
-                            });
-
-                            // 5 Ally Rows: Ally Portrait + Tinted Enemy Matchup Intensity Cells
-                            for row in 0..TEAM_SIZE {
+                        ui.allocate_ui_with_layout(
+                            vec2(matrix_area_w, body_h),
+                            Layout::top_down(Align::Min),
+                            |ui| {
                                 ui.horizontal(|ui| {
-                                    ui.spacing_mut().item_spacing.x = grid_gap;
-                                    let (rh, _) = ui.allocate_exact_size(cell_sz, Sense::hover());
-                                    if let Some(ap) = self.session.draft.allies[row] {
-                                        if let Some(t) =
-                                            textures.heroes.get(&ap.hero_id).map(|s| &s.color)
-                                        {
-                                            ui.painter().image(
-                                                t.id(),
-                                                rh,
-                                                uv_aspect_crop(cell_sz),
-                                                Color32::WHITE,
-                                            );
-                                        } else {
-                                            ui.painter().rect_filled(rh, 0.0, P_INDIGO_2);
-                                        }
-                                    } else {
-                                        let lbl = format!("A{}", row + 1);
-                                        paint_empty_matrix_slot(
-                                            ui.painter(),
-                                            rh,
-                                            36,
-                                            120,
-                                            Some(&lbl),
-                                            (cell_side * 0.32).max(6.5),
+                                    ui.spacing_mut().item_spacing.x = 0.0;
+                                    if matrix_lead > 0.0 {
+                                        ui.add_space(matrix_lead);
+                                    }
+                                    let mat_resp = ui.vertical(|ui| {
+                                        super::surfaces::overlay_scrim_label(
+                                            ui,
+                                            tr.overlay_cnt_label,
+                                            9.0,
+                                            true,
+                                            P_SILVER,
                                         );
-                                    }
-                                    ui.painter().line_segment(
-                                        [pos2(rh.max.x, rh.min.y), rh.max],
-                                        Stroke::new(1.5_f32, P_GEM),
-                                    );
+                                        ui.spacing_mut().item_spacing = vec2(grid_gap, grid_gap);
 
-                                    for col in 0..TEAM_SIZE {
-                                        if let Some(delta) = summary.counter_grid[row][col] {
-                                            let enemy_toned = self.session.draft.enemies[col]
-                                                .and_then(|p| textures.heroes.get(&p.hero_id))
-                                                .map(|s| &s.toned);
-                                            let cell_resp = paint_tinted_cell(
-                                                ui,
-                                                cell_sz,
-                                                enemy_toned,
-                                                delta * 100.0,
-                                                cell_font,
-                                                1.0,
-                                            );
-                                            let a_name = self.session.draft.allies[row]
-                                                .and_then(|p| self.session.matrix.hero(p.hero_id))
-                                                .map(|h| h.display_name.as_str())
-                                                .unwrap_or("Ally");
-                                            let e_name = self.session.draft.enemies[col]
-                                                .and_then(|p| self.session.matrix.hero(p.hero_id))
-                                                .map(|h| h.display_name.as_str())
-                                                .unwrap_or("Enemy");
-                                            cell_resp.on_hover_text(format!(
-                                                "{a_name} vs {e_name}: {}",
-                                                fmt_pct(delta * 100.0)
-                                            ));
-                                        } else {
-                                            let (er, _) =
-                                                ui.allocate_exact_size(cell_sz, Sense::hover());
-                                            paint_empty_matrix_slot(
-                                                ui.painter(),
-                                                er,
-                                                44,
-                                                115,
-                                                None,
-                                                0.0,
-                                            );
+                                        // Column Header Row: Blank corner + 5 Enemy Hero Portraits
+                                        ui.horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing.x = grid_gap;
+                                            ui.allocate_exact_size(cell_sz, Sense::hover());
+                                            for (col, enemy) in self
+                                                .session
+                                                .draft
+                                                .enemies
+                                                .iter()
+                                                .enumerate()
+                                                .take(TEAM_SIZE)
+                                            {
+                                                let (r, _) =
+                                                    ui.allocate_exact_size(cell_sz, Sense::hover());
+                                                if let Some(ep) = enemy {
+                                                    if let Some(t) = textures
+                                                        .heroes
+                                                        .get(&ep.hero_id)
+                                                        .map(|s| &s.color)
+                                                    {
+                                                        ui.painter().image(
+                                                            t.id(),
+                                                            r,
+                                                            uv_aspect_crop(cell_sz),
+                                                            Color32::WHITE,
+                                                        );
+                                                    } else {
+                                                        ui.painter()
+                                                            .rect_filled(r, 0.0, P_INDIGO_2);
+                                                    }
+                                                } else {
+                                                    let lbl = format!("E{}", col + 1);
+                                                    paint_empty_matrix_slot(
+                                                        ui.painter(),
+                                                        r,
+                                                        36,
+                                                        120,
+                                                        Some(&lbl),
+                                                        (cell_side * 0.32).max(6.5),
+                                                    );
+                                                }
+                                                ui.painter().line_segment(
+                                                    [pos2(r.min.x, r.max.y), r.max],
+                                                    Stroke::new(1.5_f32, P_DIRE),
+                                                );
+                                            }
+                                        });
+
+                                        // 5 Ally Rows: Ally Portrait + Tinted Enemy Matchup Intensity Cells
+                                        for row in 0..TEAM_SIZE {
+                                            ui.horizontal(|ui| {
+                                                ui.spacing_mut().item_spacing.x = grid_gap;
+                                                let (rh, _) =
+                                                    ui.allocate_exact_size(cell_sz, Sense::hover());
+                                                if let Some(ap) = self.session.draft.allies[row] {
+                                                    if let Some(t) = textures
+                                                        .heroes
+                                                        .get(&ap.hero_id)
+                                                        .map(|s| &s.color)
+                                                    {
+                                                        ui.painter().image(
+                                                            t.id(),
+                                                            rh,
+                                                            uv_aspect_crop(cell_sz),
+                                                            Color32::WHITE,
+                                                        );
+                                                    } else {
+                                                        ui.painter()
+                                                            .rect_filled(rh, 0.0, P_INDIGO_2);
+                                                    }
+                                                } else {
+                                                    let lbl = format!("A{}", row + 1);
+                                                    paint_empty_matrix_slot(
+                                                        ui.painter(),
+                                                        rh,
+                                                        36,
+                                                        120,
+                                                        Some(&lbl),
+                                                        (cell_side * 0.32).max(6.5),
+                                                    );
+                                                }
+                                                ui.painter().line_segment(
+                                                    [pos2(rh.max.x, rh.min.y), rh.max],
+                                                    Stroke::new(1.5_f32, P_GEM),
+                                                );
+
+                                                for col in 0..TEAM_SIZE {
+                                                    if let Some(delta) =
+                                                        summary.counter_grid[row][col]
+                                                    {
+                                                        let enemy_toned =
+                                                            self.session.draft.enemies[col]
+                                                                .and_then(|p| {
+                                                                    textures.heroes.get(&p.hero_id)
+                                                                })
+                                                                .map(|s| &s.toned);
+                                                        let cell_resp = paint_tinted_cell(
+                                                            ui,
+                                                            cell_sz,
+                                                            enemy_toned,
+                                                            delta * 100.0,
+                                                            cell_font,
+                                                            1.0,
+                                                        );
+                                                        let a_name = self.session.draft.allies[row]
+                                                            .and_then(|p| {
+                                                                self.session.matrix.hero(p.hero_id)
+                                                            })
+                                                            .map(|h| h.display_name.as_str())
+                                                            .unwrap_or("Ally");
+                                                        let e_name = self.session.draft.enemies
+                                                            [col]
+                                                            .and_then(|p| {
+                                                                self.session.matrix.hero(p.hero_id)
+                                                            })
+                                                            .map(|h| h.display_name.as_str())
+                                                            .unwrap_or("Enemy");
+                                                        cell_resp.on_hover_text(format!(
+                                                            "{a_name} vs {e_name}: {}",
+                                                            fmt_pct(delta * 100.0)
+                                                        ));
+                                                    } else {
+                                                        let (er, _) = ui.allocate_exact_size(
+                                                            cell_sz,
+                                                            Sense::hover(),
+                                                        );
+                                                        paint_empty_matrix_slot(
+                                                            ui.painter(),
+                                                            er,
+                                                            44,
+                                                            115,
+                                                            None,
+                                                            0.0,
+                                                        );
+                                                    }
+                                                }
+                                            });
                                         }
-                                    }
+                                    });
+                                    matrix_rect = mat_resp.response.rect;
                                 });
-                            }
-                        });
+                            },
+                        );
                     });
                 } else {
-                    if let Some(pair) = self.render_overlay_build_panel(ui, &summary, textures) {
-                        clicked_variant = Some(pair);
-                    }
+                    let b_out = self.render_overlay_build_panel(ui, &summary, textures);
+                    clicked_variant = b_out.clicked_variant;
+                    clicked_build_ally = b_out.clicked_ally_hero;
+                    build_ally_buttons = b_out.ally_role_buttons;
+                    build_phases_rect = b_out.phases_rect;
                 }
             });
 
@@ -726,6 +833,10 @@ impl TrueSightGuiApp {
         if let Some(role) = clicked_role {
             self.session.draft.target_role = role;
         }
+        if toggle_faction {
+            self.session
+                .set_ally_faction(self.session.draft.ally_faction.opposite());
+        }
         if reset_draft {
             self.reset_draft_ui();
         }
@@ -743,6 +854,9 @@ impl TrueSightGuiApp {
             self.session.set_overlay_mode(false);
             ui.ctx().request_repaint();
         }
+        if let Some(hid) = clicked_build_ally {
+            self.session.select_build_view_hero(hid);
+        }
         if let Some((primary_id, var_id)) = clicked_variant {
             self.session
                 .select_build_variant_for_item(primary_id, var_id);
@@ -754,6 +868,11 @@ impl TrueSightGuiApp {
             drag_handle,
             resize_handle,
             reset_button,
+            faction_swap_button,
+            picks_col_rect,
+            matrix_rect,
+            build_ally_buttons,
+            build_phases_rect,
             drag_started,
             resize_started,
         }

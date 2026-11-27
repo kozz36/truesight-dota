@@ -5546,3 +5546,82 @@ fn pass_hotkey_parses_formats_portal_triggers_and_persists_in_ui_config() {
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+#[test]
+fn gsi_inventory_heartbeat_without_changes_preserves_build_view_hero() {
+    use truesight_core::domain::{HeroId, Role};
+    use truesight_core::ports::DraftEvent;
+
+    let mut session = AppSession::new().unwrap();
+    assert!(execute_command(&mut session, "ally 1 juggernaut").unwrap());
+    assert!(execute_command(&mut session, "ally 4 hoodwink").unwrap());
+    assert!(execute_command(&mut session, "enemy 1 medusa").unwrap());
+
+    session.apply_event(DraftEvent::LocalPlayerHeroDetected {
+        hero_slug: "npc_dota_hero_juggernaut".into(),
+    });
+    session.apply_event(DraftEvent::InventoryUpdated {
+        hero_slug: Some("npc_dota_hero_juggernaut".into()),
+        item_slugs: vec!["item_tango".into(), "item_phase_boots".into()],
+    });
+    assert_eq!(session.local_player_hero, Some(HeroId(8)));
+    assert_eq!(session.owned_items_owner, Some(HeroId(8)));
+
+    // User inspects teammate Hoodwink's build in Build view.
+    session.select_build_view_hero(HeroId(123));
+    assert_eq!(session.build_view_hero, Some(HeroId(123)));
+    assert_eq!(
+        session.active_build_hero(),
+        Some((HeroId(123), Role::SoftSupport))
+    );
+
+    // Identical periodic GSI heartbeat (same items, even in swapped slot order) must NOT
+    // snap away from the teammate build the user is inspecting.
+    session.apply_event(DraftEvent::InventoryUpdated {
+        hero_slug: Some("npc_dota_hero_juggernaut".into()),
+        item_slugs: vec!["item_phase_boots".into(), "item_tango".into()],
+    });
+    assert_eq!(
+        session.build_view_hero,
+        Some(HeroId(123)),
+        "unchanged periodic GSI heartbeat must preserve selected build_view_hero"
+    );
+    assert_eq!(
+        session.active_build_hero(),
+        Some((HeroId(123), Role::SoftSupport))
+    );
+}
+
+#[test]
+fn gsi_inventory_real_change_clears_build_view_hero_and_returns_to_local_hero() {
+    use truesight_core::domain::{HeroId, Role};
+    use truesight_core::ports::DraftEvent;
+
+    let mut session = AppSession::new().unwrap();
+    assert!(execute_command(&mut session, "ally 1 juggernaut").unwrap());
+    assert!(execute_command(&mut session, "ally 4 hoodwink").unwrap());
+    assert!(execute_command(&mut session, "enemy 1 medusa").unwrap());
+
+    session.apply_event(DraftEvent::LocalPlayerHeroDetected {
+        hero_slug: "npc_dota_hero_juggernaut".into(),
+    });
+    session.apply_event(DraftEvent::InventoryUpdated {
+        hero_slug: Some("npc_dota_hero_juggernaut".into()),
+        item_slugs: vec!["item_phase_boots".into()],
+    });
+    session.select_build_view_hero(HeroId(123));
+    assert_eq!(session.build_view_hero, Some(HeroId(123)));
+
+    // Buying/selling a real item changes the local player's inventory -> auto-return to local hero.
+    session.apply_event(DraftEvent::InventoryUpdated {
+        hero_slug: Some("npc_dota_hero_juggernaut".into()),
+        item_slugs: vec!["item_phase_boots".into(), "item_mjollnir".into()],
+    });
+    assert_eq!(
+        session.build_view_hero, None,
+        "real local inventory change must clear build_view_hero and auto-return to local player"
+    );
+    assert_eq!(session.local_player_hero, Some(HeroId(8)));
+    assert_eq!(session.owned_items_owner, Some(HeroId(8)));
+    assert_eq!(session.active_build_hero(), Some((HeroId(8), Role::Carry)));
+}

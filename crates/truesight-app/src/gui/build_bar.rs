@@ -3,12 +3,14 @@ use super::i18n::UiStrings;
 use super::theme::*;
 use eframe::egui::{self, Align, Color32, Layout, Margin, Rect, RichText, Sense, Stroke, vec2};
 use truesight_core::domain::{
-    BuildStep, ItemId, ItemPhase, OptionalBuildItem, counter_trait_table_patch,
+    BuildStep, ItemId, ItemPhase, OptionalBuildItem, TEAM_SIZE, counter_trait_table_patch,
 };
 use truesight_core::ports::ItemMetaRepository;
 
 pub(super) struct BuildBarRenderOutput {
     pub(super) card: Rect,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) ally_role_buttons: [Rect; TEAM_SIZE],
 }
 
 pub(super) fn variant_chip_label_and_highlight(
@@ -469,11 +471,14 @@ impl TrueSightGuiApp {
     pub(super) fn render_item_build_card(&mut self, ui: &mut egui::Ui) -> BuildBarRenderOutput {
         let tr = super::i18n::strings(self.session.ui_language);
         let mut clicked_variant: Option<(ItemId, ItemId)> = None;
+        let mut clicked_ally_hero = None;
         let mut switch_to_picks = false;
+        let mut ally_role_buttons = [Rect::NOTHING; TEAM_SIZE];
+        let active_build = self.session.active_build_hero();
 
         let card_rect = hud_card_fill(ui, |ui| {
             let build_opt = self.session.compute_recommended_build();
-            let hero_header = if let Some((hero_id, role)) = self.session.active_build_hero() {
+            let hero_header = if let Some((hero_id, role)) = active_build {
                 let hero_name = self
                     .session
                     .matrix
@@ -491,12 +496,15 @@ impl TrueSightGuiApp {
 
             // Header
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
-                ui.label(
-                    RichText::new(hero_header)
-                        .size(11.0)
-                        .strong()
-                        .color(P_GLINT),
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(hero_header)
+                            .size(11.0)
+                            .strong()
+                            .color(P_GLINT),
+                    )
+                    .truncate(),
                 );
 
                 ui.label(
@@ -523,6 +531,7 @@ impl TrueSightGuiApp {
                 }
 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 3.0;
                     let toggle_btn = egui::Button::new(
                         RichText::new(tr.picks_view_btn)
                             .size(10.0)
@@ -537,6 +546,47 @@ impl TrueSightGuiApp {
                         .clicked()
                     {
                         switch_to_picks = true;
+                    }
+
+                    ui.add_space(4.0);
+
+                    for idx in (0..TEAM_SIZE).rev() {
+                        let picked_hero = self.session.draft.allies[idx].map(|p| p.hero_id);
+                        let is_on = active_build
+                            .is_some_and(|(active_id, _)| picked_hero == Some(active_id));
+                        let role_lbl = format!("P{}", idx + 1);
+                        let txt_col = if picked_hero.is_none() {
+                            P_MUTED
+                        } else if is_on {
+                            P_VOID
+                        } else {
+                            P_SILVER
+                        };
+                        let fill_col = if is_on { P_GEM } else { P_INDIGO_2 };
+                        let border_col = if is_on { P_GEM } else { P_LINE };
+                        let btn = egui::Button::new(
+                            RichText::new(&role_lbl).size(9.5).strong().color(txt_col),
+                        )
+                        .fill(fill_col)
+                        .stroke(Stroke::new(1.0_f32, border_col))
+                        .min_size(vec2(22.0, 18.0));
+                        let hover = match picked_hero
+                            .and_then(|id| self.session.matrix.hero(id))
+                            .map(|h| h.display_name.as_str())
+                        {
+                            Some(name) => format!("P{} · {name}", idx + 1),
+                            None => format!("P{} · —", idx + 1),
+                        };
+                        let resp = ui
+                            .add_enabled(picked_hero.is_some(), btn)
+                            .on_disabled_hover_text(&hover)
+                            .on_hover_text(hover);
+                        ally_role_buttons[idx] = resp.rect;
+                        if resp.clicked()
+                            && let Some(hid) = picked_hero
+                        {
+                            clicked_ally_hero = Some(hid);
+                        }
                     }
                 });
             });
@@ -794,11 +844,17 @@ impl TrueSightGuiApp {
         if switch_to_picks {
             self.session.toggle_post_draft_build_view();
         }
+        if let Some(hid) = clicked_ally_hero {
+            self.session.select_build_view_hero(hid);
+        }
         if let Some((primary_id, var_id)) = clicked_variant {
             self.session
                 .select_build_variant_for_item(primary_id, var_id);
         }
 
-        BuildBarRenderOutput { card: card_rect }
+        BuildBarRenderOutput {
+            card: card_rect,
+            ally_role_buttons,
+        }
     }
 }
