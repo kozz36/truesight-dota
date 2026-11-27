@@ -8700,3 +8700,93 @@ fn embedded_antimage_and_witch_doctor_preserve_next_after_out_of_order_late_buys
         wd_scepter_only.steps
     );
 }
+
+#[test]
+fn embedded_antimage_and_faceless_void_keep_core_skipped_after_final_late_buy() {
+    use crate::item_repo::SeededItemMetaRepository;
+    use truesight_core::domain::{Bracket, HeroId, ItemId, Role};
+    use truesight_core::math::recommend_item_build;
+
+    let repo = SeededItemMetaRepository::new();
+    let enemies = [None; 5];
+
+    // 1. Embedded Anti-Mage Carry at 54:00 (3240s):
+    // owning Treads (63), Battle Fury (145), Abyssal Blade (208), Butterfly (139) with no Yasha -> NEXT is Skadi (160).
+    let am_before_skadi = recommend_item_build(
+        &repo,
+        HeroId(1),
+        Role::Carry,
+        Bracket::Legend,
+        &enemies,
+        &[ItemId(63), ItemId(145), ItemId(208), ItemId(139)],
+        3240,
+    )
+    .expect("embedded Anti-Mage pre-Skadi build should succeed");
+    assert_eq!(
+        am_before_skadi
+            .next_unowned_index
+            .map(|i| am_before_skadi.steps[i].item_id),
+        Some(ItemId(160)),
+        "embedded Anti-Mage before buying Skadi must show Eye of Skadi (160) as NEXT: {:?}",
+        am_before_skadi.steps
+    );
+
+    let am_after_skadi = recommend_item_build(
+        &repo,
+        HeroId(1),
+        Role::Carry,
+        Bracket::Legend,
+        &enemies,
+        &[
+            ItemId(63),
+            ItemId(145),
+            ItemId(208),
+            ItemId(139),
+            ItemId(160),
+        ],
+        3240,
+    )
+    .expect("embedded Anti-Mage post-Skadi build should succeed");
+    assert_eq!(
+        am_after_skadi.next_unowned_index, None,
+        "embedded Anti-Mage after buying final Late Eye of Skadi (160) must show NEXT = None, not revert to Manta Style (147): {:?}",
+        am_after_skadi.steps
+    );
+
+    // 2. Embedded Faceless Void Carry at 54:00 (3240s):
+    // owning Treads (63), Mjollnir (158), BKB (116) -> NEXT is Butterfly (139); after buying Butterfly -> None.
+    let fv_before_bfly = recommend_item_build(
+        &repo,
+        HeroId(41),
+        Role::Carry,
+        Bracket::Legend,
+        &enemies,
+        &[ItemId(63), ItemId(158), ItemId(116)],
+        3240,
+    )
+    .expect("embedded Faceless Void pre-Butterfly build should succeed");
+    assert_eq!(
+        fv_before_bfly
+            .next_unowned_index
+            .map(|i| fv_before_bfly.steps[i].item_id),
+        Some(ItemId(139)),
+        "embedded Faceless Void before buying Butterfly must show Butterfly (139) as NEXT: {:?}",
+        fv_before_bfly.steps
+    );
+
+    let fv_after_bfly = recommend_item_build(
+        &repo,
+        HeroId(41),
+        Role::Carry,
+        Bracket::Legend,
+        &enemies,
+        &[ItemId(63), ItemId(158), ItemId(116), ItemId(139)],
+        3240,
+    )
+    .expect("embedded Faceless Void post-Butterfly build should succeed");
+    assert_eq!(
+        fv_after_bfly.next_unowned_index, None,
+        "embedded Faceless Void after buying final Late Butterfly (139) must show NEXT = None, not revert to Manta Style (147): {:?}",
+        fv_after_bfly.steps
+    );
+}

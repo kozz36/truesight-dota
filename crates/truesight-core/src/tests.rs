@@ -2721,3 +2721,132 @@ fn recommend_item_build_keeps_manta_eligible_after_out_of_order_abyssal_and_supp
         turbo_build.steps
     );
 }
+
+#[test]
+fn recommend_item_build_keeps_obsolete_core_skipped_after_final_late_purchase() {
+    use crate::domain::{Bracket, ItemId, ItemPhase};
+    use crate::math::recommend_item_build;
+
+    let enemies = [None; 5];
+
+    // 1. Late-game Anti-Mage-like inventory at 54:00 (3240s) without Yasha:
+    // before buying the final Late item (Eye of Skadi 160), Manta Style (147) is skipped
+    // and NEXT is Skadi; after buying Skadi, NEXT must become None instead of reverting to Manta.
+    let am_repo = MockItemRepo {
+        catalog: vec![
+            catalog_entry(63, "Power Treads", 1400, &[29, 25, 17], false, false),
+            catalog_entry(145, "Battle Fury", 4100, &[65, 69], false, false),
+            catalog_entry(170, "Yasha", 2100, &[], false, false),
+            catalog_entry(147, "Manta Style", 4650, &[170, 24], false, false),
+            catalog_entry(143, "Skull Basher", 2875, &[21], false, false),
+            catalog_entry(160, "Eye of Skadi", 5300, &[24], false, false),
+            catalog_entry(139, "Butterfly", 4975, &[52], false, false),
+            catalog_entry(208, "Abyssal Blade", 6150, &[143, 236], false, false),
+        ],
+        stats: vec![
+            item_stat(63, ItemPhase::Early, 6.5, 1400, 740),
+            item_stat(145, ItemPhase::Core, 14.5, 1350, 735),
+            item_stat(147, ItemPhase::Core, 21.5, 1300, 725),
+            item_stat(160, ItemPhase::Late, 28.5, 780, 445),
+            item_stat(139, ItemPhase::Late, 29.5, 740, 430),
+            item_stat(208, ItemPhase::Late, 37.0, 620, 365),
+        ],
+    };
+
+    let before_skadi = recommend_item_build(
+        &am_repo,
+        HeroId(1),
+        Role::Carry,
+        Bracket::Legend,
+        &enemies,
+        &[ItemId(63), ItemId(145), ItemId(208), ItemId(139)],
+        3240,
+    )
+    .expect("pre-Skadi late build should succeed");
+    assert_eq!(
+        before_skadi
+            .next_unowned_index
+            .map(|i| before_skadi.steps[i].item_id),
+        Some(ItemId(160)),
+        "before buying the final Late item (Skadi), NEXT must be Eye of Skadi (160): {:?}",
+        before_skadi.steps
+    );
+
+    let after_skadi = recommend_item_build(
+        &am_repo,
+        HeroId(1),
+        Role::Carry,
+        Bracket::Legend,
+        &enemies,
+        &[
+            ItemId(63),
+            ItemId(145),
+            ItemId(208),
+            ItemId(139),
+            ItemId(160),
+        ],
+        3240,
+    )
+    .expect("post-Skadi late build should succeed");
+    assert_eq!(
+        after_skadi.next_unowned_index, None,
+        "after buying the final Late item (Skadi), NEXT must become None instead of reverting to skipped Manta Style (147): {:?}",
+        after_skadi.steps
+    );
+
+    let with_yasha = recommend_item_build(
+        &am_repo,
+        HeroId(1),
+        Role::Carry,
+        Bracket::Legend,
+        &enemies,
+        &[
+            ItemId(63),
+            ItemId(145),
+            ItemId(208),
+            ItemId(139),
+            ItemId(160),
+            ItemId(170),
+        ],
+        3240,
+    )
+    .expect("in-progress Yasha build should succeed");
+    assert_eq!(
+        with_yasha
+            .next_unowned_index
+            .map(|i| with_yasha.steps[i].item_id),
+        Some(ItemId(147)),
+        "holding Yasha (170) keeps in-progress Manta Style (147) eligible as NEXT even when all Late items are owned: {:?}",
+        with_yasha.steps
+    );
+
+    // 2. Sparse build without any Late items: completing all Core items at 25:00 (1500s)
+    // must keep skipped Early Wand (36) obsolete so NEXT becomes None.
+    let sparse_no_late_repo = MockItemRepo {
+        catalog: vec![
+            catalog_entry(36, "Magic Wand", 450, &[], false, false),
+            catalog_entry(252, "Echo Sabre", 2700, &[21, 3, 57], false, false),
+            catalog_entry(116, "Black King Bar", 4050, &[], false, false),
+        ],
+        stats: vec![
+            item_stat(36, ItemPhase::Early, 4.0, 2000, 1080),
+            item_stat(252, ItemPhase::Core, 14.0, 1800, 970),
+            item_stat(116, ItemPhase::Core, 22.0, 1900, 1040),
+        ],
+    };
+    let sparse_complete = recommend_item_build(
+        &sparse_no_late_repo,
+        HeroId(135),
+        Role::Offlane,
+        Bracket::Legend,
+        &enemies,
+        &[ItemId(252), ItemId(116)],
+        1500,
+    )
+    .expect("sparse no-late complete build should succeed");
+    assert_eq!(
+        sparse_complete.next_unowned_index, None,
+        "completing all Core items in a build with no Late items must keep skipped Early Wand obsolete: {:?}",
+        sparse_complete.steps
+    );
+}

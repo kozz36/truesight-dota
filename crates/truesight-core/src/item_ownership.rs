@@ -60,10 +60,6 @@ pub fn compute_next_unowned_index(
         .iter()
         .filter(|s| s.owned && s.phase == ItemPhase::Late)
         .count();
-    let has_unowned_late = steps.iter().any(|s| !s.owned && s.phase == ItemPhase::Late);
-    let has_unowned_core_or_late = steps
-        .iter()
-        .any(|s| !s.owned && matches!(s.phase, ItemPhase::Core | ItemPhase::Late));
     let has_brown_boots = owned_items.contains(&ItemId(29));
 
     let is_obsolete_for_next = |step: &BuildStep| -> bool {
@@ -75,15 +71,11 @@ pub fn compute_next_unowned_index(
         }
         match step.phase {
             ItemPhase::Early => {
-                let progressed = owned_core_or_late >= 2
-                    || (owned_core_or_late >= 1 && game_mins >= step.avg_time_mins + 15.0);
-                let late_complete = !has_unowned_core_or_late && owned_late >= 1;
-                progressed && (has_unowned_core_or_late || late_complete)
+                owned_core_or_late >= 2
+                    || (owned_core_or_late >= 1 && game_mins >= step.avg_time_mins + 15.0)
             }
             ItemPhase::Core => {
-                has_unowned_late
-                    && (owned_late >= 2
-                        || (owned_late >= 1 && game_mins >= step.avg_time_mins + 18.0))
+                owned_late >= 2 || (owned_late >= 1 && game_mins >= step.avg_time_mins + 18.0)
             }
             _ => false,
         }
