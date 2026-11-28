@@ -9670,4 +9670,81 @@ fn sparse_role_backfill_pairs_blessing_and_scepter_across_tiers() {
         "Butterfly (139) must appear as primary Late step alongside Scepter (108): {:?}",
         zero_late_build.steps
     );
+
+    // 3. Butterfly in Tier 0 STRATZ fills the second Late slot (alongside role BKB), while
+    // owned Scepter (108) sits in Tier 1 OpenDota and Blessing (271) is in Tier 0 STRATZ.
+    // Owned Scepter from Tier 1 must still be promoted into steps so Blessing attaches under it.
+    let mut tier0_bfly_repo = SeededItemMetaRepository::new();
+    tier0_bfly_repo.custom_hero_stats.push((
+        HeroId(114),
+        Some(Role::Mid),
+        Some(Bracket::Legend),
+        vec![
+            stat(63, ItemPhase::Early, 6.5, 1200, 620),
+            stat(252, ItemPhase::Core, 15.5, 900, 480),
+            stat(116, ItemPhase::Late, 26.0, 1000, 520),
+        ],
+    ));
+    tier0_bfly_repo.custom_hero_stats.push((
+        HeroId(114),
+        None,
+        Some(Bracket::Legend),
+        vec![
+            stat(271, ItemPhase::Late, 38.0, 1200, 720),
+            stat(139, ItemPhase::Late, 33.0, 28000, 15900),
+        ],
+    ));
+    tier0_bfly_repo.custom_hero_stats.push((
+        HeroId(114),
+        None,
+        None,
+        vec![stat(108, ItemPhase::Late, 27.0, 400, 224)],
+    ));
+
+    let tier0_bfly_build = recommend_item_build(
+        &tier0_bfly_repo,
+        HeroId(114),
+        Role::Mid,
+        Bracket::Legend,
+        &[None; 5],
+        &[ItemId(108)],
+        1800,
+    )
+    .expect("cross-tier Blessing with Tier 0 Butterfly build should succeed");
+    let scepter_bfly = tier0_bfly_build
+        .steps
+        .iter()
+        .find(|s| s.item_id == ItemId(108))
+        .expect(
+            "owned Scepter (108) from Tier 1 must still appear when Tier 0 Butterfly fills quota",
+        );
+    assert!(scepter_bfly.owned);
+    assert!(
+        scepter_bfly
+            .variants
+            .iter()
+            .any(|v| v.item_id == ItemId(271)),
+        "Blessing (271) must attach under owned Scepter (108) even when Tier 0 Butterfly filled quota: {:?}",
+        scepter_bfly.variants
+    );
+    assert!(
+        !tier0_bfly_build
+            .steps
+            .iter()
+            .any(|s| s.item_id == ItemId(271)),
+        "Blessing (271) must NOT appear as standalone primary Late step: {:?}",
+        tier0_bfly_build.steps
+    );
+    assert!(
+        tier0_bfly_build
+            .steps
+            .iter()
+            .any(|s| s.item_id == ItemId(116))
+            && tier0_bfly_build
+                .steps
+                .iter()
+                .any(|s| s.item_id == ItemId(139)),
+        "BKB (116) and Butterfly (139) must remain primary Late steps: {:?}",
+        tier0_bfly_build.steps
+    );
 }

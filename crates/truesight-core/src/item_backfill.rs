@@ -35,7 +35,7 @@ pub(crate) fn backfill_sparse_late_steps(
         return;
     }
 
-    let prepared_tiers: Vec<(u32, Vec<HeroItemStat>)> = repo
+    let mut prepared_tiers: Vec<(u32, Vec<HeroItemStat>)> = repo
         .hero_item_late_fallback_tiers(hero_id, role, bracket)
         .into_iter()
         .map(|tier| {
@@ -59,6 +59,41 @@ pub(crate) fn backfill_sparse_late_steps(
             .iter()
             .any(|(_, cands)| cands.iter().any(|s| s.item_id.0 == 108));
 
+    // Extract unowned Aghanim's Blessing (271) globally before quota filling so higher-priority
+    // Blessing rows defer under Scepter rather than consuming Late quota.
+    if has_scepter && !owned_items.contains(&ItemId(271)) {
+        for (_, cands) in &mut prepared_tiers {
+            if let Some(pos) = cands.iter().position(|s| s.item_id.0 == 271) {
+                let blessing = cands.remove(pos);
+                if deferred_aghs_blessing.is_none() {
+                    *deferred_aghs_blessing = Some(score_timed_candidate(
+                        repo,
+                        blessing,
+                        enemies,
+                        owned_items,
+                        false,
+                    ));
+                }
+            }
+        }
+    }
+
+    // Collect distinct directly-owned fallback items across all prepared tiers (highest priority first)
+    // so owned upgrade parents in later tiers stay reserved and are always promoted into steps.
+    let mut owned_fallback_stats: Vec<HeroItemStat> = Vec::new();
+    for (_, cands) in &prepared_tiers {
+        for &stat in cands {
+            if owned_items.contains(&stat.item_id)
+                && !steps.iter().any(|s| s.item_id == stat.item_id)
+                && !owned_fallback_stats
+                    .iter()
+                    .any(|o| o.item_id == stat.item_id)
+            {
+                owned_fallback_stats.push(stat);
+            }
+        }
+    }
+
     for (raw_tier_max_mc, mut deduped) in prepared_tiers {
         if surviving_non_boot_late(steps) >= 2 {
             break;
@@ -69,22 +104,6 @@ pub(crate) fn backfill_sparse_late_steps(
             }) && !remainder.iter().any(|r| r.step.item_id == s.item_id)
         });
 
-        if has_scepter
-            && !owned_items.contains(&ItemId(271))
-            && let Some(pos) = deduped.iter().position(|s| s.item_id.0 == 271)
-        {
-            let blessing = deduped.remove(pos);
-            if deferred_aghs_blessing.is_none() {
-                *deferred_aghs_blessing = Some(score_timed_candidate(
-                    repo,
-                    blessing,
-                    enemies,
-                    owned_items,
-                    false,
-                ));
-            }
-        }
-
         deduped.retain(|s| {
             owned_items.contains(&s.item_id)
                 || !is_phase_filler(ItemPhase::Late, s.match_count, raw_tier_max_mc)
@@ -92,6 +111,14 @@ pub(crate) fn backfill_sparse_late_steps(
         if deduped.is_empty() {
             continue;
         }
+
+        let reserved_owned = owned_fallback_stats
+            .iter()
+            .filter(|o| {
+                !steps.iter().any(|s| s.item_id == o.item_id)
+                    && !deduped.iter().any(|d| d.item_id == o.item_id)
+            })
+            .count();
 
         let mut scored_tier: Vec<ScoredCandidate> = deduped
             .into_iter()
@@ -107,14 +134,27 @@ pub(crate) fn backfill_sparse_late_steps(
 
         let mut late_count = steps.iter().filter(|s| s.phase == ItemPhase::Late).count();
         for cand in scored_tier {
-            if steps.len() < MAX_PRIMARY_BUILD_STEPS
-                && late_count < phase_primary_cap(ItemPhase::Late)
-            {
+            let can_promote = if cand.directly_owned {
+                steps.len() < MAX_PRIMARY_BUILD_STEPS
+            } else {
+                steps.len() + reserved_owned < MAX_PRIMARY_BUILD_STEPS
+                    && late_count + reserved_owned < phase_primary_cap(ItemPhase::Late)
+            };
+            if can_promote {
                 steps.push(cand.step);
                 late_count += 1;
             } else {
                 remainder.push(cand);
             }
+        }
+    }
+
+    // Guarantee any directly-owned fallback item sitting in an unvisited later tier is promoted
+    // into primary steps so upgrade variants (such as Blessing under owned Scepter) attach cleanly.
+    for stat in owned_fallback_stats {
+        if !steps.iter().any(|s| s.item_id == stat.item_id) && steps.len() < MAX_PRIMARY_BUILD_STEPS
+        {
+            steps.push(score_timed_candidate(repo, stat, enemies, owned_items, false).step);
         }
     }
 }
