@@ -9510,3 +9510,164 @@ fn sparse_role_backfill_rejects_low_sample_tier_noise_and_defers_fallback_blessi
         blessing_build.steps
     );
 }
+
+#[test]
+fn sparse_role_backfill_pairs_blessing_and_scepter_across_tiers() {
+    use crate::item_repo::SeededItemMetaRepository;
+    use truesight_core::domain::{Bracket, HeroId, HeroItemStat, ItemId, ItemPhase, Role};
+    use truesight_core::math::recommend_item_build;
+
+    let stat =
+        |item_id: u16, phase: ItemPhase, avg_time_mins: f32, mc: u32, wc: u32| HeroItemStat {
+            item_id: ItemId(item_id),
+            phase,
+            avg_time_mins,
+            match_count: mc,
+            win_count: wc,
+        };
+
+    // 1. Role has 1 Late step (BKB 116); Tier 0 unroled STRATZ has Aghanim's Blessing (271);
+    // Tier 1 OpenDota has owned Aghanim's Scepter (108) + Butterfly (139).
+    // At 30:00 (1800s) with Scepter (108) in inventory, Blessing must defer under Scepter rather
+    // than consuming the second Late slot and stopping before Tier 1.
+    let mut one_late_repo = SeededItemMetaRepository::new();
+    one_late_repo.custom_hero_stats.push((
+        HeroId(114),
+        Some(Role::Mid),
+        Some(Bracket::Legend),
+        vec![
+            stat(63, ItemPhase::Early, 6.5, 1200, 620),
+            stat(252, ItemPhase::Core, 15.5, 900, 480),
+            stat(116, ItemPhase::Late, 26.0, 1000, 520),
+        ],
+    ));
+    one_late_repo.custom_hero_stats.push((
+        HeroId(114),
+        None,
+        Some(Bracket::Legend),
+        vec![stat(271, ItemPhase::Late, 38.0, 1200, 720)],
+    ));
+    one_late_repo.custom_hero_stats.push((
+        HeroId(114),
+        None,
+        None,
+        vec![
+            stat(108, ItemPhase::Late, 27.0, 400, 224),
+            stat(139, ItemPhase::Late, 33.0, 350, 196),
+        ],
+    ));
+
+    let one_late_build = recommend_item_build(
+        &one_late_repo,
+        HeroId(114),
+        Role::Mid,
+        Bracket::Legend,
+        &[None; 5],
+        &[ItemId(108)],
+        1800,
+    )
+    .expect("cross-tier Blessing deferral build (1 role Late step) should succeed");
+    let scepter_one = one_late_build
+        .steps
+        .iter()
+        .find(|s| s.item_id == ItemId(108))
+        .expect("owned Scepter (108) from Tier 1 must appear as primary Late step");
+    assert!(scepter_one.owned);
+    assert!(
+        scepter_one
+            .variants
+            .iter()
+            .any(|v| v.item_id == ItemId(271)),
+        "Tier 0 Blessing (271) must attach under Tier 1 Scepter (108): {:?}",
+        scepter_one.variants
+    );
+    assert!(
+        !one_late_build
+            .steps
+            .iter()
+            .any(|s| s.item_id == ItemId(271)),
+        "Blessing (271) must NOT appear as standalone primary Late step: {:?}",
+        one_late_build.steps
+    );
+    assert!(
+        one_late_build
+            .steps
+            .iter()
+            .any(|s| s.item_id == ItemId(116))
+            && one_late_build
+                .steps
+                .iter()
+                .any(|s| s.item_id == ItemId(139)),
+        "BKB (116) and Butterfly (139) must remain primary Late steps: {:?}",
+        one_late_build.steps
+    );
+
+    // 2. Role has 0 Late steps; same cross-tier setup must surface Scepter (108) and Butterfly (139)
+    // as primary Late steps while attaching Blessing (271) under Scepter.
+    let mut zero_late_repo = SeededItemMetaRepository::new();
+    zero_late_repo.custom_hero_stats.push((
+        HeroId(114),
+        Some(Role::Mid),
+        Some(Bracket::Legend),
+        vec![
+            stat(63, ItemPhase::Early, 6.5, 1200, 620),
+            stat(252, ItemPhase::Core, 15.5, 900, 480),
+        ],
+    ));
+    zero_late_repo.custom_hero_stats.push((
+        HeroId(114),
+        None,
+        Some(Bracket::Legend),
+        vec![stat(271, ItemPhase::Late, 38.0, 1200, 720)],
+    ));
+    zero_late_repo.custom_hero_stats.push((
+        HeroId(114),
+        None,
+        None,
+        vec![
+            stat(108, ItemPhase::Late, 27.0, 400, 224),
+            stat(139, ItemPhase::Late, 33.0, 350, 196),
+        ],
+    ));
+
+    let zero_late_build = recommend_item_build(
+        &zero_late_repo,
+        HeroId(114),
+        Role::Mid,
+        Bracket::Legend,
+        &[None; 5],
+        &[ItemId(108)],
+        1800,
+    )
+    .expect("cross-tier Blessing deferral build (0 role Late steps) should succeed");
+    let scepter_zero = zero_late_build
+        .steps
+        .iter()
+        .find(|s| s.item_id == ItemId(108))
+        .expect("owned Scepter (108) from Tier 1 must appear as primary Late step");
+    assert!(scepter_zero.owned);
+    assert!(
+        scepter_zero
+            .variants
+            .iter()
+            .any(|v| v.item_id == ItemId(271)),
+        "Tier 0 Blessing (271) must attach under Tier 1 Scepter (108): {:?}",
+        scepter_zero.variants
+    );
+    assert!(
+        !zero_late_build
+            .steps
+            .iter()
+            .any(|s| s.item_id == ItemId(271)),
+        "Blessing (271) must NOT appear as standalone primary Late step: {:?}",
+        zero_late_build.steps
+    );
+    assert!(
+        zero_late_build
+            .steps
+            .iter()
+            .any(|s| s.item_id == ItemId(139)),
+        "Butterfly (139) must appear as primary Late step alongside Scepter (108): {:?}",
+        zero_late_build.steps
+    );
+}
