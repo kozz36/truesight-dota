@@ -7022,13 +7022,17 @@ fn stratz_item_query_omits_starting_time_and_aliases_all_four_brackets() {
         "diStart:",
         "diBoot:",
         "diFull:",
-        "matchLimit: 5",
+        "matchLimit: 1",
     ] {
         assert!(
             payload.contains(expected),
             "expected {expected:?} in payload: {payload}"
         );
     }
+    assert!(
+        !payload.contains("matchLimit: 5"),
+        "STRATZ itemFullPurchase query must not cap at matchLimit: 5: {payload}"
+    );
     assert!(
         !payload.contains("wasGiven") || !payload.contains("hgStart: itemStartingPurchase(heroId: 32, positionIds: [POSITION_2], bracketBasicIds: [HERALD_GUARDIAN]) { itemId time"),
         "starting item query must NOT request `time` on HeroItemStartingPurchaseType: {payload}"
@@ -7355,6 +7359,7 @@ fn sync_partial_stratz_buckets_keeps_opendota_fallback_for_uncovered_brackets() 
     let item_constants_json = r#"{
         "diffusal_blade": {"id": 174, "dname": "Diffusal Blade", "cost": 2500, "components": ["blade_of_alacrity", "robe"]},
         "disperser": {"id": 1097, "dname": "Disperser", "cost": 6100, "components": ["diffusal_blade", "eagle"]},
+        "greater_crit": {"id": 141, "dname": "Daedalus", "cost": 5100, "components": ["lesser_crit", "demon_edge"]},
         "manta": {"id": 147, "dname": "Manta Style", "cost": 4550, "components": ["yasha", "diadem"]},
         "butterfly": {"id": 139, "dname": "Butterfly", "cost": 4975, "components": ["eagle"]}
     }"#;
@@ -7368,7 +7373,8 @@ fn sync_partial_stratz_buckets_keeps_opendota_fallback_for_uncovered_brackets() 
                 "diBoot": [{"itemId": 63, "time": 420000, "matchCount": 1000, "winCount": 550}],
                 "diFull": [
                     {"itemId": 174, "time": 14, "matchCount": 1000, "winCount": 570},
-                    {"itemId": 1097, "time": 26, "matchCount": 900, "winCount": 540}
+                    {"itemId": 1097, "time": 26, "matchCount": 900, "winCount": 540},
+                    {"itemId": 141, "time": 31, "matchCount": 820, "winCount": 490}
                 ]
             }
         }
@@ -8788,5 +8794,957 @@ fn embedded_antimage_and_faceless_void_keep_core_skipped_after_final_late_buy() 
         fv_after_bfly.next_unowned_index, None,
         "embedded Faceless Void after buying final Late Butterfly (139) must show NEXT = None, not revert to Manta Style (147): {:?}",
         fv_after_bfly.steps
+    );
+}
+
+#[test]
+fn sparse_role_stratz_build_backfills_late_items_preserving_role_early_core_and_late_priority() {
+    use crate::item_repo::SeededItemMetaRepository;
+    use truesight_core::domain::{Bracket, HeroId, HeroItemStat, ItemId, ItemPhase, Role};
+    use truesight_core::math::recommend_item_build;
+
+    let stat =
+        |item_id: u16, phase: ItemPhase, avg_time_mins: f32, mc: u32, wc: u32| HeroItemStat {
+            item_id: ItemId(item_id),
+            phase,
+            avg_time_mins,
+            match_count: mc,
+            win_count: wc,
+        };
+    let is_non_boot =
+        |id: ItemId| !matches!(id.0, 29 | 48 | 50 | 63 | 180 | 214 | 220 | 231 | 931 | 1953);
+
+    // 1. Monkey King Pos 2 (Mid) in Legend with sparse role stats:
+    // Treads (Early), Echo Sabre (Core), BKB (sole non-boot Late), and Boots of Travel (boot Late).
+    // Must backfill missing non-boot Late items from unroled MK Legend stats while keeping
+    // Mid Echo Sabre (252) and excluding unroled Carry Battle Fury (145).
+    let mut repo = SeededItemMetaRepository::new();
+    repo.custom_hero_stats.push((
+        HeroId(114),
+        Some(Role::Mid),
+        Some(Bracket::Legend),
+        vec![
+            stat(63, ItemPhase::Early, 6.5, 10876, 5650),
+            stat(252, ItemPhase::Core, 15.5, 7500, 3950),
+            stat(116, ItemPhase::Late, 25.0, 8768, 4650),
+            stat(48, ItemPhase::Late, 28.0, 1200, 620),
+        ],
+    ));
+    repo.custom_hero_stats.push((
+        HeroId(114),
+        None,
+        Some(Bracket::Legend),
+        vec![
+            stat(63, ItemPhase::Early, 6.5, 50000, 26000),
+            stat(145, ItemPhase::Core, 15.0, 45000, 23500),
+            stat(116, ItemPhase::Late, 24.5, 42000, 22500),
+            stat(160, ItemPhase::Late, 29.0, 38000, 21000),
+            stat(108, ItemPhase::Late, 27.0, 34000, 19000),
+            stat(139, ItemPhase::Late, 33.0, 28000, 16000),
+            stat(156, ItemPhase::Late, 37.0, 22000, 12500),
+        ],
+    ));
+
+    let mk_mid_build = recommend_item_build(
+        &repo,
+        HeroId(114),
+        Role::Mid,
+        Bracket::Legend,
+        &[None; 5],
+        &[],
+        0,
+    )
+    .expect("MK Mid build recommendation should succeed");
+    assert!(
+        mk_mid_build
+            .steps
+            .iter()
+            .any(|s| s.item_id == ItemId(252) && s.phase == ItemPhase::Core),
+        "recommended Mid build must keep Echo Sabre (252) Core: {:?}",
+        mk_mid_build.steps
+    );
+    assert!(
+        !mk_mid_build.steps.iter().any(
+            |s| s.item_id == ItemId(145) || s.variants.iter().any(|v| v.item_id == ItemId(145))
+        ),
+        "recommended Mid build must NOT contain unroled Battle Fury (145): {:?}",
+        mk_mid_build.steps
+    );
+    let non_boot_late_steps = mk_mid_build
+        .steps
+        .iter()
+        .filter(|s| s.phase == ItemPhase::Late && is_non_boot(s.item_id))
+        .count();
+    assert!(
+        non_boot_late_steps >= 3 && mk_mid_build.steps.iter().any(|s| s.item_id == ItemId(116)),
+        "sparse MK Mid build must surface >= 3 non-boot Late steps including BKB (116): {:?}",
+        mk_mid_build.steps
+    );
+
+    // 2. Embedded fallback when no unroled custom entry exists:
+    let mut embedded_fb_repo = SeededItemMetaRepository::new();
+    embedded_fb_repo.custom_hero_stats.push((
+        HeroId(1),
+        Some(Role::Offlane),
+        Some(Bracket::Legend),
+        vec![
+            stat(63, ItemPhase::Early, 7.0, 1200, 620),
+            stat(125, ItemPhase::Early, 9.0, 900, 460),
+            stat(116, ItemPhase::Late, 26.0, 1000, 520),
+        ],
+    ));
+    let embedded_fb_build = recommend_item_build(
+        &embedded_fb_repo,
+        HeroId(1),
+        Role::Offlane,
+        Bracket::Legend,
+        &[None; 5],
+        &[],
+        0,
+    )
+    .expect("embedded fallback for sparse role build should succeed");
+    let embedded_fb_non_boot_late = embedded_fb_build
+        .steps
+        .iter()
+        .filter(|s| s.phase == ItemPhase::Late && is_non_boot(s.item_id))
+        .count();
+    assert!(
+        embedded_fb_non_boot_late >= 2,
+        "sparse role with no unroled custom entry must backfill Late items from embedded hero stats: {:?}",
+        embedded_fb_build.steps
+    );
+
+    // 3. Non-sparse role (>= 2 surviving non-boot Late items) must NOT merge unroled Late items:
+    let mut non_sparse_repo = SeededItemMetaRepository::new();
+    non_sparse_repo.custom_hero_stats.push((
+        HeroId(114),
+        Some(Role::Mid),
+        Some(Bracket::Legend),
+        vec![
+            stat(63, ItemPhase::Early, 6.5, 10876, 5650),
+            stat(252, ItemPhase::Core, 15.5, 7500, 3950),
+            stat(116, ItemPhase::Late, 25.0, 8768, 4650),
+            stat(160, ItemPhase::Late, 29.0, 3200, 1800),
+        ],
+    ));
+    non_sparse_repo.custom_hero_stats.push((
+        HeroId(114),
+        None,
+        Some(Bracket::Legend),
+        vec![
+            stat(116, ItemPhase::Late, 24.5, 42000, 22500),
+            stat(160, ItemPhase::Late, 29.0, 38000, 21000),
+            stat(139, ItemPhase::Late, 33.0, 28000, 16000),
+            stat(156, ItemPhase::Late, 37.0, 22000, 12500),
+        ],
+    ));
+    let non_sparse_build = recommend_item_build(
+        &non_sparse_repo,
+        HeroId(114),
+        Role::Mid,
+        Bracket::Legend,
+        &[None; 5],
+        &[],
+        0,
+    )
+    .expect("non-sparse role build should succeed");
+    assert!(
+        !non_sparse_build.steps.iter().any(|s| {
+            matches!(s.item_id.0, 139 | 156)
+                || s.variants.iter().any(|v| matches!(v.item_id.0, 139 | 156))
+        }),
+        "non-sparse role with >= 2 surviving non-boot Late items must NOT merge unroled Late items: {:?}",
+        non_sparse_build.steps
+    );
+}
+
+#[test]
+fn sparse_role_cache_backfills_from_unroled_stratz_and_opendota_without_extra_sync_calls() {
+    use crate::item_repo::SeededItemMetaRepository;
+    use crate::sync::LocalCacheManager;
+    use truesight_core::domain::{Bracket, HeroId, HeroItemStat, ItemId, ItemPhase, Role};
+    use truesight_core::math::recommend_item_build;
+
+    let hero_stats_json = r#"[{"id": 114, "4_pick": 1000, "4_win": 530}]"#;
+    let item_constants_json = r#"{
+        "power_treads": {"id": 63, "dname": "Power Treads", "cost": 1400, "components": ["boots", "gloves", "belt_of_strength"]},
+        "echo_sabre": {"id": 252, "dname": "Echo Sabre", "cost": 2700, "components": ["ogre_axe", "oblivion_staff"]},
+        "black_king_bar": {"id": 116, "dname": "Black King Bar", "cost": 4050, "components": ["ogre_axe", "mithril_hammer"]},
+        "skadi": {"id": 160, "dname": "Eye of Skadi", "cost": 5300, "components": ["ultimate_orb", "point_booster"]},
+        "butterfly": {"id": 139, "dname": "Butterfly", "cost": 4975, "components": ["eagle", "talisman_of_evasion"]},
+        "satanic": {"id": 156, "dname": "Satanic", "cost": 5050, "components": ["reaver", "claymore"]}
+    }"#;
+
+    let make_4bracket_stratz = |full_items_json: &str| {
+        format!(
+            r#"{{
+                "data": {{
+                    "heroStats": {{
+                        "hgStart": [],
+                        "hgBoot": [{{"itemId": 63, "time": 420000, "matchCount": 1000, "winCount": 520}}],
+                        "hgFull": {full_items_json},
+                        "caStart": [],
+                        "caBoot": [{{"itemId": 63, "time": 410000, "matchCount": 1000, "winCount": 525}}],
+                        "caFull": {full_items_json},
+                        "laStart": [],
+                        "laBoot": [{{"itemId": 63, "time": 390000, "matchCount": 1000, "winCount": 530}}],
+                        "laFull": {full_items_json},
+                        "diStart": [],
+                        "diBoot": [{{"itemId": 63, "time": 370000, "matchCount": 1000, "winCount": 535}}],
+                        "diFull": {full_items_json}
+                    }}
+                }}
+            }}"#
+        )
+    };
+
+    let rich_unroled_payload = make_4bracket_stratz(
+        r#"[
+            {"itemId": 252, "time": 16, "matchCount": 30000, "winCount": 15800},
+            {"itemId": 116, "time": 25, "matchCount": 42000, "winCount": 22500},
+            {"itemId": 160, "time": 29, "matchCount": 36000, "winCount": 19800},
+            {"itemId": 139, "time": 33, "matchCount": 28000, "winCount": 15900},
+            {"itemId": 156, "time": 37, "matchCount": 22000, "winCount": 12400}
+        ]"#,
+    );
+    let sparse_role_payload = make_4bracket_stratz(
+        r#"[
+            {"itemId": 252, "time": 16, "matchCount": 7500, "winCount": 3950},
+            {"itemId": 116, "time": 26, "matchCount": 8768, "winCount": 4650}
+        ]"#,
+    );
+
+    // 1. Seed unroled STRATZ cache first, then sync sparse MK Pos 2:
+    // sync_from_sources_with_role_items must preserve the 1-request-per-(hero, role) contract
+    // (never issuing an extra None call) while SeededItemMetaRepository backfills Late steps.
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "truesight_stratz_sparse_role_cache_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    let mut mgr = LocalCacheManager::with_optional_account(tmp_dir.clone(), None);
+    mgr.stratz_api_token = Some("eyJhbGciOinone.eyJleHAiOjQxMDI0NDQ4MDB9.sig".to_string());
+    mgr.set_target_item_heroes(vec![HeroId(114)]);
+
+    mgr.sync_from_sources_with_role_items(
+        false,
+        1_795_000_000,
+        |url| match url {
+            "https://api.opendota.com/api/heroStats" => Ok(hero_stats_json.to_string()),
+            "https://api.opendota.com/api/constants/items" => Ok(item_constants_json.to_string()),
+            other => Err(truesight_core::ports::PortError(format!(
+                "unexpected URL: {other}"
+            ))),
+        },
+        |_token| Ok(r#"{"data":{"heroStats":{"matchUp":[]}}}"#.to_string()),
+        |_token, hero_id, role| {
+            assert_eq!(hero_id, 114);
+            assert_eq!(role, None);
+            Ok(rich_unroled_payload.clone())
+        },
+    )
+    .expect("initial unroled STRATZ sync should succeed");
+
+    mgr.set_target_item_hero_roles(vec![(HeroId(114), Role::Mid)]);
+    let mut role_calls: Vec<Option<Role>> = Vec::new();
+    mgr.sync_from_sources_with_role_items(
+        false,
+        1_795_000_000,
+        |url| match url {
+            "https://api.opendota.com/api/heroStats" => Ok(hero_stats_json.to_string()),
+            "https://api.opendota.com/api/constants/items" => Ok(item_constants_json.to_string()),
+            other => Err(truesight_core::ports::PortError(format!(
+                "unexpected URL: {other}"
+            ))),
+        },
+        |_token| Ok(r#"{"data":{"heroStats":{"matchUp":[]}}}"#.to_string()),
+        |_token, hero_id, role| {
+            assert_eq!(hero_id, 114);
+            role_calls.push(role);
+            Ok(sparse_role_payload.clone())
+        },
+    )
+    .expect("sparse role sync should succeed");
+
+    assert_eq!(
+        role_calls,
+        vec![Some(Role::Mid)],
+        "sparse role sync must keep 1-request-per-(hero, role) contract without an extra None fetch"
+    );
+    let repo = mgr.build_item_repository();
+    let build = recommend_item_build(
+        &repo,
+        HeroId(114),
+        Role::Mid,
+        Bracket::Legend,
+        &[None; 5],
+        &[],
+        0,
+    )
+    .expect("cached backfilled MK Mid build should succeed");
+    assert!(
+        build
+            .steps
+            .iter()
+            .any(|s| s.item_id == ItemId(252) && s.phase == ItemPhase::Core),
+        "cached MK Mid build must preserve role Core Echo Sabre (252): {:?}",
+        build.steps
+    );
+    let non_boot_late_count = build
+        .steps
+        .iter()
+        .filter(|s| {
+            s.phase == ItemPhase::Late
+                && !matches!(
+                    s.item_id.0,
+                    29 | 48 | 50 | 63 | 180 | 214 | 220 | 231 | 931 | 1953
+                )
+        })
+        .count();
+    assert!(
+        non_boot_late_count >= 3 && build.steps.iter().any(|s| s.item_id == ItemId(116)),
+        "cached MK Mid build must backfill >= 3 non-boot Late steps from unroled cache: {:?}",
+        build.steps
+    );
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    // 2. Unbracketed OpenDota unroled fallback `(hero, None, None)` scales Divine timing and backfills:
+    let stat =
+        |item_id: u16, phase: ItemPhase, avg_time_mins: f32, mc: u32, wc: u32| HeroItemStat {
+            item_id: ItemId(item_id),
+            phase,
+            avg_time_mins,
+            match_count: mc,
+            win_count: wc,
+        };
+    let mut od_repo = SeededItemMetaRepository::new();
+    od_repo.custom_hero_stats.push((
+        HeroId(114),
+        Some(Role::Mid),
+        Some(Bracket::Divine),
+        vec![
+            stat(63, ItemPhase::Early, 6.0, 4200, 2250),
+            stat(252, ItemPhase::Core, 14.5, 3400, 1850),
+            stat(116, ItemPhase::Late, 24.0, 3900, 2100),
+        ],
+    ));
+    od_repo.custom_hero_stats.push((
+        HeroId(114),
+        None,
+        None,
+        vec![
+            stat(116, ItemPhase::Late, 26.0, 40000, 21500),
+            stat(160, ItemPhase::Late, 30.0, 32000, 17800),
+            stat(139, ItemPhase::Late, 34.0, 25000, 14200),
+        ],
+    ));
+    let divine_build = recommend_item_build(
+        &od_repo,
+        HeroId(114),
+        Role::Mid,
+        Bracket::Divine,
+        &[None; 5],
+        &[],
+        0,
+    )
+    .expect("Divine OpenDota unroled backfill should succeed");
+    let skadi = divine_build
+        .steps
+        .iter()
+        .find(|s| s.item_id == ItemId(160) && s.phase == ItemPhase::Late)
+        .expect("Skadi (160) must be backfilled from unbracketed OpenDota entry");
+    assert!(
+        skadi.avg_time_mins < 30.0,
+        "unbracketed OpenDota backfill for Divine must scale avg_time_mins < 30.0: {skadi:?}"
+    );
+}
+
+#[test]
+fn sparse_role_backfill_handles_exhausted_tier_low_sample_noise_and_preserves_role_steps() {
+    use crate::item_repo::SeededItemMetaRepository;
+    use truesight_core::domain::{Bracket, HeroId, HeroItemStat, ItemId, ItemPhase, Role};
+    use truesight_core::math::recommend_item_build;
+
+    let stat =
+        |item_id: u16, phase: ItemPhase, avg_time_mins: f32, mc: u32, wc: u32| HeroItemStat {
+            item_id: ItemId(item_id),
+            phase,
+            avg_time_mins,
+            match_count: mc,
+            win_count: wc,
+        };
+
+    // 1. Exhausted higher-priority tier (P2 #1):
+    // Unroled same-bracket STRATZ only has BKB (already in Mid build); must continue to
+    // unbracketed OpenDota entry containing Butterfly (139) and Eye of Skadi (160).
+    let mut exhausted_repo = SeededItemMetaRepository::new();
+    exhausted_repo.custom_hero_stats.push((
+        HeroId(114),
+        Some(Role::Mid),
+        Some(Bracket::Legend),
+        vec![
+            stat(63, ItemPhase::Early, 6.5, 1200, 620),
+            stat(252, ItemPhase::Core, 15.5, 900, 480),
+            stat(116, ItemPhase::Late, 26.0, 1000, 520),
+        ],
+    ));
+    exhausted_repo.custom_hero_stats.push((
+        HeroId(114),
+        None,
+        Some(Bracket::Legend),
+        vec![stat(116, ItemPhase::Late, 25.5, 42000, 22500)],
+    ));
+    exhausted_repo.custom_hero_stats.push((
+        HeroId(114),
+        None,
+        None,
+        vec![
+            stat(139, ItemPhase::Late, 33.0, 28000, 15900),
+            stat(160, ItemPhase::Late, 29.0, 34000, 19000),
+        ],
+    ));
+    let exhausted_build = recommend_item_build(
+        &exhausted_repo,
+        HeroId(114),
+        Role::Mid,
+        Bracket::Legend,
+        &[None; 5],
+        &[],
+        0,
+    )
+    .expect("exhausted-tier backfill build should succeed");
+    assert!(
+        [116, 139, 160].iter().all(|&id| exhausted_build
+            .steps
+            .iter()
+            .any(|s| s.item_id == ItemId(id))),
+        "must continue past duplicate-only unroled STRATZ tier into OpenDota (BKB 116, Butterfly 139, Skadi 160): {:?}",
+        exhausted_build.steps
+    );
+
+    // 2. Low-sample noise filtered by recommender (P2 #2):
+    // BKB (1000 matches) + Satanic (1 match) must still trigger backfill because Satanic is
+    // dropped by min_mc, surfacing Butterfly (139) and Skadi (160) while excluding Satanic (156).
+    let mut noise_repo = SeededItemMetaRepository::new();
+    noise_repo.custom_hero_stats.push((
+        HeroId(114),
+        Some(Role::Mid),
+        Some(Bracket::Legend),
+        vec![
+            stat(63, ItemPhase::Early, 6.5, 1200, 620),
+            stat(252, ItemPhase::Core, 15.5, 900, 480),
+            stat(116, ItemPhase::Late, 26.0, 1000, 520),
+            stat(156, ItemPhase::Late, 37.0, 1, 1),
+        ],
+    ));
+    noise_repo.custom_hero_stats.push((
+        HeroId(114),
+        None,
+        Some(Bracket::Legend),
+        vec![
+            stat(139, ItemPhase::Late, 33.0, 28000, 15900),
+            stat(160, ItemPhase::Late, 29.0, 34000, 19000),
+        ],
+    ));
+    let noise_build = recommend_item_build(
+        &noise_repo,
+        HeroId(114),
+        Role::Mid,
+        Bracket::Legend,
+        &[None; 5],
+        &[],
+        0,
+    )
+    .expect("low-sample sparse role build should succeed");
+    assert!(
+        !noise_build.steps.iter().any(|s| s.item_id == ItemId(156)),
+        "1-match Satanic noise row must be filtered out: {:?}",
+        noise_build.steps
+    );
+    assert!(
+        [116, 139, 160]
+            .iter()
+            .all(|&id| noise_build.steps.iter().any(|s| s.item_id == ItemId(id))),
+        "backfill must trigger after 1-match Satanic is dropped, surfacing BKB, Butterfly, Skadi: {:?}",
+        noise_build.steps
+    );
+
+    // 3. Preserve role BKB (50% WR at 26m) as primary against higher-WR fallback Aghanim's Scepter (54% WR at 25.5m) (P2 #3a):
+    let mut bkb_preserve_repo = SeededItemMetaRepository::new();
+    bkb_preserve_repo.custom_hero_stats.push((
+        HeroId(114),
+        Some(Role::Mid),
+        Some(Bracket::Legend),
+        vec![
+            stat(63, ItemPhase::Early, 6.5, 1200, 620),
+            stat(252, ItemPhase::Core, 15.5, 900, 480),
+            stat(116, ItemPhase::Late, 26.0, 1000, 500),
+        ],
+    ));
+    bkb_preserve_repo.custom_hero_stats.push((
+        HeroId(114),
+        None,
+        Some(Bracket::Legend),
+        vec![
+            stat(108, ItemPhase::Late, 25.5, 40000, 21600),
+            stat(160, ItemPhase::Late, 29.0, 30000, 16500),
+        ],
+    ));
+    let bkb_preserve_build = recommend_item_build(
+        &bkb_preserve_repo,
+        HeroId(114),
+        Role::Mid,
+        Bracket::Legend,
+        &[None; 5],
+        &[],
+        0,
+    )
+    .expect("role BKB preservation build should succeed");
+    assert!(
+        bkb_preserve_build
+            .steps
+            .iter()
+            .any(|s| s.item_id == ItemId(116) && s.phase == ItemPhase::Late),
+        "role-specific BKB (116) must stay a primary Late step and NOT be demoted by higher-WR fallback Scepter: {:?}",
+        bkb_preserve_build.steps
+    );
+    assert!(
+        bkb_preserve_build
+            .steps
+            .iter()
+            .any(|s| s.item_id == ItemId(108))
+            && bkb_preserve_build
+                .steps
+                .iter()
+                .any(|s| s.item_id == ItemId(160)),
+        "fallback Scepter (108) and Skadi (160) should fill remaining Late gaps: {:?}",
+        bkb_preserve_build.steps
+    );
+
+    // 4. Preserve role Yasha (Core at 22m) against nearby fallback Manta Style (Late at 25m) (P2 #3b):
+    let mut yasha_preserve_repo = SeededItemMetaRepository::new();
+    yasha_preserve_repo.custom_hero_stats.push((
+        HeroId(114),
+        Some(Role::Mid),
+        Some(Bracket::Legend),
+        vec![
+            stat(63, ItemPhase::Early, 6.5, 1200, 620),
+            stat(170, ItemPhase::Core, 22.0, 1200, 630),
+            stat(116, ItemPhase::Late, 26.0, 1000, 520),
+        ],
+    ));
+    yasha_preserve_repo.custom_hero_stats.push((
+        HeroId(114),
+        None,
+        Some(Bracket::Legend),
+        vec![
+            stat(147, ItemPhase::Late, 25.0, 35000, 19250),
+            stat(160, ItemPhase::Late, 29.0, 30000, 16500),
+        ],
+    ));
+    let yasha_preserve_build = recommend_item_build(
+        &yasha_preserve_repo,
+        HeroId(114),
+        Role::Mid,
+        Bracket::Legend,
+        &[None; 5],
+        &[],
+        0,
+    )
+    .expect("role Yasha preservation build should succeed");
+    assert!(
+        yasha_preserve_build
+            .steps
+            .iter()
+            .any(|s| s.item_id == ItemId(170) && s.phase == ItemPhase::Core),
+        "role-specific Yasha (170, Core) must NOT be deleted by nearby fallback Manta Style (147): {:?}",
+        yasha_preserve_build.steps
+    );
+    assert!(
+        yasha_preserve_build
+            .steps
+            .iter()
+            .filter(|s| s.phase == ItemPhase::Late)
+            .count()
+            >= 2,
+        "Late phase must still be filled by fallback candidates alongside retained Yasha: {:?}",
+        yasha_preserve_build.steps
+    );
+}
+
+#[test]
+fn sparse_role_backfill_rejects_low_sample_tier_noise_and_defers_fallback_blessing() {
+    use crate::item_repo::SeededItemMetaRepository;
+    use truesight_core::domain::{Bracket, HeroId, HeroItemStat, ItemId, ItemPhase, Role};
+    use truesight_core::math::recommend_item_build;
+
+    let stat =
+        |item_id: u16, phase: ItemPhase, avg_time_mins: f32, mc: u32, wc: u32| HeroItemStat {
+            item_id: ItemId(item_id),
+            phase,
+            avg_time_mins,
+            match_count: mc,
+            win_count: wc,
+        };
+
+    // 1. P2 #1: STRATZ fallback has duplicate BKB (40,000 matches) + 1-match Satanic (156);
+    // OpenDota has Butterfly (139) + Eye of Skadi (160). Removing duplicate BKB must NOT drop
+    // the sample floor and let 1-match Satanic block reaching OpenDota.
+    let mut noise_repo = SeededItemMetaRepository::new();
+    noise_repo.custom_hero_stats.push((
+        HeroId(114),
+        Some(Role::Mid),
+        Some(Bracket::Legend),
+        vec![
+            stat(63, ItemPhase::Early, 6.5, 1200, 620),
+            stat(252, ItemPhase::Core, 15.5, 900, 480),
+            stat(116, ItemPhase::Late, 26.0, 1000, 520),
+        ],
+    ));
+    noise_repo.custom_hero_stats.push((
+        HeroId(114),
+        None,
+        Some(Bracket::Legend),
+        vec![
+            stat(116, ItemPhase::Late, 25.5, 40000, 21200),
+            stat(156, ItemPhase::Late, 37.0, 1, 1),
+        ],
+    ));
+    noise_repo.custom_hero_stats.push((
+        HeroId(114),
+        None,
+        None,
+        vec![
+            stat(139, ItemPhase::Late, 33.0, 400, 224),
+            stat(160, ItemPhase::Late, 29.0, 350, 196),
+        ],
+    ));
+
+    let noise_build = recommend_item_build(
+        &noise_repo,
+        HeroId(114),
+        Role::Mid,
+        Bracket::Legend,
+        &[None; 5],
+        &[],
+        0,
+    )
+    .expect("pre-dedup fallback noise rejection build should succeed");
+    assert!(
+        !noise_build.steps.iter().any(|s| {
+            s.item_id == ItemId(156) || s.variants.iter().any(|v| v.item_id == ItemId(156))
+        }),
+        "1-match Satanic (156) in duplicate-heavy STRATZ tier must be rejected: {:?}",
+        noise_build.steps
+    );
+    assert!(
+        [116, 139, 160]
+            .iter()
+            .all(|&id| noise_build.steps.iter().any(|s| s.item_id == ItemId(id))),
+        "must reject 1-match Satanic and reach OpenDota tier (BKB 116, Butterfly 139, Skadi 160): {:?}",
+        noise_build.steps
+    );
+
+    // 2. P2 #2: Owned primary Aghanim's Scepter (108) + fallback Aghanim's Blessing (271)
+    // and Eye of Skadi (160) in same-bracket STRATZ tier. Unowned Blessing must defer and
+    // attach under Scepter variants instead of being discarded or promoted standalone.
+    let mut blessing_repo = SeededItemMetaRepository::new();
+    blessing_repo.custom_hero_stats.push((
+        HeroId(114),
+        Some(Role::Mid),
+        Some(Bracket::Legend),
+        vec![
+            stat(63, ItemPhase::Early, 6.5, 1200, 620),
+            stat(252, ItemPhase::Core, 15.5, 900, 480),
+            stat(108, ItemPhase::Late, 27.0, 1000, 540),
+        ],
+    ));
+    blessing_repo.custom_hero_stats.push((
+        HeroId(114),
+        None,
+        Some(Bracket::Legend),
+        vec![
+            stat(271, ItemPhase::Late, 38.0, 1200, 720),
+            stat(160, ItemPhase::Late, 29.0, 34000, 19000),
+        ],
+    ));
+
+    let blessing_build = recommend_item_build(
+        &blessing_repo,
+        HeroId(114),
+        Role::Mid,
+        Bracket::Legend,
+        &[None; 5],
+        &[ItemId(108)],
+        1620,
+    )
+    .expect("fallback Blessing deferral build should succeed");
+    let scepter_step = blessing_build
+        .steps
+        .iter()
+        .find(|s| s.item_id == ItemId(108))
+        .expect("owned Aghanim's Scepter (108) must be present as primary Late step");
+    assert!(scepter_step.owned);
+    assert!(
+        scepter_step
+            .variants
+            .iter()
+            .any(|v| v.item_id == ItemId(271)),
+        "fallback Aghanim's Blessing (271) must attach as variant under Scepter (108): {:?}",
+        scepter_step.variants
+    );
+    assert!(
+        !blessing_build
+            .steps
+            .iter()
+            .any(|s| s.item_id == ItemId(271)),
+        "Aghanim's Blessing (271) must NOT appear as standalone primary step: {:?}",
+        blessing_build.steps
+    );
+    assert!(
+        blessing_build
+            .steps
+            .iter()
+            .any(|s| s.item_id == ItemId(160)),
+        "Eye of Skadi (160) must fill standalone Late step alongside Scepter (108): {:?}",
+        blessing_build.steps
+    );
+}
+
+#[test]
+fn sparse_role_backfill_pairs_blessing_and_scepter_across_tiers() {
+    use crate::item_repo::SeededItemMetaRepository;
+    use truesight_core::domain::{Bracket, HeroId, HeroItemStat, ItemId, ItemPhase, Role};
+    use truesight_core::math::recommend_item_build;
+
+    let stat =
+        |item_id: u16, phase: ItemPhase, avg_time_mins: f32, mc: u32, wc: u32| HeroItemStat {
+            item_id: ItemId(item_id),
+            phase,
+            avg_time_mins,
+            match_count: mc,
+            win_count: wc,
+        };
+
+    // 1. Role has 1 Late step (BKB 116); Tier 0 unroled STRATZ has Aghanim's Blessing (271);
+    // Tier 1 OpenDota has owned Aghanim's Scepter (108) + Butterfly (139).
+    // At 30:00 (1800s) with Scepter (108) in inventory, Blessing must defer under Scepter rather
+    // than consuming the second Late slot and stopping before Tier 1.
+    let mut one_late_repo = SeededItemMetaRepository::new();
+    one_late_repo.custom_hero_stats.push((
+        HeroId(114),
+        Some(Role::Mid),
+        Some(Bracket::Legend),
+        vec![
+            stat(63, ItemPhase::Early, 6.5, 1200, 620),
+            stat(252, ItemPhase::Core, 15.5, 900, 480),
+            stat(116, ItemPhase::Late, 26.0, 1000, 520),
+        ],
+    ));
+    one_late_repo.custom_hero_stats.push((
+        HeroId(114),
+        None,
+        Some(Bracket::Legend),
+        vec![stat(271, ItemPhase::Late, 38.0, 1200, 720)],
+    ));
+    one_late_repo.custom_hero_stats.push((
+        HeroId(114),
+        None,
+        None,
+        vec![
+            stat(108, ItemPhase::Late, 27.0, 400, 224),
+            stat(139, ItemPhase::Late, 33.0, 350, 196),
+        ],
+    ));
+
+    let one_late_build = recommend_item_build(
+        &one_late_repo,
+        HeroId(114),
+        Role::Mid,
+        Bracket::Legend,
+        &[None; 5],
+        &[ItemId(108)],
+        1800,
+    )
+    .expect("cross-tier Blessing deferral build (1 role Late step) should succeed");
+    let scepter_one = one_late_build
+        .steps
+        .iter()
+        .find(|s| s.item_id == ItemId(108))
+        .expect("owned Scepter (108) from Tier 1 must appear as primary Late step");
+    assert!(scepter_one.owned);
+    assert!(
+        scepter_one
+            .variants
+            .iter()
+            .any(|v| v.item_id == ItemId(271)),
+        "Tier 0 Blessing (271) must attach under Tier 1 Scepter (108): {:?}",
+        scepter_one.variants
+    );
+    assert!(
+        !one_late_build
+            .steps
+            .iter()
+            .any(|s| s.item_id == ItemId(271)),
+        "Blessing (271) must NOT appear as standalone primary Late step: {:?}",
+        one_late_build.steps
+    );
+    assert!(
+        one_late_build
+            .steps
+            .iter()
+            .any(|s| s.item_id == ItemId(116))
+            && one_late_build
+                .steps
+                .iter()
+                .any(|s| s.item_id == ItemId(139)),
+        "BKB (116) and Butterfly (139) must remain primary Late steps: {:?}",
+        one_late_build.steps
+    );
+
+    // 2. Role has 0 Late steps; same cross-tier setup must surface Scepter (108) and Butterfly (139)
+    // as primary Late steps while attaching Blessing (271) under Scepter.
+    let mut zero_late_repo = SeededItemMetaRepository::new();
+    zero_late_repo.custom_hero_stats.push((
+        HeroId(114),
+        Some(Role::Mid),
+        Some(Bracket::Legend),
+        vec![
+            stat(63, ItemPhase::Early, 6.5, 1200, 620),
+            stat(252, ItemPhase::Core, 15.5, 900, 480),
+        ],
+    ));
+    zero_late_repo.custom_hero_stats.push((
+        HeroId(114),
+        None,
+        Some(Bracket::Legend),
+        vec![stat(271, ItemPhase::Late, 38.0, 1200, 720)],
+    ));
+    zero_late_repo.custom_hero_stats.push((
+        HeroId(114),
+        None,
+        None,
+        vec![
+            stat(108, ItemPhase::Late, 27.0, 400, 224),
+            stat(139, ItemPhase::Late, 33.0, 350, 196),
+        ],
+    ));
+
+    let zero_late_build = recommend_item_build(
+        &zero_late_repo,
+        HeroId(114),
+        Role::Mid,
+        Bracket::Legend,
+        &[None; 5],
+        &[ItemId(108)],
+        1800,
+    )
+    .expect("cross-tier Blessing deferral build (0 role Late steps) should succeed");
+    let scepter_zero = zero_late_build
+        .steps
+        .iter()
+        .find(|s| s.item_id == ItemId(108))
+        .expect("owned Scepter (108) from Tier 1 must appear as primary Late step");
+    assert!(scepter_zero.owned);
+    assert!(
+        scepter_zero
+            .variants
+            .iter()
+            .any(|v| v.item_id == ItemId(271)),
+        "Tier 0 Blessing (271) must attach under Tier 1 Scepter (108): {:?}",
+        scepter_zero.variants
+    );
+    assert!(
+        !zero_late_build
+            .steps
+            .iter()
+            .any(|s| s.item_id == ItemId(271)),
+        "Blessing (271) must NOT appear as standalone primary Late step: {:?}",
+        zero_late_build.steps
+    );
+    assert!(
+        zero_late_build
+            .steps
+            .iter()
+            .any(|s| s.item_id == ItemId(139)),
+        "Butterfly (139) must appear as primary Late step alongside Scepter (108): {:?}",
+        zero_late_build.steps
+    );
+
+    // 3. Butterfly in Tier 0 STRATZ fills the second Late slot (alongside role BKB), while
+    // owned Scepter (108) sits in Tier 1 OpenDota and Blessing (271) is in Tier 0 STRATZ.
+    // Owned Scepter from Tier 1 must still be promoted into steps so Blessing attaches under it.
+    let mut tier0_bfly_repo = SeededItemMetaRepository::new();
+    tier0_bfly_repo.custom_hero_stats.push((
+        HeroId(114),
+        Some(Role::Mid),
+        Some(Bracket::Legend),
+        vec![
+            stat(63, ItemPhase::Early, 6.5, 1200, 620),
+            stat(252, ItemPhase::Core, 15.5, 900, 480),
+            stat(116, ItemPhase::Late, 26.0, 1000, 520),
+        ],
+    ));
+    tier0_bfly_repo.custom_hero_stats.push((
+        HeroId(114),
+        None,
+        Some(Bracket::Legend),
+        vec![
+            stat(271, ItemPhase::Late, 38.0, 1200, 720),
+            stat(139, ItemPhase::Late, 33.0, 28000, 15900),
+        ],
+    ));
+    tier0_bfly_repo.custom_hero_stats.push((
+        HeroId(114),
+        None,
+        None,
+        vec![stat(108, ItemPhase::Late, 27.0, 400, 224)],
+    ));
+
+    let tier0_bfly_build = recommend_item_build(
+        &tier0_bfly_repo,
+        HeroId(114),
+        Role::Mid,
+        Bracket::Legend,
+        &[None; 5],
+        &[ItemId(108)],
+        1800,
+    )
+    .expect("cross-tier Blessing with Tier 0 Butterfly build should succeed");
+    let scepter_bfly = tier0_bfly_build
+        .steps
+        .iter()
+        .find(|s| s.item_id == ItemId(108))
+        .expect(
+            "owned Scepter (108) from Tier 1 must still appear when Tier 0 Butterfly fills quota",
+        );
+    assert!(scepter_bfly.owned);
+    assert!(
+        scepter_bfly
+            .variants
+            .iter()
+            .any(|v| v.item_id == ItemId(271)),
+        "Blessing (271) must attach under owned Scepter (108) even when Tier 0 Butterfly filled quota: {:?}",
+        scepter_bfly.variants
+    );
+    assert!(
+        !tier0_bfly_build
+            .steps
+            .iter()
+            .any(|s| s.item_id == ItemId(271)),
+        "Blessing (271) must NOT appear as standalone primary Late step: {:?}",
+        tier0_bfly_build.steps
+    );
+    assert!(
+        tier0_bfly_build
+            .steps
+            .iter()
+            .any(|s| s.item_id == ItemId(116))
+            && tier0_bfly_build
+                .steps
+                .iter()
+                .any(|s| s.item_id == ItemId(139)),
+        "BKB (116) and Butterfly (139) must remain primary Late steps: {:?}",
+        tier0_bfly_build.steps
     );
 }

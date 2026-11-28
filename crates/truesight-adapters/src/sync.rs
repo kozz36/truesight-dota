@@ -1902,7 +1902,7 @@ pub(crate) fn stratz_hero_item_purchases_graphql_payload_for_role(
             "{p}Boot: itemBootPurchase(heroId: {hero_id}{pos_arg}, bracketBasicIds: [{b}]) {{ itemId time matchCount winCount }}"
         ));
         parts.push(format!(
-            "{p}Full: itemFullPurchase(heroId: {hero_id}{pos_arg}, bracketBasicIds: [{b}], matchLimit: 5) {{ itemId time instance matchCount winCount }}"
+            "{p}Full: itemFullPurchase(heroId: {hero_id}{pos_arg}, bracketBasicIds: [{b}], matchLimit: 1) {{ itemId time instance matchCount winCount }}"
         ));
     }
     format!(r#"{{"query":"{{ heroStats {{ {} }} }}"}}"#, parts.join(" "))

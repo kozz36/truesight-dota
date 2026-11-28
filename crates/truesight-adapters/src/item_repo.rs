@@ -170,6 +170,79 @@ impl ItemMetaRepository for SeededItemMetaRepository {
 
         Ok(build_embedded_hero_stats(hero_id, role, bracket))
     }
+
+    fn hero_item_late_fallback_tiers(
+        &self,
+        hero_id: HeroId,
+        role: Role,
+        bracket: Bracket,
+    ) -> Vec<Vec<HeroItemStat>> {
+        let has_role_specific_custom = self.custom_hero_stats.iter().any(|(hid, r, b, _)| {
+            *hid == hero_id && *r == Some(role) && (*b == Some(bracket) || b.is_none())
+        });
+        if !has_role_specific_custom {
+            return Vec::new();
+        }
+
+        let scale = bracket_timing_scale(bracket);
+        let extract_late_tier = |stats: &[HeroItemStat], apply_scale: bool| -> Vec<HeroItemStat> {
+            stats
+                .iter()
+                .copied()
+                .filter(|stat| {
+                    stat.phase == ItemPhase::Late
+                        && !is_boot_item_id(stat.item_id)
+                        && is_valid_timed_progression_item_for_phase(
+                            self,
+                            stat.item_id,
+                            ItemPhase::Late,
+                        )
+                })
+                .map(|mut stat| {
+                    if apply_scale {
+                        stat.avg_time_mins = (stat.avg_time_mins * scale).max(1.0);
+                    }
+                    stat
+                })
+                .collect()
+        };
+
+        let mut tiers: Vec<Vec<HeroItemStat>> = Vec::new();
+        if let Some((_, _, _, stats)) = self
+            .custom_hero_stats
+            .iter()
+            .find(|(hid, r, b, _)| *hid == hero_id && r.is_none() && *b == Some(bracket))
+        {
+            let tier = extract_late_tier(stats, false);
+            if !tier.is_empty() {
+                tiers.push(tier);
+            }
+        }
+        if let Some((_, _, _, stats)) = self
+            .custom_hero_stats
+            .iter()
+            .find(|(hid, r, b, _)| *hid == hero_id && r.is_none() && b.is_none())
+        {
+            let tier = extract_late_tier(stats, true);
+            if !tier.is_empty() {
+                tiers.push(tier);
+            }
+        }
+        let embedded = build_embedded_hero_stats(hero_id, role, bracket);
+        let embedded_tier = extract_late_tier(&embedded, false);
+        if !embedded_tier.is_empty() {
+            tiers.push(embedded_tier);
+        }
+        tiers
+    }
+}
+
+#[inline]
+const fn is_boot_item_id(item_id: ItemId) -> bool {
+    matches!(
+        item_id.0,
+        29 | 48 | 50 | 63 | 180 | 214 | 220 | 231 | 931 | 1953
+    )
 }
 
 /// Returns `true` if `item_id` represents a completed build target, a standalone non-combinable

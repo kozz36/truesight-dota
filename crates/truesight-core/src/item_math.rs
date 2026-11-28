@@ -39,13 +39,73 @@ const LATE_LEADER_MIN_SHARE: f32 = 0.04;
 const UPGRADE_CHAIN_BONUS: f32 = 0.035;
 
 /// Maximum number of primary progression steps in a recommended `[item 1] > [item 2] > ...` bar.
-const MAX_PRIMARY_BUILD_STEPS: usize = 8;
+pub(crate) const MAX_PRIMARY_BUILD_STEPS: usize = 8;
 
 /// Maximum number of same-phase alternative variants shown beneath one primary step.
 const MAX_VARIANTS_PER_STEP: usize = 3;
 
 /// Maximum number of optional/counter items surfaced in the separate Optional section.
 const MAX_OPTIONAL_BUILD_ITEMS: usize = 6;
+
+pub(crate) struct ScoredCandidate {
+    pub(crate) step: BuildStep,
+    pub(crate) match_count: u32,
+    pub(crate) is_protected_upgrade: bool,
+    pub(crate) directly_owned: bool,
+}
+
+pub(crate) fn score_timed_candidate(
+    repo: &dyn ItemMetaRepository,
+    stat: HeroItemStat,
+    enemies: &[Option<HeroId>; TEAM_SIZE],
+    owned_items: &[ItemId],
+    is_protected_upgrade: bool,
+) -> ScoredCandidate {
+    let directly_owned = owned_items.contains(&stat.item_id);
+    let satisfied = is_item_owned_or_upgraded(repo, stat.item_id, owned_items);
+    let (owned_components, total_components) =
+        count_owned_components(repo, stat.item_id, owned_items);
+    let component_bonus = if !satisfied && total_components > 0 {
+        0.06 * (owned_components as f32 / total_components as f32)
+    } else {
+        0.0
+    };
+
+    let (matching_enemy_traits, counter_trait) =
+        evaluate_enemy_counter_traits(stat.item_id, enemies);
+    let counter_bonus = 0.09 * (matching_enemy_traits as f32);
+    let upgrade_bonus = if is_protected_upgrade {
+        UPGRADE_CHAIN_BONUS
+    } else {
+        0.0
+    };
+
+    let shrunk_wr = (stat.win_count as f32 + 60.0 * 0.50) / (stat.match_count as f32 + 60.0);
+    let volume_score = 0.06 * (1.0 + stat.match_count as f32).ln();
+    let score = shrunk_wr + volume_score + component_bonus + counter_bonus + upgrade_bonus;
+
+    let step_phase = if is_early_boots(stat.item_id) && stat.avg_time_mins <= 16.0 {
+        ItemPhase::Early
+    } else {
+        stat.phase
+    };
+    ScoredCandidate {
+        step: BuildStep {
+            item_id: stat.item_id,
+            phase: step_phase,
+            avg_time_mins: stat.avg_time_mins,
+            score,
+            owned: satisfied,
+            owned_components,
+            total_components,
+            counter_trait,
+            variants: Vec::new(),
+        },
+        match_count: stat.match_count,
+        is_protected_upgrade,
+        directly_owned,
+    }
+}
 
 /// Pure, deterministic item-build recommender combining empirical role/bracket item stats,
 /// component completion state, and patch-versioned enemy counter-trait bonuses.
@@ -229,63 +289,12 @@ pub fn recommend_item_build(
         }
     }
 
-    struct ScoredCandidate {
-        step: BuildStep,
-        match_count: u32,
-        is_protected_upgrade: bool,
-        directly_owned: bool,
-    }
-
     // Score each timed progression candidate (`Early`, `Core`, `Late`) deterministically.
     let mut scored: Vec<ScoredCandidate> = timed_core_stats
         .into_iter()
         .map(|stat| {
-            let directly_owned = owned_items.contains(&stat.item_id);
-            let satisfied = is_item_owned_or_upgraded(repo, stat.item_id, owned_items);
-            let (owned_components, total_components) =
-                count_owned_components(repo, stat.item_id, owned_items);
-            let component_bonus = if !satisfied && total_components > 0 {
-                0.06 * (owned_components as f32 / total_components as f32)
-            } else {
-                0.0
-            };
-
-            let (matching_enemy_traits, counter_trait) =
-                evaluate_enemy_counter_traits(stat.item_id, enemies);
-            let counter_bonus = 0.09 * (matching_enemy_traits as f32);
             let is_protected_upgrade = protected_upgrade_ids.contains(&stat.item_id);
-            let upgrade_bonus = if is_protected_upgrade {
-                UPGRADE_CHAIN_BONUS
-            } else {
-                0.0
-            };
-
-            let shrunk_wr =
-                (stat.win_count as f32 + 60.0 * 0.50) / (stat.match_count as f32 + 60.0);
-            let volume_score = 0.06 * (1.0 + stat.match_count as f32).ln();
-            let score = shrunk_wr + volume_score + component_bonus + counter_bonus + upgrade_bonus;
-
-            let step_phase = if is_early_boots(stat.item_id) && stat.avg_time_mins <= 16.0 {
-                ItemPhase::Early
-            } else {
-                stat.phase
-            };
-            ScoredCandidate {
-                step: BuildStep {
-                    item_id: stat.item_id,
-                    phase: step_phase,
-                    avg_time_mins: stat.avg_time_mins,
-                    score,
-                    owned: satisfied,
-                    owned_components,
-                    total_components,
-                    counter_trait,
-                    variants: Vec::new(),
-                },
-                match_count: stat.match_count,
-                is_protected_upgrade,
-                directly_owned,
-            }
+            score_timed_candidate(repo, stat, enemies, owned_items, is_protected_upgrade)
         })
         .collect();
 
@@ -455,6 +464,22 @@ pub fn recommend_item_build(
             remainder.push(cand);
         }
     }
+
+    // Backfill sparse role-specific builds (< 2 surviving non-boot Late primary steps) across
+    // ordered fallback tiers AFTER role primary selection so role priorities and Core steps stay intact.
+    crate::item_backfill::backfill_sparse_late_steps(
+        repo,
+        hero_id,
+        role,
+        bracket,
+        enemies,
+        owned_items,
+        &starting_items,
+        max_mc,
+        &mut steps,
+        &mut remainder,
+        &mut deferred_aghs_blessing,
+    );
 
     // Only surface unowned Aghanim's Blessing when Aghanim's Scepter is a shown primary step;
     // if Scepter was absorbed into a competing slot or demoted to remainder, keep Blessing deferred.
@@ -711,7 +736,7 @@ fn effective_step_time(step: &BuildStep, game_mins: f32) -> f32 {
 }
 
 #[inline]
-const fn phase_primary_cap(phase: ItemPhase) -> usize {
+pub(crate) const fn phase_primary_cap(phase: ItemPhase) -> usize {
     match phase {
         ItemPhase::Late => 4,
         _ => 2,
@@ -727,7 +752,7 @@ const fn variant_epsilon(phase: ItemPhase) -> f32 {
 }
 
 #[inline]
-fn is_phase_filler(phase: ItemPhase, match_count: u32, phase_max_mc: u32) -> bool {
+pub(crate) fn is_phase_filler(phase: ItemPhase, match_count: u32, phase_max_mc: u32) -> bool {
     if phase_max_mc < 50 {
         return false;
     }
