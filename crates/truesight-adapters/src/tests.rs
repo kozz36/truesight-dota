@@ -9371,3 +9371,142 @@ fn sparse_role_backfill_handles_exhausted_tier_low_sample_noise_and_preserves_ro
         yasha_preserve_build.steps
     );
 }
+
+#[test]
+fn sparse_role_backfill_rejects_low_sample_tier_noise_and_defers_fallback_blessing() {
+    use crate::item_repo::SeededItemMetaRepository;
+    use truesight_core::domain::{Bracket, HeroId, HeroItemStat, ItemId, ItemPhase, Role};
+    use truesight_core::math::recommend_item_build;
+
+    let stat =
+        |item_id: u16, phase: ItemPhase, avg_time_mins: f32, mc: u32, wc: u32| HeroItemStat {
+            item_id: ItemId(item_id),
+            phase,
+            avg_time_mins,
+            match_count: mc,
+            win_count: wc,
+        };
+
+    // 1. P2 #1: STRATZ fallback has duplicate BKB (40,000 matches) + 1-match Satanic (156);
+    // OpenDota has Butterfly (139) + Eye of Skadi (160). Removing duplicate BKB must NOT drop
+    // the sample floor and let 1-match Satanic block reaching OpenDota.
+    let mut noise_repo = SeededItemMetaRepository::new();
+    noise_repo.custom_hero_stats.push((
+        HeroId(114),
+        Some(Role::Mid),
+        Some(Bracket::Legend),
+        vec![
+            stat(63, ItemPhase::Early, 6.5, 1200, 620),
+            stat(252, ItemPhase::Core, 15.5, 900, 480),
+            stat(116, ItemPhase::Late, 26.0, 1000, 520),
+        ],
+    ));
+    noise_repo.custom_hero_stats.push((
+        HeroId(114),
+        None,
+        Some(Bracket::Legend),
+        vec![
+            stat(116, ItemPhase::Late, 25.5, 40000, 21200),
+            stat(156, ItemPhase::Late, 37.0, 1, 1),
+        ],
+    ));
+    noise_repo.custom_hero_stats.push((
+        HeroId(114),
+        None,
+        None,
+        vec![
+            stat(139, ItemPhase::Late, 33.0, 400, 224),
+            stat(160, ItemPhase::Late, 29.0, 350, 196),
+        ],
+    ));
+
+    let noise_build = recommend_item_build(
+        &noise_repo,
+        HeroId(114),
+        Role::Mid,
+        Bracket::Legend,
+        &[None; 5],
+        &[],
+        0,
+    )
+    .expect("pre-dedup fallback noise rejection build should succeed");
+    assert!(
+        !noise_build.steps.iter().any(|s| {
+            s.item_id == ItemId(156) || s.variants.iter().any(|v| v.item_id == ItemId(156))
+        }),
+        "1-match Satanic (156) in duplicate-heavy STRATZ tier must be rejected: {:?}",
+        noise_build.steps
+    );
+    assert!(
+        [116, 139, 160]
+            .iter()
+            .all(|&id| noise_build.steps.iter().any(|s| s.item_id == ItemId(id))),
+        "must reject 1-match Satanic and reach OpenDota tier (BKB 116, Butterfly 139, Skadi 160): {:?}",
+        noise_build.steps
+    );
+
+    // 2. P2 #2: Owned primary Aghanim's Scepter (108) + fallback Aghanim's Blessing (271)
+    // and Eye of Skadi (160) in same-bracket STRATZ tier. Unowned Blessing must defer and
+    // attach under Scepter variants instead of being discarded or promoted standalone.
+    let mut blessing_repo = SeededItemMetaRepository::new();
+    blessing_repo.custom_hero_stats.push((
+        HeroId(114),
+        Some(Role::Mid),
+        Some(Bracket::Legend),
+        vec![
+            stat(63, ItemPhase::Early, 6.5, 1200, 620),
+            stat(252, ItemPhase::Core, 15.5, 900, 480),
+            stat(108, ItemPhase::Late, 27.0, 1000, 540),
+        ],
+    ));
+    blessing_repo.custom_hero_stats.push((
+        HeroId(114),
+        None,
+        Some(Bracket::Legend),
+        vec![
+            stat(271, ItemPhase::Late, 38.0, 1200, 720),
+            stat(160, ItemPhase::Late, 29.0, 34000, 19000),
+        ],
+    ));
+
+    let blessing_build = recommend_item_build(
+        &blessing_repo,
+        HeroId(114),
+        Role::Mid,
+        Bracket::Legend,
+        &[None; 5],
+        &[ItemId(108)],
+        1620,
+    )
+    .expect("fallback Blessing deferral build should succeed");
+    let scepter_step = blessing_build
+        .steps
+        .iter()
+        .find(|s| s.item_id == ItemId(108))
+        .expect("owned Aghanim's Scepter (108) must be present as primary Late step");
+    assert!(scepter_step.owned);
+    assert!(
+        scepter_step
+            .variants
+            .iter()
+            .any(|v| v.item_id == ItemId(271)),
+        "fallback Aghanim's Blessing (271) must attach as variant under Scepter (108): {:?}",
+        scepter_step.variants
+    );
+    assert!(
+        !blessing_build
+            .steps
+            .iter()
+            .any(|s| s.item_id == ItemId(271)),
+        "Aghanim's Blessing (271) must NOT appear as standalone primary step: {:?}",
+        blessing_build.steps
+    );
+    assert!(
+        blessing_build
+            .steps
+            .iter()
+            .any(|s| s.item_id == ItemId(160)),
+        "Eye of Skadi (160) must fill standalone Late step alongside Scepter (108): {:?}",
+        blessing_build.steps
+    );
+}

@@ -475,8 +475,10 @@ pub fn recommend_item_build(
         enemies,
         owned_items,
         &starting_items,
+        max_mc,
         &mut steps,
         &mut remainder,
+        &mut deferred_aghs_blessing,
     );
 
     // Only surface unowned Aghanim's Blessing when Aghanim's Scepter is a shown primary step;
@@ -770,8 +772,10 @@ fn backfill_sparse_late_steps(
     enemies: &[Option<HeroId>; TEAM_SIZE],
     owned_items: &[ItemId],
     starting_items: &[ItemId],
+    role_max_mc: u32,
     steps: &mut Vec<BuildStep>,
     remainder: &mut Vec<ScoredCandidate>,
+    deferred_aghs_blessing: &mut Option<ScoredCandidate>,
 ) {
     let surviving_non_boot_late = |cur_steps: &[BuildStep]| {
         cur_steps
@@ -787,6 +791,7 @@ fn backfill_sparse_late_steps(
         if surviving_non_boot_late(steps) >= 2 {
             break;
         }
+        let mut raw_tier_max_mc = 0_u32;
         let mut deduped: Vec<HeroItemStat> = Vec::with_capacity(tier.len());
         for stat in tier {
             if stat.phase != ItemPhase::Late || is_any_boots(stat.item_id) || stat.item_id.0 == 29 {
@@ -812,6 +817,9 @@ fn backfill_sparse_late_steps(
             {
                 continue;
             }
+            // Track pre-deduplication tier sample peak before dropping already-present duplicates
+            // so removing e.g. BKB does not collapse the noise floor for remaining rows.
+            raw_tier_max_mc = raw_tier_max_mc.max(stat.match_count);
             let already_present = starting_items.contains(&stat.item_id)
                 || steps.iter().any(|s| {
                     s.item_id == stat.item_id
@@ -833,24 +841,33 @@ fn backfill_sparse_late_steps(
             }
         }
 
+        let sample_ref_mc = raw_tier_max_mc.max(role_max_mc);
+        if sample_ref_mc >= 50 {
+            let min_mc = ((sample_ref_mc as f32 * 0.025).ceil() as u32).clamp(8, 25);
+            deduped.retain(|s| owned_items.contains(&s.item_id) || s.match_count >= min_mc);
+        }
+
         let has_scepter =
             steps.iter().any(|s| s.item_id.0 == 108) || deduped.iter().any(|s| s.item_id.0 == 108);
-        deduped
-            .retain(|s| owned_items.contains(&s.item_id) || !(has_scepter && s.item_id.0 == 271));
-
-        let tier_max_mc = deduped.iter().map(|s| s.match_count).max().unwrap_or(0);
-        if tier_max_mc >= 50 {
-            let min_mc = ((tier_max_mc as f32 * 0.025).ceil() as u32).clamp(8, 25);
-            if deduped
-                .iter()
-                .any(|s| owned_items.contains(&s.item_id) || s.match_count >= min_mc)
-            {
-                deduped.retain(|s| owned_items.contains(&s.item_id) || s.match_count >= min_mc);
+        if has_scepter
+            && !owned_items.contains(&ItemId(271))
+            && let Some(pos) = deduped.iter().position(|s| s.item_id.0 == 271)
+        {
+            let blessing = deduped.remove(pos);
+            if deferred_aghs_blessing.is_none() {
+                *deferred_aghs_blessing = Some(score_timed_candidate(
+                    repo,
+                    blessing,
+                    enemies,
+                    owned_items,
+                    false,
+                ));
             }
         }
+
         deduped.retain(|s| {
             owned_items.contains(&s.item_id)
-                || !is_phase_filler(ItemPhase::Late, s.match_count, tier_max_mc)
+                || !is_phase_filler(ItemPhase::Late, s.match_count, raw_tier_max_mc)
         });
         if deduped.is_empty() {
             continue;
